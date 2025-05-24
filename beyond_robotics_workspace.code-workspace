@@ -1,0 +1,15 @@
+{
+  "folders": [
+    {
+      "path": "./beyond_robotics_working"
+    }
+  ],
+  "settings": {
+    "C_Cpp.default.configurationProvider": "ms-vscode.vscode-platformio-ide"
+  },
+  "extensions": {
+    "recommendations": [
+      "platformio.platformio-ide"
+    ]
+  }
+}
