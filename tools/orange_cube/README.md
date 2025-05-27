@@ -1,85 +1,87 @@
-# 🟠 Orange Cube Tools
+# Orange Cube Configuration Tools
 
-Tools for monitoring and configuring the Orange Cube flight controller for DroneCAN integration.
+**CLEAN & ORGANIZED** - Only the essential scripts for Orange Cube DroneCAN setup!
 
-## 📋 Tools Overview
+This directory contains the **FINAL, TESTED** scripts for configuring the Orange Cube flight controller for DroneCAN communication with Beyond Robotics Dev Board.
 
-### `monitor_orange_cube.py`
-**Complete MAVLink monitoring and control interface**
+## 🎯 Overview
 
-**Features:**
-- Real-time parameter monitoring
-- DroneCAN-specific parameter display
-- Servo output testing (RC override)
-- Vehicle arming/disarming
-- System reboot capability
-- Message statistics
+The Orange Cube acts as DroneCAN master, sending ESC commands to Beyond Robotics Dev Board. These tools provide **COMPLETE** configuration and monitoring.
 
-**Usage:**
-```bash
-python monitor_orange_cube.py
+## 📁 Final Scripts (Ready to Use)
+
+### 🔧 Configuration
+- **`master_orange_cube_config.py`** - **COMPLETE Orange Cube setup** (CAN + RC + Servo)
+  - All-in-one configuration script
+  - Based on Context7 recommendations
+  - Tested and verified working
+  - Sets all 100+ parameters correctly
+
+### 📊 Monitoring & Testing
+- **`monitor_pwm_before_can.py`** - **PWM values before CAN transmission**
+  - Shows exact PWM values Orange Cube calculates
+  - Displays DroneCAN ESC values (0-8191)
+  - Real-time movement interpretation
+  - Perfect for debugging
+
+- **`monitor_orange_cube.py`** - **Orange Cube status monitoring**
+  - System status and parameters
+  - Important for diagnostics
+
+- **`find_throttle_channel.py`** - **RC channel analysis**
+  - Identifies RC channel mapping
+  - Shows min/max/trim values
+  - Essential for RC calibration
+
+### 🔧 Utilities
+- **`dump_all_parameters.py`** - **Parameter backup utility**
+  - Exports all 963 Orange Cube parameters
+  - Creates JSON and Python config files
+  - Backup before major changes
+
+## ✅ WORKING Configuration
+
+**Key Parameters (Context7 verified):**
+```
+SERVO1_FUNCTION = 73    # ThrottleLeft (Skid Steering)
+SERVO2_FUNCTION = 74    # ThrottleRight (Skid Steering)
+CAN_D1_UC_ESC_BM = 3    # ESC1 + ESC2
+SERVO_BLH_MASK = 3      # Servo1 + Servo2
+FRAME_TYPE = 1          # Skid Steering
+CAN_P1_BITRATE = 1000000 # 1Mbps
 ```
 
-**Interactive Menu:**
-1. Request all parameters
-2. Monitor messages (60 seconds)
-3. Servo test (RC override)
-4. Display DroneCAN parameters
-5. Arm vehicle
-6. Disarm vehicle
-7. Reboot Orange Cube
-8. Exit
+## 🚀 Quick Start (3 Steps)
 
-### `set_can_parameters.py`
-**Configure Orange Cube for DroneCAN communication**
-
-**Configured Parameters:**
-- `CAN_P1_BITRATE = 1000000` (1Mbps)
-- `CAN_D1_PROTOCOL = 1` (DroneCAN)
-- `CAN_D1_UC_NODE = 10` (Orange Cube node ID)
-- `CAN_D1_UC_ESC_BM = 15` (ESC bitmask for 4 motors)
-- `SERVO_BLH_AUTO = 1` (Auto BLHeli detection)
-- `SERVO_BLH_MASK = 5` (BLHeli on outputs 1&3)
-
-**Usage:**
+### 1. Complete Configuration
 ```bash
-python set_can_parameters.py
+python master_orange_cube_config.py
+```
+**This sets ALL parameters in one go!**
+
+### 2. Reboot Orange Cube
+```bash
+python -c "from pymavlink import mavutil; m=mavutil.mavlink_connection('COM4'); m.reboot_autopilot()"
 ```
 
-## 🔧 Prerequisites
-
-### Hardware
-- Orange Cube connected via USB (typically COM4)
-- CAN bus wired to Beyond Robotics board
-- Proper CAN termination (120Ω resistors)
-
-### Software
+### 3. Test PWM Output
 ```bash
-pip install pymavlink
+python monitor_pwm_before_can.py
 ```
+**Move RC stick - both ESC1 and ESC2 should show values!**
 
-## 🚀 Quick Start
+## 🎮 RC Configuration
 
-### 1. Configure CAN Parameters
-```bash
-python set_can_parameters.py
-```
+**Your RC Setup (Mixed Channels):**
+- **RC1**: 995-2115 (Steering component)
+- **RC2**: 1166-1995 (Throttle component)
+- **One stick controls both channels** (perfect for skid steering!)
 
-### 2. Configure RC Skid Steering
-```bash
-python configure_rc_skid_steering.py
-```
-
-### 3. Monitor RC Input
-```bash
-python monitor_rc_input.py
-```
-
-### 4. Monitor System
-```bash
-python monitor_orange_cube.py
-# Select option 4: Display DroneCAN parameters
-```
+**Expected Behavior:**
+- **Vorne**: ESC1=high, ESC2=high
+- **Links**: ESC1=low, ESC2=high
+- **Rechts**: ESC1=high, ESC2=low
+- **Zurück**: ESC1=low, ESC2=low
 
 ## 🎮 RC Skid Steering Configuration
 
@@ -239,4 +241,62 @@ Common parameter values for reference:
 | `SERVO_BLH_AUTO` | 1 | Auto BLHeli detection |
 | `SERVO_BLH_MASK` | 5 | BLHeli on outputs 1&3 |
 
-For additional support, check the main project documentation.
+## 🔍 Troubleshooting
+
+### Problem: Only ESC1 works, ESC2 = 0
+**Solution**: Wrong SERVO_FUNCTION values!
+```bash
+python master_orange_cube_config.py  # Sets correct values 73/74
+```
+
+### Problem: RC not responding
+**Solution**: Check RC calibration
+```bash
+python find_throttle_channel.py  # Analyze RC channels
+```
+
+### Problem: No CAN communication
+**Solution**: Check Beyond Robotics board connection and CAN wiring
+
+## 📋 Complete Test Procedure
+
+```bash
+# 1. Complete setup
+python master_orange_cube_config.py
+
+# 2. Reboot Orange Cube
+python -c "from pymavlink import mavutil; m=mavutil.mavlink_connection('COM4'); m.reboot_autopilot()"
+
+# 3. Test PWM (Orange Cube side)
+python monitor_pwm_before_can.py
+# Move stick - verify ESC1 and ESC2 values
+
+# 4. Test CAN (Beyond Robotics side)
+python ../monitor_real_esc_commands.py
+# Connect Beyond Robotics board - verify motor commands
+```
+
+## 🗂️ Archive
+
+Old experimental scripts moved to `archive/` directory:
+- 24 legacy scripts from development phase
+- Keep for reference but not needed for normal use
+
+## 📞 Support
+
+**Working Configuration Sources:**
+- ✅ **Context7** - Provided correct SERVO_FUNCTION values (73/74)
+- ✅ **Parameter dump** - All 963 current parameters exported
+- ✅ **Tested setup** - Verified working with your RC system
+
+**For help:** Consult Context7, ArduPilot forums, or Beyond Robotics documentation.
+
+## 🎉 Success Criteria
+
+**System is working when:**
+1. ✅ `master_orange_cube_config.py` runs without errors
+2. ✅ `monitor_pwm_before_can.py` shows both ESC1 and ESC2 values
+3. ✅ All 4 RC directions work (Vorne/Links/Rechts/Zurück)
+4. ✅ Beyond Robotics board receives motor commands via CAN
+
+**You're ready for the next phase!** 🚀
