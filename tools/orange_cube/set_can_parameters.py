@@ -37,9 +37,9 @@ CAN_PARAMETERS = {
     'SERVO_BLH_MASK': 3,      # BlHeli-Mask auf 3 setzen (Servos 1 und 2)
     'SERVO_BLH_AUTO': 1,      # Automatische Erkennung aktivieren
 
-    # Servo-Funktionen für DroneCAN ESC (2-Kanal Setup)
-    'SERVO1_FUNCTION': 33,    # Motor1 (DroneCAN ESC)
-    'SERVO2_FUNCTION': 34,    # Motor2 (DroneCAN ESC)
+    # Servo-Funktionen für Skid Steering (2-Kanal Setup)
+    'SERVO1_FUNCTION': 73,    # ThrottleLeft (Skid Steering)
+    'SERVO2_FUNCTION': 74,    # ThrottleRight (Skid Steering)
 
     # Logging im nicht-armierten Zustand
     'LOG_DISARMED': 1,        # Logging auch im nicht-armierten Zustand

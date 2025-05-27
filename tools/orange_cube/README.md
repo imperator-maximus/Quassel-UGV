@@ -65,13 +65,66 @@ pip install pymavlink
 python set_can_parameters.py
 ```
 
-### 2. Monitor System
+### 2. Configure RC Skid Steering
+```bash
+python configure_rc_skid_steering.py
+```
+
+### 3. Monitor RC Input
+```bash
+python monitor_rc_input.py
+```
+
+### 4. Monitor System
 ```bash
 python monitor_orange_cube.py
 # Select option 4: Display DroneCAN parameters
 ```
 
-### 3. Test Servo Outputs
+## 🎮 RC Skid Steering Configuration
+
+### `configure_rc_skid_steering.py`
+**Configure Orange Cube for RC remote control with skid steering**
+
+**Configured Parameters:**
+- **RC Mapping**: Steering on Channel 1, Throttle on Channel 3
+- **Skid Steering**: `SKID_STEER_OUT = 1`, `SKID_STEER_IN = 1`
+- **Servo Functions**: `SERVO1_FUNCTION = 73` (ThrottleLeft), `SERVO2_FUNCTION = 74` (ThrottleRight)
+- **RC Calibration**: Standard 1000-2000μs range with 1500μs neutral
+- **Failsafe**: Configured for safe operation
+
+### `monitor_rc_input.py`
+**Real-time RC input monitoring and skid steering visualization**
+
+**Features:**
+- Live RC channel display (Channels 1-4)
+- Skid steering calculation preview
+- Servo output monitoring
+- DroneCAN ESC status indication
+
+**Usage:**
+```bash
+python monitor_rc_input.py
+# Move RC sticks to see real-time values
+```
+
+### `test_rc_skid_steering.py`
+**Automated testing of RC skid steering configuration**
+
+**Test Modes:**
+- `--test patterns`: Test various skid steering movement patterns
+- `--test calibration`: Test RC calibration with extreme values
+- `--test monitor`: Monitor servo outputs for 15 seconds
+- `--test all`: Run all tests (default)
+
+**Usage:**
+```bash
+python test_rc_skid_steering.py
+# or specific test:
+python test_rc_skid_steering.py --test patterns
+```
+
+### 5. Test Servo Outputs
 ```bash
 # In monitor_orange_cube.py menu:
 # Select option 3: Servo test

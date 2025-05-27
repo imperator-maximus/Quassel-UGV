@@ -196,7 +196,37 @@ def main():
         choice = input("Wählen Sie eine Option: ")
 
         if choice == '1':
-            request_parameters(master)
+            # Alle Parameter anfordern und anzeigen
+            print("Fordere ALLE Parameter an...")
+            master.mav.param_request_list_send(master.target_system, master.target_component)
+
+            # Parameter empfangen und anzeigen
+            start_time = time.time()
+            all_params = {}
+            param_count = 0
+
+            print("Empfange Parameter (30 Sekunden)...")
+            while time.time() - start_time < 30:
+                msg = master.recv_match(type='PARAM_VALUE', blocking=True, timeout=0.5)
+                if msg is not None:
+                    param_id = msg.param_id.decode('utf-8') if hasattr(msg.param_id, 'decode') else msg.param_id
+                    param_id = param_id.rstrip('\x00')  # Null-Bytes entfernen
+                    all_params[param_id] = msg.param_value
+                    param_count += 1
+                    print(f"Parameter: {param_id} = {msg.param_value}")
+
+            print(f"\n✅ {param_count} Parameter empfangen")
+
+            # Nach wichtigen SBUS/Servo-Parametern suchen
+            important_params = ['BRD_PWM_VOLT_SEL', 'BRD_SERVO_VOLT', 'SERIAL1_PROTOCOL',
+                              'SERIAL2_PROTOCOL', 'SERIAL8_PROTOCOL', 'RC_PROTOCOLS']
+
+            print("\n🔍 Wichtige SBUS/Servo-Parameter:")
+            for param in important_params:
+                if param in all_params:
+                    print(f"  ✅ {param} = {all_params[param]}")
+                else:
+                    print(f"  ❌ {param} = NICHT GEFUNDEN")
         elif choice == '2':
             monitor_messages(master)
         elif choice == '3':
