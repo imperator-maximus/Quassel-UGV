@@ -16,7 +16,7 @@
 // ============================================================================
 
 /// DroneCAN Node ID (must be unique on the network)
-#define DRONECAN_NODE_ID 25
+#define DRONECAN_NODE_ID 10
 
 /// DroneCAN Node Name
 #define DRONECAN_NODE_NAME "Beyond Robotix Motor Controller"

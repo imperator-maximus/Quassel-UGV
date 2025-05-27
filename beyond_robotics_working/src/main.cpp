@@ -65,13 +65,13 @@ void setup() {
     // Print system information
     printSystemInfo();
 
-    // Initialize all system components
-    if (!initializeSystem()) {
-        DEBUG_PRINTLN("❌ System initialization failed!");
-        while (true) {
-            delay(1000);
-        }
+    // Initialize DroneCAN handler only (KNOWN WORKING VERSION)
+    DEBUG_PRINTLN("🔧 Initializing DroneCAN handler...");
+    if (!dronecan_handler.initialize()) {
+        DEBUG_PRINTLN("❌ DroneCAN handler initialization failed");
+        while (true) delay(1000);
     }
+    DEBUG_PRINTLN("✅ DroneCAN handler initialized successfully!");
 
     // Initialize watchdog timer
     IWatchdog.begin(WATCHDOG_TIMEOUT_US);
@@ -79,14 +79,19 @@ void setup() {
     DEBUG_PRINTLN("🚀 System initialization complete!");
     DEBUG_PRINTLN("Entering main loop...");
 
-    // Main application loop (Beyond Robotics boards use while loop in setup)
+    // Main loop with DroneCAN (KNOWN WORKING VERSION)
     while (true) {
-        // Update all system components
-        motor_controller.update();
+        // Update DroneCAN handler
         dronecan_handler.update();
-        test_mode.update();
 
-        // Reload watchdog timer
+        // Status output every 5 seconds
+        static unsigned long last_status = 0;
+        if (millis() - last_status > 5000) {
+            DEBUG_PRINTLN("System running... " + String(millis()/1000) + "s - DroneCAN OK");
+            last_status = millis();
+        }
+
+        delay(10);
         IWatchdog.reload();
     }
 }

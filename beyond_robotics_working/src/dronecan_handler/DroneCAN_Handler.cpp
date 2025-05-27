@@ -126,7 +126,7 @@ void DroneCAN_Handler::sendBatteryInfo() {
 
 void DroneCAN_Handler::printStatus() const {
     DEBUG_PRINT("DroneCAN Node ID: ");
-    DEBUG_PRINT(dronecan_.getParameter("NODEID"));
+    DEBUG_PRINT(DRONECAN_NODE_ID);
     DEBUG_PRINT(", Battery messages sent: ");
     DEBUG_PRINTLN(battery_debug_counter_);
 }
