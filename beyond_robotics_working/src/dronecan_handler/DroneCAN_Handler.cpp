@@ -154,13 +154,18 @@ void DroneCAN_Handler::handleESCCommand(CanardRxTransfer* transfer) {
     uavcan_equipment_esc_RawCommand pkt{};
     uavcan_equipment_esc_RawCommand_decode(transfer, &pkt);
 
-    // DEBUG: Print received ESC command
-    DEBUG_PRINT("🎮 ESC Command received! Motors: ");
-    for (uint8_t i = 0; i < pkt.cmd.len && i < 4; i++) {
-        DEBUG_PRINT(pkt.cmd.data[i]);
-        if (i < pkt.cmd.len - 1) DEBUG_PRINT(", ");
+    // DEBUG: Print received ESC command (limited to every 1 second to prevent serial overflow)
+    static uint32_t last_debug_time = 0;
+    uint32_t current_time = millis();
+    if (current_time - last_debug_time >= 1000) {  // Only print every 1 second
+        DEBUG_PRINT("🎮 ESC Command received! Motors: ");
+        for (uint8_t i = 0; i < pkt.cmd.len && i < 4; i++) {
+            DEBUG_PRINT(pkt.cmd.data[i]);
+            if (i < pkt.cmd.len - 1) DEBUG_PRINT(", ");
+        }
+        DEBUG_PRINTLN("");
+        last_debug_time = current_time;
     }
-    DEBUG_PRINTLN("");
 
     // Forward command to motor controller
     motor_controller_.setMotorCommands(pkt.cmd.data, pkt.cmd.len);
