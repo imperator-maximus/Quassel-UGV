@@ -79,19 +79,20 @@ void setup() {
     DEBUG_PRINTLN("🚀 System initialization complete!");
     DEBUG_PRINTLN("Entering main loop...");
 
-    // Main loop with DroneCAN (KNOWN WORKING VERSION)
+    // Main loop with DroneCAN (Beyond Robotics compatible)
     while (true) {
+        const uint32_t now = millis();
+
         // Update DroneCAN handler
         dronecan_handler.update();
 
         // Status output every 5 seconds
         static unsigned long last_status = 0;
-        if (millis() - last_status > 5000) {
-            DEBUG_PRINTLN("System running... " + String(millis()/1000) + "s - DroneCAN OK");
-            last_status = millis();
+        if (now - last_status > 5000) {
+            DEBUG_PRINTLN("System running... " + String(now/1000) + "s - DroneCAN OK");
+            last_status = now;
         }
 
-        delay(10);
         IWatchdog.reload();
     }
 }
@@ -100,8 +101,7 @@ void setup() {
  * @brief Arduino loop function - not used (main loop is in setup())
  */
 void loop() {
-    // Not used - Beyond Robotics boards use while loop in setup()
-    // due to bootloader compatibility requirements
+    // Doesn't work coming from bootloader - use while loop in setup
 }
 
 // ============================================================================

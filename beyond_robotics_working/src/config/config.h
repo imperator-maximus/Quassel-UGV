@@ -28,8 +28,8 @@
 // MOTOR CONTROLLER CONFIGURATION
 // ============================================================================
 
-/// Number of motors/ESCs to control
-#define NUM_MOTORS 4
+/// Number of motors/ESCs to control (2-channel setup)
+#define NUM_MOTORS 2
 
 /// Motor control pins (Timer-capable pins on STM32L431)
 #define MOTOR_PIN_1 PA8
@@ -66,7 +66,7 @@
 // ============================================================================
 
 /// Enable/disable test mode (comment out to disable)
-#define ENABLE_TEST_MODE
+// #define ENABLE_TEST_MODE  // DEAKTIVIERT für Produktion
 
 /// Test ESC command interval (milliseconds)
 #define TEST_ESC_INTERVAL_MS 3000
@@ -101,9 +101,9 @@ extern const std::vector<DroneCAN::parameter> DRONECAN_PARAMETERS;
 // HARDWARE PIN MAPPING
 // ============================================================================
 
-/// Motor pin array for easy iteration
+/// Motor pin array for easy iteration (2-channel setup)
 static const uint8_t MOTOR_PINS[NUM_MOTORS] = {
-    MOTOR_PIN_1, MOTOR_PIN_2, MOTOR_PIN_3, MOTOR_PIN_4
+    MOTOR_PIN_1, MOTOR_PIN_2  // Only using 2 motors
 };
 
 #endif // CONFIG_H

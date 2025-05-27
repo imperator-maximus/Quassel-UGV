@@ -44,12 +44,13 @@ bool DroneCAN_Handler::initialize() {
     dronecan_.version_major = PROJECT_VERSION_MAJOR;
     dronecan_.version_minor = PROJECT_VERSION_MINOR;
 
-    // Initialize DroneCAN with callbacks and parameters
+    // Initialize DroneCAN with callbacks, parameters, and static Node ID
     dronecan_.init(
         onTransferReceived,
         shouldAcceptTransfer,
         DRONECAN_PARAMETERS,
-        DRONECAN_NODE_NAME
+        DRONECAN_NODE_NAME,
+        DRONECAN_NODE_ID
     );
 
     // Example parameter usage
@@ -152,6 +153,14 @@ bool DroneCAN_Handler::shouldAcceptTransfer(const CanardInstance* ins,
 void DroneCAN_Handler::handleESCCommand(CanardRxTransfer* transfer) {
     uavcan_equipment_esc_RawCommand pkt{};
     uavcan_equipment_esc_RawCommand_decode(transfer, &pkt);
+
+    // DEBUG: Print received ESC command
+    DEBUG_PRINT("🎮 ESC Command received! Motors: ");
+    for (uint8_t i = 0; i < pkt.cmd.len && i < 4; i++) {
+        DEBUG_PRINT(pkt.cmd.data[i]);
+        if (i < pkt.cmd.len - 1) DEBUG_PRINT(", ");
+    }
+    DEBUG_PRINTLN("");
 
     // Forward command to motor controller
     motor_controller_.setMotorCommands(pkt.cmd.data, pkt.cmd.len);

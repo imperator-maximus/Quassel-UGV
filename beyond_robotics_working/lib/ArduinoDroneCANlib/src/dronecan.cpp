@@ -3,11 +3,15 @@
 void DroneCAN::init(CanardOnTransferReception onTransferReceived,
                     CanardShouldAcceptTransfer shouldAcceptTransfer,
                     const std::vector<parameter>& param_list,
-                    const char* name)
+                    const char* name,
+                    uint8_t node_id_param)
 {
     CANInit(CAN_1000KBPS, 2);
 
     strncpy(this->node_name, name, sizeof(this->node_name));
+
+    // Set the node ID from parameter
+    this->node_id = node_id_param;
 
     canardInit(&canard,
                memory_pool,
@@ -19,6 +23,8 @@ void DroneCAN::init(CanardOnTransferReception onTransferReceived,
     if (node_id > 0)
     {
         canardSetLocalNodeID(&canard, node_id);
+        Serial.print("Using static Node ID: ");
+        Serial.println(node_id);
     }
     else
     {
@@ -509,7 +515,7 @@ void DroneCAN::handle_begin_firmware_update(CanardRxTransfer *transfer)
     Serial.println("Update request received");
 
     auto *comms = (struct app_bootloader_comms *)0x20000000;
-    
+
     if (comms->magic != APP_BOOTLOADER_COMMS_MAGIC) {
         memset(comms, 0, sizeof(*comms));
     }
@@ -760,7 +766,7 @@ void DroneCANonTransferReceived(DroneCAN &dronecan, CanardInstance *ins, CanardR
         }
         case UAVCAN_PROTOCOL_RESTARTNODE_ID:
         {
-            
+
             uavcan_protocol_RestartNodeResponse pkt{};
             pkt.ok = true;
             uint8_t buffer[UAVCAN_PROTOCOL_RESTARTNODE_RESPONSE_MAX_SIZE];

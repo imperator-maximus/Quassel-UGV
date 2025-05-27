@@ -51,13 +51,13 @@ public:
         float max_value;
     };
 
-    std::vector<parameter> parameters; 
+    std::vector<parameter> parameters;
 
     void set_parameters(const std::vector<parameter>& param_list) {
         parameters = param_list;  // Vector automatically handles resizing
     }
 
-    void init(CanardOnTransferReception onTransferReceived, CanardShouldAcceptTransfer shouldAcceptTransfer, const std::vector<parameter>& param_list, const char* name);
+    void init(CanardOnTransferReception onTransferReceived, CanardShouldAcceptTransfer shouldAcceptTransfer, const std::vector<parameter>& param_list, const char* name, uint8_t node_id = 0);
     int node_id = 0;
 
     CanardInstance canard;

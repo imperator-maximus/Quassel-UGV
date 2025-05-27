@@ -26,16 +26,20 @@ CAN_PARAMETERS = {
     # Benachrichtigungsrate erhöhen
     'CAN_D1_UC_NTF_RT': 100,  # Erhöht auf 100 Hz (war 20 Hz)
 
-    # ESC-Konfiguration
-    'CAN_D1_UC_ESC_BM': 5,    # ESC-Bitmask auf 5 setzen (ESCs 1 und 3)
+    # ESC-Konfiguration - 2-Kanal Setup (ESCs 1 und 2)
+    'CAN_D1_UC_ESC_BM': 3,    # ESC-Bitmask auf 3 setzen (ESCs 1 und 2)
 
-    # Servo-Konfiguration
-    'CAN_D1_UC_SRV_BM': 5,    # Servo-Bitmask auf 5 setzen (Servos 1 und 3)
+    # Servo-Konfiguration - 2-Kanal Setup (Servos 1 und 2)
+    'CAN_D1_UC_SRV_BM': 3,    # Servo-Bitmask auf 3 setzen (Servos 1 und 2)
     'CAN_D1_UC_SRV_RT': 100,  # Servo-Rate auf 100 Hz erhöhen (war 50 Hz)
 
-    # BlHeli-Konfiguration
-    'SERVO_BLH_MASK': 5,      # BlHeli-Mask auf 5 setzen (Servos 1 und 3)
+    # BlHeli-Konfiguration - 2-Kanal Setup (Servos 1 und 2)
+    'SERVO_BLH_MASK': 3,      # BlHeli-Mask auf 3 setzen (Servos 1 und 2)
     'SERVO_BLH_AUTO': 1,      # Automatische Erkennung aktivieren
+
+    # Servo-Funktionen für DroneCAN ESC (2-Kanal Setup)
+    'SERVO1_FUNCTION': 33,    # Motor1 (DroneCAN ESC)
+    'SERVO2_FUNCTION': 34,    # Motor2 (DroneCAN ESC)
 
     # Logging im nicht-armierten Zustand
     'LOG_DISARMED': 1,        # Logging auch im nicht-armierten Zustand
