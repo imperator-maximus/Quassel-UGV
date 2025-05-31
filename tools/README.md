@@ -10,9 +10,10 @@ tools/
 │   ├── monitor_orange_cube.py     # Complete monitoring & control
 │   ├── set_can_parameters.py      # CAN configuration
 │   └── README.md                  # Orange Cube tools guide
-├── dronecan/                      # DroneCAN testing tools  
+├── dronecan/                      # DroneCAN testing tools
 │   ├── send_dronecan_actuator_commands.py  # Send test commands
 │   └── README.md                  # DroneCAN tools guide
+├── wifi_tester.py                 # WiFi Bridge connectivity test
 └── README.md                      # This file
 ```
 
@@ -34,6 +35,12 @@ python send_dronecan_actuator_commands.py --port COM5
 ```bash
 cd tools/orange_cube
 python set_can_parameters.py
+```
+
+### WiFi Bridge Testing
+```bash
+cd tools
+python wifi_tester.py
 ```
 
 ## 📋 Prerequisites
@@ -93,6 +100,27 @@ python set_can_parameters.py
 python send_dronecan_actuator_commands.py --port COM5 --bitrate 1000000
 ```
 
+### WiFi Bridge Tools
+
+#### `wifi_tester.py`
+**Purpose**: Test WiFi Bridge connectivity to Orange Cube before Lua script upload
+**Features**:
+- UDP connection test (CRITICAL: Must use UDP, not TCP!)
+- Heartbeat verification
+- Parameter access test with proper Component ID handling
+- System status monitoring
+- Automatic fallback port testing
+
+**Usage**:
+```bash
+python wifi_tester.py
+```
+
+**Key Learning**: After 54 test scripts, the critical fix was:
+- ✅ **UDP Connection**: Use `udpin:0.0.0.0:14550` instead of TCP
+- ✅ **Component ID**: Use `MAV_COMP_ID_AUTOPILOT1` for parameter requests
+- ✅ **Firmware Bug**: Orange Cube WiFi Bridge had parameter storage issues
+
 ## 🔗 Integration Workflow
 
 ### 1. Configure Orange Cube
@@ -147,6 +175,23 @@ pip install dronecan
 - Check power supply (5V, adequate current)
 - Verify firmware compatibility
 - Try system reboot via monitor tool
+
+#### WiFi Bridge Connection Issues
+```
+❌ WiFi Verbindung fehlgeschlagen: strip arg must be None or str
+```
+**Solutions:**
+- ✅ **Use UDP**: Connection string must be `udpin:0.0.0.0:14550` (not TCP!)
+- ✅ **Component ID**: Use `MAV_COMP_ID_AUTOPILOT1` for parameter requests
+- ✅ **Parameter Decoding**: Handle both bytes and string param_id types
+- ✅ **Network**: Verify Orange Cube IP is reachable (ping 192.168.178.101)
+- ✅ **Port**: Test alternative ports 14551, 5760, 5761 if 14550 fails
+
+#### WiFi Bridge Parameter Storage Bug
+```
+Parameters not saved permanently
+```
+**Background**: Orange Cube WiFi Bridge firmware had a bug preventing permanent parameter storage, leading to 54 test scripts before finding the UDP solution.
 
 ## 📊 Expected Output
 
