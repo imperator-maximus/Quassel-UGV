@@ -5,6 +5,8 @@ Orange Cube RC Channel Finder
 Zeigt ALLE RC-Kanäle live an, um den echten Throttle-Kanal zu finden.
 Löst das Problem: Throttle ist wahrscheinlich auf Kanal 2 statt 3.
 
+UPDATED: Now supports both COM and WiFi connections via connection_config.py
+
 Author: Beyond Robotics Integration
 Date: 2024
 """
@@ -12,19 +14,12 @@ Date: 2024
 import time
 import sys
 from pymavlink import mavutil
+from connection_config import get_connection
 
-# Standard-Verbindungseinstellungen
-DEFAULT_CONNECTION = 'COM4'
-DEFAULT_BAUDRATE = 115200
-
-def connect_to_orange_cube(connection_string, baudrate):
+def connect_to_orange_cube():
     """Verbindung zum Orange Cube herstellen"""
-    print(f"🔌 Verbinde mit Orange Cube auf {connection_string}...")
-    
     try:
-        master = mavutil.mavlink_connection(connection_string, baud=baudrate)
-        master.wait_heartbeat()
-        print(f"✅ Verbindung hergestellt! System ID: {master.target_system}")
+        master = get_connection()
         return master
     except Exception as e:
         print(f"❌ Verbindung fehlgeschlagen: {e}")
@@ -92,7 +87,7 @@ def main():
     print()
     
     # Verbindung herstellen
-    connection = connect_to_orange_cube(DEFAULT_CONNECTION, DEFAULT_BAUDRATE)
+    connection = connect_to_orange_cube()
     if not connection:
         sys.exit(1)
     

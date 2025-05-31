@@ -2,22 +2,22 @@
 """
 Dump ALL Orange Cube Parameters
 Liest ALLE aktuellen Parameter aus und speichert sie für Master-Config-Script
+
+UPDATED: Now supports both COM and WiFi connections via connection_config.py
 """
 
 import time
 from pymavlink import mavutil
 import json
+from connection_config import get_connection
 
 def dump_all_parameters():
     print("🔍 Dumping ALL Orange Cube Parameters...")
     print("Das kann ein paar Minuten dauern...")
     
-    # Connect to Orange Cube
-    print("🔌 Connecting to Orange Cube...")
+    # Connect to Orange Cube (COM or WiFi)
     try:
-        connection = mavutil.mavlink_connection('COM4', baud=115200)
-        connection.wait_heartbeat()
-        print("✅ Connected to Orange Cube")
+        connection = get_connection()
     except Exception as e:
         print(f"❌ Connection failed: {e}")
         return

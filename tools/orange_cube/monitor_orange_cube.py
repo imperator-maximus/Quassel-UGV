@@ -2,28 +2,20 @@
 """
 Orange Cube Monitor - Überwacht die Aktivität eines Orange Cube über MAVLink
 und zeigt DroneCAN-bezogene Parameter und Nachrichten an.
+
+UPDATED: Now supports both COM and WiFi connections via connection_config.py
 """
 
 import time
 import sys
 from pymavlink import mavutil
 from pymavlink.dialects.v20 import ardupilotmega as mavlink
-
-# Verbindungseinstellungen
-connection_string = 'COM4'  # Ändern Sie dies auf den COM-Port, an dem der Orange Cube angeschlossen ist
-baud_rate = 57600
+from connection_config import get_connection
 
 def connect_to_autopilot():
     """Verbindung zum Autopiloten herstellen"""
-    print(f"Verbinde mit Orange Cube auf {connection_string}...")
     try:
-        # Verbindung herstellen
-        master = mavutil.mavlink_connection(connection_string, baud=baud_rate)
-
-        # Warten auf Heartbeat
-        print("Warte auf Heartbeat...")
-        master.wait_heartbeat()
-        print(f"Verbunden mit System: {master.target_system}, Komponente: {master.target_component}")
+        master = get_connection()
         return master
     except Exception as e:
         print(f"Fehler beim Verbinden: {e}")

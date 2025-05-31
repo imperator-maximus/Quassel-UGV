@@ -3,10 +3,13 @@
 Monitor PWM Values BEFORE CAN Transmission
 Shows the exact PWM values that Orange Cube calculates and sends over CAN
 These are the same values your Beyond Robotics Board should receive!
+
+UPDATED: Now supports both COM and WiFi connections via connection_config.py
 """
 
 import time
 from pymavlink import mavutil
+from connection_config import get_connection
 
 def monitor_pwm_values():
     print("=" * 70)
@@ -16,12 +19,9 @@ def monitor_pwm_values():
     print("Das sind EXAKT die Werte die dein Beyond Robotics Board bekommen sollte!")
     print("=" * 70)
 
-    # Connect to Orange Cube
-    print("🔌 Verbinde mit Orange Cube...")
+    # Connect to Orange Cube (COM or WiFi)
     try:
-        connection = mavutil.mavlink_connection('COM4', baud=115200)
-        connection.wait_heartbeat()
-        print("✅ Verbunden mit Orange Cube")
+        connection = get_connection()
     except Exception as e:
         print(f"❌ Verbindung fehlgeschlagen: {e}")
         return

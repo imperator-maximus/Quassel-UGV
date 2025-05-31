@@ -11,12 +11,14 @@ Features:
 - Skid Steering with mixed channel RC
 - RC calibration for your specific remote
 - All necessary parameters in ONE script
+- UPDATED: Now supports both COM and WiFi connections via connection_config.py
 
 Usage: python master_orange_cube_config.py
 """
 
 import time
 from pymavlink import mavutil
+from connection_config import get_connection
 
 # WORKING Configuration - tested and verified!
 MASTER_CONFIG = {
@@ -145,12 +147,9 @@ def configure_orange_cube():
     print("Based on Context7 recommendations and tested configuration")
     print("=" * 60)
 
-    # Connect to Orange Cube
-    print("🔌 Connecting to Orange Cube...")
+    # Connect to Orange Cube (COM or WiFi)
     try:
-        connection = mavutil.mavlink_connection('COM4', baud=115200)
-        connection.wait_heartbeat()
-        print("✅ Connected to Orange Cube")
+        connection = get_connection()
     except Exception as e:
         print(f"❌ Connection failed: {e}")
         return False
@@ -218,7 +217,7 @@ def configure_orange_cube():
     print(f"   💾 Parameters: PERMANENTLY SAVED!")
 
     print(f"\n📋 Next Steps:")
-    print(f"1. Reboot Orange Cube: python -c \"from pymavlink import mavutil; m=mavutil.mavlink_connection('COM4'); m.reboot_autopilot()\"")
+    print(f"1. Reboot Orange Cube: python -c \"from connection_config import get_connection; c=get_connection(verbose=False); c.reboot_autopilot()\"")
     print(f"2. Test PWM output: python monitor_pwm_before_can.py")
     print(f"3. Test with Beyond Robotics: python ../monitor_real_esc_commands.py")
     print(f"4. All 4 directions should work: Vorne, Links, Rechts, Zurück")
