@@ -32,9 +32,9 @@
 #define NUM_MOTORS 2
 
 /// Motor control pins (Timer-capable pins on STM32L431)
-/// PA8+PA9 using direct HAL TIM1 PWM (bypassing Servo library)
-#define MOTOR_PIN_1 PA8
-#define MOTOR_PIN_2 PA9
+/// EMERGENCY: Back to PA6/PA7 - HAL TIM1 causing crashes!
+#define MOTOR_PIN_1 PA6
+#define MOTOR_PIN_2 PA7
 #define MOTOR_PIN_3 PA10
 #define MOTOR_PIN_4 PA11
 

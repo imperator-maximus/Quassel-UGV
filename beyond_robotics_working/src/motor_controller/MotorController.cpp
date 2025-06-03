@@ -8,8 +8,8 @@
 
 #include "motor_controller/MotorController.h"
 
-// Global TIM1 handle for HAL PWM access
-TIM_HandleTypeDef htim1_global;
+// Static TIM1 handle for HAL PWM access (prevent memory issues)
+static TIM_HandleTypeDef htim1_global;
 
 MotorController::MotorController()
     : motors_armed_(false)
@@ -225,17 +225,13 @@ void MotorController::updateMotorOutputs() {
     for (int i = 0; i < NUM_MOTORS; i++) {
         uint16_t output_pwm = motors_armed_ ? motor_pwm_values_[i] : PWM_NEUTRAL;
 
-        // Debug PWM output every 5 seconds
-        if (now - last_pwm_debug >= 5000) {
-            DEBUG_PRINT("🔧 HAL PWM DEBUG: Motor ");
+        // Debug PWM output every 10 seconds (reduced frequency)
+        if (now - last_pwm_debug >= 10000) {
+            DEBUG_PRINT("🔧 PWM: M");
             DEBUG_PRINT(i + 1);
-            DEBUG_PRINT(" Pin ");
-            DEBUG_PRINT(MOTOR_PINS[i]);
-            DEBUG_PRINT(" TIM1_CH");
-            DEBUG_PRINT(i + 1);
-            DEBUG_PRINT(" = ");
+            DEBUG_PRINT("=");
             DEBUG_PRINT(output_pwm);
-            DEBUG_PRINTLN("μs");
+            DEBUG_PRINT("μs ");
         }
 
         // Use direct HAL TIM1 PWM instead of Servo library
