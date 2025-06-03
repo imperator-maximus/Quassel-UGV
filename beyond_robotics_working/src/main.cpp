@@ -65,13 +65,13 @@ void setup() {
     // Print system information
     printSystemInfo();
 
-    // Initialize DroneCAN handler only (KNOWN WORKING VERSION)
-    DEBUG_PRINTLN("🔧 Initializing DroneCAN handler...");
-    if (!dronecan_handler.initialize()) {
-        DEBUG_PRINTLN("❌ DroneCAN handler initialization failed");
+    // Initialize all system components (MOTOR CONTROLLER + DroneCAN)
+    DEBUG_PRINTLN("🔧 Initializing system components...");
+    if (!initializeSystem()) {
+        DEBUG_PRINTLN("❌ System initialization failed");
         while (true) delay(1000);
     }
-    DEBUG_PRINTLN("✅ DroneCAN handler initialized successfully!");
+    DEBUG_PRINTLN("✅ System initialization complete!");
 
     // Initialize watchdog timer
     IWatchdog.begin(WATCHDOG_TIMEOUT_US);
@@ -85,6 +85,9 @@ void setup() {
 
         // Update DroneCAN handler
         dronecan_handler.update();
+
+        // Update motor controller (PWM outputs)
+        motor_controller.update();
 
         // Status output every 5 seconds
         static unsigned long last_status = 0;
