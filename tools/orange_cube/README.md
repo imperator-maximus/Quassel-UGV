@@ -276,6 +276,68 @@ python ../monitor_real_esc_commands.py
 # Connect Beyond Robotics board - verify motor commands
 ```
 
+## 📤 Lua Script Upload (WiFi)
+
+### `upload_lua_via_wifi.py`
+**Upload Lua scripts to Orange Cube via WiFi Bridge using MAVLink FTP**
+
+**Features:**
+- WiFi Bridge integration (192.168.178.101:14550)
+- Automatic Lua parameter configuration
+- MAVFTP file upload
+- Test script creation
+- Robust error handling
+
+**Usage:**
+```bash
+# Upload hello world test script
+python upload_lua_via_wifi.py hello_world.lua
+
+# Upload neutral position fix
+python upload_lua_via_wifi.py neutral_fix.lua
+
+# Auto-create and upload test script
+python upload_lua_via_wifi.py
+```
+
+### `test_lua_upload.py`
+**Comprehensive test tool for Lua upload prerequisites**
+
+**Tests:**
+- WiFi Bridge connectivity
+- MAVFTP client functionality
+- Lua parameter availability
+- Directory structure access
+
+**Usage:**
+```bash
+python test_lua_upload.py
+```
+
+### `neutral_fix.lua`
+**Lua script to fix neutral position problem (1495μs → 1500μs)**
+
+**Features:**
+- RC neutral position correction
+- Deadband around neutral (±10μs)
+- Real-time PWM output correction
+- Status reporting to GCS
+
+**Problem solved:** RC stick neutral (1495μs) was output as 1000μs instead of 1500μs
+
+### Lua Upload Workflow
+```bash
+# 1. Test WiFi connection and MAVFTP
+python test_lua_upload.py
+
+# 2. Upload script
+python upload_lua_via_wifi.py neutral_fix.lua
+
+# 3. Monitor GCS for Lua messages
+# Orange Cube reboots automatically
+# Check Mission Planner/MAVProxy for script messages
+```
+
 ## 🗂️ Archive
 
 Old experimental scripts moved to `archive/` directory:
@@ -288,6 +350,7 @@ Old experimental scripts moved to `archive/` directory:
 - ✅ **Context7** - Provided correct SERVO_FUNCTION values (73/74)
 - ✅ **Parameter dump** - All 963 current parameters exported
 - ✅ **Tested setup** - Verified working with your RC system
+- ✅ **WiFi Bridge** - Lua script upload via MAVLink FTP
 
 **For help:** Consult Context7, ArduPilot forums, or Beyond Robotics documentation.
 
@@ -298,5 +361,6 @@ Old experimental scripts moved to `archive/` directory:
 2. ✅ `monitor_pwm_before_can.py` shows both ESC1 and ESC2 values
 3. ✅ All 4 RC directions work (Vorne/Links/Rechts/Zurück)
 4. ✅ Beyond Robotics board receives motor commands via CAN
+5. ✅ Lua scripts upload successfully via WiFi Bridge
 
 **You're ready for the next phase!** 🚀
