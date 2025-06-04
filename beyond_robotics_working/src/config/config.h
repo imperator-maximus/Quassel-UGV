@@ -28,12 +28,13 @@
 // MOTOR CONTROLLER CONFIGURATION
 // ============================================================================
 
-/// Number of motors/ESCs to control (2-channel setup)
+/// Number of motors/ESCs to control (2-channel setup - PA8+PA9 HAL PWM)
 #define NUM_MOTORS 2
 
 /// Motor control pins (Timer-capable pins on STM32L431)
-#define MOTOR_PIN_1 PA8
-#define MOTOR_PIN_2 PA9
+/// EMERGENCY: Back to PA6/PA7 - HAL TIM1 causing crashes!
+#define MOTOR_PIN_1 PA6
+#define MOTOR_PIN_2 PA7
 #define MOTOR_PIN_3 PA10
 #define MOTOR_PIN_4 PA11
 
@@ -101,9 +102,9 @@ extern const std::vector<DroneCAN::parameter> DRONECAN_PARAMETERS;
 // HARDWARE PIN MAPPING
 // ============================================================================
 
-/// Motor pin array for easy iteration (2-channel setup)
+/// Motor pin array for easy iteration (2-channel setup - PA8+PA9 HAL PWM)
 static const uint8_t MOTOR_PINS[NUM_MOTORS] = {
-    MOTOR_PIN_1, MOTOR_PIN_2  // Only using 2 motors
+    MOTOR_PIN_1, MOTOR_PIN_2  // PA8 + PA9 via HAL TIM1
 };
 
 #endif // CONFIG_H

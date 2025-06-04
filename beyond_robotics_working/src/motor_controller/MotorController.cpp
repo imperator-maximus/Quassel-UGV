@@ -8,6 +8,9 @@
 
 #include "motor_controller/MotorController.h"
 
+// Static TIM1 handle for HAL PWM access (prevent memory issues)
+static TIM_HandleTypeDef htim1_global;
+
 MotorController::MotorController()
     : motors_armed_(false)
     , last_command_time_(0)
@@ -25,27 +28,75 @@ MotorController::~MotorController() {
 
 bool MotorController::initialize() {
     DEBUG_PRINTLN("=== Motor Controller Initialization ===");
+    DEBUG_PRINTLN("🔧 PWM DIAGNOSTIC: Testing Servo.attach() for PA8/PA9...");
 
-    // Initialize each motor servo
+    // CRITICAL: Direct TIM1 PWM setup for PA9 (bypass Servo library)
+    DEBUG_PRINTLN("🔧 Direct TIM1 PWM setup for PA9 - bypassing Servo library...");
+
+    // Enable clocks
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_TIM1_CLK_ENABLE();
+
+    // Configure PA8 as TIM1_CH1 alternate function
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_8;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF1_TIM1;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    // Configure PA9 as TIM1_CH2 alternate function
+    GPIO_InitStruct.Pin = GPIO_PIN_9;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    // Configure TIM1 for 50Hz PWM (20ms period)
+    htim1_global.Instance = TIM1;
+    htim1_global.Init.Prescaler = 79;  // 80MHz / 80 = 1MHz
+    htim1_global.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim1_global.Init.Period = 19999;  // 1MHz / 20000 = 50Hz (20ms)
+    htim1_global.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim1_global.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+    HAL_TIM_PWM_Init(&htim1_global);
+
+    // Configure PWM channel 1 (PA8)
+    TIM_OC_InitTypeDef sConfigOC = {0};
+    sConfigOC.OCMode = TIM_OCMODE_PWM1;
+    sConfigOC.Pulse = 1500;  // 1.5ms pulse (neutral)
+    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+    HAL_TIM_PWM_ConfigChannel(&htim1_global, &sConfigOC, TIM_CHANNEL_1);
+
+    // Configure PWM channel 2 (PA9)
+    HAL_TIM_PWM_ConfigChannel(&htim1_global, &sConfigOC, TIM_CHANNEL_2);
+
+    // CRITICAL: TIM1 is Advanced Timer - needs Main Output Enable!
+    __HAL_TIM_MOE_ENABLE(&htim1_global);
+
+    // Start PWM on both channels
+    HAL_TIM_PWM_Start(&htim1_global, TIM_CHANNEL_1);  // PA8
+    HAL_TIM_PWM_Start(&htim1_global, TIM_CHANNEL_2);  // PA9
+
+    // Force immediate update
+    HAL_TIM_GenerateEvent(&htim1_global, TIM_EVENTSOURCE_UPDATE);
+
+    DEBUG_PRINTLN("🔧 TIM1 PWM started with MOE enabled - PA8+PA9 should work now!");
+    DEBUG_PRINTLN("🔧 PA8 should show ~0.25V for 1500μs PWM (TIM1_CH1)");
+    DEBUG_PRINTLN("🔧 PA9 should show ~0.25V for 1500μs PWM (TIM1_CH2)");
+
+    // Skip Servo.attach() - using direct HAL PWM
+    DEBUG_PRINTLN("✅ BYPASSING Servo.attach() - using direct TIM1 PWM");
+    DEBUG_PRINTLN("⚙️ Motor 1 initialized on PA8 (TIM1_CH1) via HAL");
+    DEBUG_PRINTLN("⚙️ Motor 2 initialized on PA9 (TIM1_CH2) via HAL");
+
+    // Set PWM values manually
     for (int i = 0; i < NUM_MOTORS; i++) {
-        if (!motors_[i].attach(MOTOR_PINS[i], PWM_MIN, PWM_MAX)) {
-            DEBUG_PRINT("❌ Failed to attach motor ");
-            DEBUG_PRINT(i + 1);
-            DEBUG_PRINT(" on pin ");
-            DEBUG_PRINTLN(MOTOR_PINS[i]);
-            return false;
-        }
-
-        // Set to neutral position
-        motors_[i].writeMicroseconds(PWM_NEUTRAL);
         motor_pwm_values_[i] = PWM_NEUTRAL;
-
-        DEBUG_PRINT(ICON_MOTOR " Motor ");
-        DEBUG_PRINT(i + 1);
-        DEBUG_PRINT(" initialized on pin ");
-        DEBUG_PRINTLN(MOTOR_PINS[i]);
     }
 
+    DEBUG_PRINTLN("📏 Measure voltages on PA8 and PA9 with multimeter");
+    DEBUG_PRINTLN("   Expected: ~0.25V for 1500μs PWM");
+    DEBUG_PRINTLN("   Problem: 0V indicates PWM not working despite successful attach");
     DEBUG_PRINTLN("✅ Motors initialized - waiting for ESC commands...");
     return true;
 }
@@ -168,8 +219,32 @@ void MotorController::checkSafetyTimeout() {
 }
 
 void MotorController::updateMotorOutputs() {
+    static uint32_t last_pwm_debug = 0;
+    uint32_t now = millis();
+
     for (int i = 0; i < NUM_MOTORS; i++) {
         uint16_t output_pwm = motors_armed_ ? motor_pwm_values_[i] : PWM_NEUTRAL;
-        motors_[i].writeMicroseconds(output_pwm);
+
+        // Debug PWM output every 10 seconds (reduced frequency)
+        if (now - last_pwm_debug >= 10000) {
+            DEBUG_PRINT("🔧 PWM: M");
+            DEBUG_PRINT(i + 1);
+            DEBUG_PRINT("=");
+            DEBUG_PRINT(output_pwm);
+            DEBUG_PRINT("μs ");
+        }
+
+        // Use direct HAL TIM1 PWM instead of Servo library
+        if (i == 0) {
+            // PA8 = TIM1_CH1
+            __HAL_TIM_SET_COMPARE(&htim1_global, TIM_CHANNEL_1, output_pwm);
+        } else if (i == 1) {
+            // PA9 = TIM1_CH2
+            __HAL_TIM_SET_COMPARE(&htim1_global, TIM_CHANNEL_2, output_pwm);
+        }
+    }
+
+    if (now - last_pwm_debug >= 5000) {
+        last_pwm_debug = now;
     }
 }

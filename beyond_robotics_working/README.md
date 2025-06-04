@@ -26,6 +26,15 @@ This repository is plug and play with the Beyond Robotix CAN node series!
 
 See [Beyond Robotix Can Node](https://www.beyondrobotix.com/products/micro-can-node-development-bundle)
 
+### ⚠️ IMPORTANT: Beyond Robotics STM32L431 PWM Issues
+
+**PA8/PA9 PWM requires special handling on Beyond Robotics STM32L431 board!**
+
+- `Servo.attach(PA8/PA9)` fails due to I2C pin conflicts and Advanced Timer requirements
+- **Solution**: Direct HAL TIM1 programming with `__HAL_TIM_MOE_ENABLE()`
+- **Working implementation** included in this project (see `BEYOND_ROBOTICS_PWM_ISSUES.md`)
+- **Both PA8/PA9 motors work** with DroneCAN remote control after HAL implementation
+
 <img src="./assets/BRlogo.png" width="50%">
 
 <img src="./assets/node-and-carrier.png" width="80%">

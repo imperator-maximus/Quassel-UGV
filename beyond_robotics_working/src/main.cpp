@@ -53,11 +53,44 @@ bool initializeSystem();
 void printSystemInfo();
 
 /**
- * @brief Arduino setup function - initializes all system components
+ * @brief Arduino setup function - ULTRA MINIMAL FOR CRASH TESTING
  */
 void setup() {
-    // Initialize bootloader support (must be first)
+    // CRITICAL FIX: IWatchdog.begin() is BROKEN on STM32L431!
+    // Using direct HAL IWDG programming to bypass faulty library
+
+    // DIRECT HAL IWDG INITIALIZATION FIRST (bypass broken IWatchdog library)
+    // CORRECTED SEQUENCE: Configure IWDG with maximum timeout
+    // LSI frequency ~32kHz, Prescaler 256, Reload 4095 = ~32 seconds timeout
+
+    // Step 1: Enable write access to IWDG registers
+    IWDG->KR = 0x5555;    // Enable register access
+
+    // Step 2: Configure prescaler and reload value (while registers are unlocked)
+    IWDG->PR = 0x06;      // Prescaler 256 (maximum)
+    IWDG->RLR = 0xFFF;    // Reload value 4095 (maximum)
+
+    // Step 3: Start the watchdog (this LOCKS the configuration registers!)
+    IWDG->KR = 0xCCCC;    // Start watchdog - registers now LOCKED
+
+    // Step 4: Reload watchdog (only this command works after start)
+    IWDG->KR = 0xAAAA;    // Reload watchdog
+
+    // Initialize LED for heartbeat monitoring
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, LOW);
+
+    // CRITICAL: app_setup() might be required for hardware stability!
+    // Initialize bootloader support (must be first after watchdog) - RE-ENABLED
     app_setup();
+
+    // TEST LED IMMEDIATELY AFTER app_setup()
+    for (int i = 0; i < 10; i++) {
+        digitalWrite(LED_BUILTIN, HIGH);
+        for (volatile uint32_t j = 0; j < 1000000; j++) { IWDG->KR = 0xAAAA; }
+        digitalWrite(LED_BUILTIN, LOW);
+        for (volatile uint32_t j = 0; j < 1000000; j++) { IWDG->KR = 0xAAAA; }
+    }
 
     // Initialize serial communication
     Serial.begin(SERIAL_BAUD_RATE);
@@ -65,16 +98,16 @@ void setup() {
     // Print system information
     printSystemInfo();
 
-    // Initialize DroneCAN handler only (KNOWN WORKING VERSION)
-    DEBUG_PRINTLN("🔧 Initializing DroneCAN handler...");
-    if (!dronecan_handler.initialize()) {
-        DEBUG_PRINTLN("❌ DroneCAN handler initialization failed");
-        while (true) delay(1000);
+    // Initialize all system components (MOTOR CONTROLLER + DroneCAN)
+    DEBUG_PRINTLN("🔧 Initializing system components...");
+    if (!initializeSystem()) {
+        DEBUG_PRINTLN("❌ System initialization failed");
+        while (true) {
+            IWDG->KR = 0xAAAA;  // Feed watchdog in error loop
+            delay(1000);
+        }
     }
-    DEBUG_PRINTLN("✅ DroneCAN handler initialized successfully!");
-
-    // Initialize watchdog timer
-    IWatchdog.begin(WATCHDOG_TIMEOUT_US);
+    DEBUG_PRINTLN("✅ System initialization complete!");
 
     DEBUG_PRINTLN("🚀 System initialization complete!");
     DEBUG_PRINTLN("Entering main loop...");
@@ -83,8 +116,14 @@ void setup() {
     while (true) {
         const uint32_t now = millis();
 
+        // Feed watchdog FIRST - prevent hardware reset
+        IWDG->KR = 0xAAAA;  // Direct register access instead of IWatchdog.reload()
+
         // Update DroneCAN handler
         dronecan_handler.update();
+
+        // Update motor controller (PWM outputs)
+        motor_controller.update();
 
         // Status output every 5 seconds
         static unsigned long last_status = 0;
@@ -93,7 +132,8 @@ void setup() {
             last_status = now;
         }
 
-        IWatchdog.reload();
+        // Feed watchdog again at end of loop
+        IWDG->KR = 0xAAAA;  // Direct register access
     }
 }
 

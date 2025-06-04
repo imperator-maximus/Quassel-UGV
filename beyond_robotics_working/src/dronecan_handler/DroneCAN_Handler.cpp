@@ -73,14 +73,17 @@ bool DroneCAN_Handler::initialize() {
 }
 
 void DroneCAN_Handler::update() {
-    // Send battery info at regular intervals
+    // FULL MODE: Complete DroneCAN functionality restored
+    // System is stable - can handle battery broadcasting and ESC commands
+
+    // Send battery info at regular intervals - RE-ENABLED
     uint32_t now = millis();
     if (now - last_battery_time_ >= BATTERY_UPDATE_INTERVAL_MS) {
         last_battery_time_ = now;
         sendBatteryInfo();
     }
 
-    // Process DroneCAN communication
+    // Process DroneCAN communication (full functionality)
     dronecan_.cycle();
 }
 
@@ -180,7 +183,10 @@ void DroneCAN_Handler::handleMagneticFieldStrength(CanardRxTransfer* transfer) {
 }
 
 void DroneCAN_Handler::onTransferReceivedInstance(CanardInstance* ins, CanardRxTransfer* transfer) {
-    // Handle specific message types
+    // FULL MODE: ESC Command processing RE-ENABLED for motor control
+    // System is now stable - can handle full DroneCAN functionality
+
+    // Handle specific message types - RE-ENABLED FOR MOTOR CONTROL
     switch (transfer->data_type_id) {
         case UAVCAN_EQUIPMENT_AHRS_MAGNETICFIELDSTRENGTH_ID:
             handleMagneticFieldStrength(transfer);
