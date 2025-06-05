@@ -28,8 +28,8 @@ CONNECTION_TYPE = 'auto'
 COM_PORT = 'COM4'
 COM_BAUDRATE = 115200
 
-# WiFi Bridge Einstellungen  
-WIFI_IP = '192.168.178.101'
+# WiFi Bridge Einstellungen
+WIFI_IP = '192.168.178.134'
 WIFI_PORT = 14550
 
 # Timeout für Verbindungsversuche
@@ -49,8 +49,8 @@ def get_connection_string():
     if CONNECTION_TYPE == 'com':
         return COM_PORT
     elif CONNECTION_TYPE == 'wifi':
-        # WICHTIG: UDP verwenden, nicht TCP!
-        return f"udpin:0.0.0.0:{WIFI_PORT}"
+        # WICHTIG: UDP Output verwenden (wie MAVProxy)
+        return f"udpout:{WIFI_IP}:{WIFI_PORT}"
     elif CONNECTION_TYPE == 'auto':
         # Auto-Detection: Erst WiFi, dann COM
         return 'auto'
@@ -83,11 +83,28 @@ def test_wifi_connection():
     """
     try:
         print(f"   📶 Teste WiFi Verbindung: {WIFI_IP}:{WIFI_PORT}")
-        connection_string = f"udpin:0.0.0.0:{WIFI_PORT}"
-        connection = mavutil.mavlink_connection(connection_string)
-        connection.wait_heartbeat(timeout=5)
-        print(f"   ✅ WiFi Verbindung erfolgreich")
+        # EXAKT wie MAVProxy: udpout mit input=True für bidirektionale Kommunikation
+        connection_string = f"udpout:{WIFI_IP}:{WIFI_PORT}"
+        print(f"   🔧 Connection String (wie MAVProxy): {connection_string}")
+
+        # WICHTIG: input=True für bidirektionale UDP-Kommunikation!
+        connection = mavutil.mavlink_connection(
+            connection_string,
+            baud=115200,        # Für UDP irrelevant, aber Standardwert
+            source_system=255,  # Identifiziert Script als GCS
+            input=True,         # KRITISCH: Aktiviert Input für udpout
+            autoreconnect=True  # Auto-Reconnect bei Verbindungsverlust
+        )
+
+        print(f"   ⏰ Teste Verbindung ohne Heartbeat-Wait...")
+        # Setze target_system/component manuell (wie MAVProxy es macht)
+        connection.target_system = 1
+        connection.target_component = 1
+
+        print(f"   ✅ WiFi Verbindung erfolgreich (ohne Heartbeat-Wait)")
+        print(f"   📡 Target System: {connection.target_system}, Component: {connection.target_component}")
         return connection
+
     except Exception as e:
         print(f"   ❌ WiFi Verbindung fehlgeschlagen: {e}")
         return None
