@@ -104,7 +104,25 @@ def setup_ftp_client(connection):
         print(f"   Target System: {connection.target_system}")
         print(f"   Target Component: {connection.target_component}")
         
-        ftp_client = mavftp.MAVFTP(connection, connection.target_system, connection.target_component)
+        # ESP8266-Bridge-optimierte Settings (basierend auf Mission Planner Analyse)
+        print("🔧 ESP8266-Bridge-optimierte MAVFTP Settings...")
+        try:
+            # Ultra-konservative Settings für ESP8266 Bridge (57600 Baud seriell)
+            # Nur die KRITISCHEN Parameter für ESP8266-Bridge setzen
+            esp8266_settings = mavftp.MAVFTPSettings([
+                ('write_size', int, 40),              # KLEINER als Mission Planner (80)
+                ('write_qsize', int, 1)               # NUR 1 Paket 'in flight' (Mission Planner-ähnlich)
+            ])
+
+            ftp_client = mavftp.MAVFTP(connection, connection.target_system, connection.target_component,
+                                     settings=esp8266_settings)
+            print("   ✅ ESP8266-optimierte MAVFTP Settings aktiviert")
+            print("   📊 write_size=40, write_qsize=1 (Mission Planner-ähnlich)")
+
+        except Exception as settings_e:
+            print(f"   ⚠️ ESP8266-Settings fehlgeschlagen: {settings_e}")
+            print("   🔧 Fallback zu Standard-Settings")
+            ftp_client = mavftp.MAVFTP(connection, connection.target_system, connection.target_component)
 
         # Teste FTP Client
         print("🔍 Teste MAVFTP Client...")
@@ -153,29 +171,10 @@ def upload_script_via_ftp(ftp_client, local_path, remote_path):
             except Exception as e:
                 print(f"   ⚠️ Verzeichnis-Erstellung: {e}")
 
-        # Datei hochladen - Teste verschiedene Modi
+        # Datei hochladen - Einfacher Upload ohne Flags
         print("📤 Starte Upload...")
-
-        # Test 1: Normaler Upload
-        print(f"   🔧 Test 1: Normaler Upload")
+        print(f"   🔧 Upload: {upload_file} -> {remote_path}")
         result = ftp_client.cmd_ftp(['put', upload_file, remote_path])
-
-        # Test 2: Mit explizitem Binary-Flag (falls unterstützt)
-        print(f"   🔧 Test 2: Mit Binary-Flag")
-        try:
-            result2 = ftp_client.cmd_ftp(['put', '-b', upload_file, remote_path])
-            print(f"   ✅ Binary-Flag funktioniert")
-            result = result2  # Verwende Binary-Ergebnis
-        except Exception as binary_e:
-            print(f"   ℹ️ Binary-Flag nicht unterstützt: {binary_e}")
-
-        # Test 3: Mit ASCII-Flag (Gegenteil testen)
-        print(f"   🔧 Test 3: Mit ASCII-Flag")
-        try:
-            result3 = ftp_client.cmd_ftp(['put', '-a', upload_file, remote_path])
-            print(f"   ✅ ASCII-Flag funktioniert")
-        except Exception as ascii_e:
-            print(f"   ℹ️ ASCII-Flag nicht unterstützt: {ascii_e}")
 
         # Prüfe Upload-Ergebnis
         upload_success = False
