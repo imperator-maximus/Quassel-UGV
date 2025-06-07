@@ -77,10 +77,14 @@ SERVO_BLH_AUTO=1          # Auto ESC detection
 
 ```
 raspberry_pi/
-├── setup_innomaker_can.sh    # 🔧 Complete setup script
-├── can_monitor.py             # 📡 DroneCAN communication
-├── test-can-detailed          # 🧪 CAN testing utility
-└── README.md                  # 📚 This documentation
+├── setup_innomaker_can.sh         # 🔧 Complete setup script
+├── can_monitor.py                  # 📡 DroneCAN communication
+├── dronecan_esc_controller.py      # 🎮 ESC Controller + PWM + Web Interface
+├── install_web_dependencies.sh    # 🌐 Web Interface setup
+├── templates/index.html            # 📱 Smartphone Web Interface
+├── test-can-detailed              # 🧪 CAN testing utility
+├── README.md                       # 📚 This documentation
+└── README_Web_Interface.md         # 🌐 Web Interface documentation
 ```
 
 ## 🧪 Testing & Validation
@@ -115,6 +119,17 @@ sudo python3 can_monitor.py
 # 📡 DroneCAN Node 42 started
 # 📨 Received ESC command: [motor1, motor2]
 # 📤 Sent battery status: 12.6V, 85%
+```
+
+### 4. ESC Controller with PWM Output
+```bash
+# Start ESC controller with PWM output to motors
+python3 dronecan_esc_controller.py --pwm
+
+# With Web Interface for smartphone control
+python3 dronecan_esc_controller.py --pwm --web
+
+# Access Web Interface: http://raspberrycan:5000
 ```
 
 ### 4. Comprehensive Testing
@@ -159,6 +174,33 @@ logout  # Re-login required
 # Or run with sudo
 sudo python3 can_monitor.py
 ```
+
+## 🌐 Web Interface (Smartphone Control)
+
+### Features
+- **CAN Ein/Aus (Not-Aus)**: Sofortiges Stoppen aller Motoren via Smartphone
+- **Status-Monitor**: Echtzeit PWM-Werte und System-Status
+- **Responsive Design**: Optimiert für Smartphone hochkant
+- **Thread-sichere Architektur**: Keine Performance-Beeinträchtigung
+
+### Installation & Start
+```bash
+# Dependencies installieren
+./install_web_dependencies.sh
+
+# ESC Controller mit Web-Interface starten
+python3 dronecan_esc_controller.py --pwm --web
+
+# Zugriff via Smartphone Browser
+# http://raspberrycan:5000
+```
+
+### Geplante Features (Phase 2+)
+- **Virtueller Joystick**: Touch-Steuerung für Fahrbewegungen
+- **Lampe Ein/Aus**: Beleuchtungssteuerung
+- **Mähen Ein/Aus**: Mähwerk-Steuerung
+
+📚 **Detaillierte Dokumentation**: [README_Web_Interface.md](README_Web_Interface.md)
 
 ## 🌐 WiFi Integration
 

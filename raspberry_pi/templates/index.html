@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>UGV DroneCAN Controller</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            -khtml-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: white;
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background: rgba(0,0,0,0.3);
+            padding: 15px;
+            text-align: center;
+            border-bottom: 2px solid rgba(255,255,255,0.2);
+        }
+
+        .header h1 {
+            font-size: 1.5em;
+            margin-bottom: 5px;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.9em;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            transition: all 0.3s ease;
+        }
+
+        .status-dot.active {
+            background: #4CAF50;
+            box-shadow: 0 0 10px #4CAF50;
+        }
+
+        .status-dot.inactive {
+            background: #f44336;
+            box-shadow: 0 0 10px #f44336;
+        }
+
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+            gap: 20px;
+        }
+
+        .control-section {
+            background: rgba(255,255,255,0.1);
+            border-radius: 15px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+
+        .section-title {
+            font-size: 1.2em;
+            margin-bottom: 15px;
+            text-align: center;
+            color: #fff;
+        }
+
+        .emergency-controls {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+        }
+
+        .btn {
+            padding: 15px 25px;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            min-width: 120px;
+        }
+
+        .btn-emergency {
+            background: linear-gradient(45deg, #ff4444, #cc0000);
+            color: white;
+            box-shadow: 0 4px 15px rgba(255, 68, 68, 0.4);
+        }
+
+        .btn-emergency:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(255, 68, 68, 0.6);
+        }
+
+        .btn-emergency.active {
+            background: linear-gradient(45deg, #4CAF50, #45a049);
+            box-shadow: 0 4px 15px rgba(76, 175, 80, 0.4);
+        }
+
+        .btn-emergency.active:hover {
+            box-shadow: 0 6px 20px rgba(76, 175, 80, 0.6);
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .info-card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 10px;
+            padding: 15px;
+            text-align: center;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .info-label {
+            font-size: 0.9em;
+            opacity: 0.8;
+            margin-bottom: 5px;
+        }
+
+        .info-value {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #4CAF50;
+        }
+
+        .connection-status {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 8px 12px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+
+        .connection-status.connected {
+            background: rgba(76, 175, 80, 0.8);
+            color: white;
+        }
+
+        .connection-status.disconnected {
+            background: rgba(244, 67, 54, 0.8);
+            color: white;
+        }
+
+        .footer {
+            background: rgba(0,0,0,0.3);
+            padding: 10px;
+            text-align: center;
+            font-size: 0.8em;
+            opacity: 0.7;
+        }
+
+        /* Responsive Design für Smartphone hochkant */
+        @media (max-width: 480px) {
+            .header h1 {
+                font-size: 1.3em;
+            }
+            
+            .status-bar {
+                flex-direction: column;
+                gap: 10px;
+            }
+            
+            .emergency-controls {
+                flex-direction: column;
+            }
+            
+            .btn {
+                width: 100%;
+                padding: 18px;
+            }
+            
+            .info-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Touch-optimierte Buttons */
+        @media (hover: none) and (pointer: coarse) {
+            .btn {
+                padding: 20px 25px;
+                font-size: 1.2em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="connection-status" id="connectionStatus">Verbinde...</div>
+    
+    <div class="header">
+        <h1>🚗 UGV DroneCAN Controller</h1>
+        <div class="status-bar">
+            <div class="status-indicator">
+                <div class="status-dot" id="canStatus"></div>
+                <span>CAN Bus</span>
+            </div>
+            <div class="status-indicator">
+                <div class="status-dot" id="pwmStatus"></div>
+                <span>PWM Output</span>
+            </div>
+            <div class="status-indicator">
+                <div class="status-dot" id="monitorStatus"></div>
+                <span>Monitor</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="main-content">
+        <div class="control-section">
+            <div class="section-title">🚨 Not-Aus Steuerung</div>
+            <div class="emergency-controls">
+                <button class="btn btn-emergency" id="canToggleBtn" onclick="toggleCAN()">
+                    <span id="canToggleText">CAN STOPPEN</span>
+                </button>
+            </div>
+        </div>
+
+        <div class="control-section">
+            <div class="section-title">📊 System Status</div>
+            <div class="info-grid">
+                <div class="info-card">
+                    <div class="info-label">Linker Motor PWM</div>
+                    <div class="info-value" id="leftPwm">1500μs</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">Rechter Motor PWM</div>
+                    <div class="info-value" id="rightPwm">1500μs</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">Letztes Kommando</div>
+                    <div class="info-value" id="lastCommand">--</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">Verbindung</div>
+                    <div class="info-value" id="connectionTime">--</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        Raspberry Pi DroneCAN Controller v1.0 | Phase 1: CAN Ein/Aus
+    </div>
+
+    <script>
+        // Socket.IO Verbindung
+        const socket = io();
+        let canEnabled = true;
+        let connectionStartTime = Date.now();
+
+        // Verbindungsstatus
+        socket.on('connect', function() {
+            document.getElementById('connectionStatus').textContent = 'Verbunden';
+            document.getElementById('connectionStatus').className = 'connection-status connected';
+            connectionStartTime = Date.now();
+            updateConnectionTime();
+        });
+
+        socket.on('disconnect', function() {
+            document.getElementById('connectionStatus').textContent = 'Getrennt';
+            document.getElementById('connectionStatus').className = 'connection-status disconnected';
+        });
+
+        // Status Updates vom Server
+        socket.on('status_update', function(data) {
+            updateStatus(data);
+        });
+
+        // CAN Toggle Funktion
+        function toggleCAN() {
+            fetch('/api/can/toggle', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => response.json())
+            .then(data => {
+                canEnabled = data.can_enabled;
+                updateCANButton();
+                // Status sofort aktualisieren
+                fetchStatus();
+            })
+            .catch(error => {
+                console.error('Fehler beim CAN Toggle:', error);
+            });
+        }
+
+        // Status vom Server abrufen
+        function fetchStatus() {
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    updateStatus(data);
+                })
+                .catch(error => {
+                    console.error('Fehler beim Status abrufen:', error);
+                });
+        }
+
+        // UI Status aktualisieren
+        function updateStatus(data) {
+            canEnabled = data.can_enabled;
+            
+            // Status-Dots aktualisieren
+            document.getElementById('canStatus').className = 
+                'status-dot ' + (data.can_enabled ? 'active' : 'inactive');
+            document.getElementById('pwmStatus').className = 
+                'status-dot ' + (data.pwm_enabled ? 'active' : 'inactive');
+            document.getElementById('monitorStatus').className = 
+                'status-dot ' + (data.monitor_enabled ? 'active' : 'inactive');
+            
+            // PWM-Werte aktualisieren
+            if (data.current_pwm) {
+                document.getElementById('leftPwm').textContent = 
+                    Math.round(data.current_pwm.left) + 'μs';
+                document.getElementById('rightPwm').textContent = 
+                    Math.round(data.current_pwm.right) + 'μs';
+            }
+            
+            // Letztes Kommando
+            if (data.last_command_time > 0) {
+                const timeDiff = (Date.now() / 1000) - data.last_command_time;
+                document.getElementById('lastCommand').textContent = 
+                    timeDiff < 60 ? Math.round(timeDiff) + 's' : 'vor ' + Math.round(timeDiff/60) + 'min';
+            }
+            
+            updateCANButton();
+        }
+
+        // CAN Button aktualisieren
+        function updateCANButton() {
+            const btn = document.getElementById('canToggleBtn');
+            const text = document.getElementById('canToggleText');
+            
+            if (canEnabled) {
+                btn.className = 'btn btn-emergency';
+                text.textContent = 'CAN STOPPEN';
+            } else {
+                btn.className = 'btn btn-emergency active';
+                text.textContent = 'CAN STARTEN';
+            }
+        }
+
+        // Verbindungszeit aktualisieren
+        function updateConnectionTime() {
+            const elapsed = Math.round((Date.now() - connectionStartTime) / 1000);
+            const minutes = Math.floor(elapsed / 60);
+            const seconds = elapsed % 60;
+            
+            document.getElementById('connectionTime').textContent = 
+                minutes > 0 ? `${minutes}:${seconds.toString().padStart(2, '0')}` : `${seconds}s`;
+        }
+
+        // Initialisierung
+        document.addEventListener('DOMContentLoaded', function() {
+            // Status alle 2 Sekunden aktualisieren
+            setInterval(fetchStatus, 2000);
+            
+            // Verbindungszeit alle Sekunde aktualisieren
+            setInterval(updateConnectionTime, 1000);
+            
+            // Initialer Status-Abruf
+            setTimeout(fetchStatus, 500);
+        });
+
+        // Touch-Events für bessere Mobile-Erfahrung
+        document.addEventListener('touchstart', function() {}, {passive: true});
+    </script>
+</body>
+</html>

@@ -22,10 +22,15 @@ import argparse
 import signal
 import sys
 import atexit
+import threading
+import queue
+from flask import Flask, render_template, jsonify, request
+from flask_socketio import SocketIO, emit
 
 class CalibratedESCController:
     def __init__(self, enable_pwm=False, pwm_pins=[18, 19], enable_monitor=True, quiet=False,
-                 enable_ramping=True, acceleration_rate=25, deceleration_rate=800, brake_rate=1500):
+                 enable_ramping=True, acceleration_rate=25, deceleration_rate=800, brake_rate=1500,
+                 enable_web=False, web_port=5000):
         # Kalibrierungswerte AKTUALISIERT mit neuen Orange Cube Parametern
         # Motor 0 = Rechts, Motor 1 = Links
         # Neue Werte: Rückwärts ~-8000, Neutral ~0, Vorwärts ~+8000
@@ -51,6 +56,14 @@ class CalibratedESCController:
         self.enable_monitor = enable_monitor
         self.quiet = quiet
         self.pwm_pins = {'left': pwm_pins[1], 'right': pwm_pins[0]}  # Links=GPIO19, Rechts=GPIO18
+
+        # Web-Interface Konfiguration
+        self.enable_web = enable_web
+        self.web_port = web_port
+        self.can_enabled = True  # CAN Ein/Aus Flag (Thread-sicher)
+        self.web_thread = None
+        self.flask_app = None
+        self.socketio = None
 
         # PWM-Objekte
         self.pwm_objects = {}
@@ -80,6 +93,10 @@ class CalibratedESCController:
         if self.enable_pwm:
             self._init_pwm()
 
+        # Web-Interface initialisieren falls aktiviert
+        if self.enable_web:
+            self._init_web_interface()
+
     def _init_pwm(self):
         """Initialisiert Hardware-PWM für sichere ESC-Steuerung"""
         try:
@@ -100,6 +117,7 @@ class CalibratedESCController:
             signal.signal(signal.SIGINT, self._signal_handler)
             signal.signal(signal.SIGTERM, self._signal_handler)
             atexit.register(self._cleanup_pwm)
+            atexit.register(self._cleanup_web)
 
             if not self.quiet:
                 print("🛡️ Sicherheits-Handler registriert (SIGINT, SIGTERM, atexit)")
@@ -113,10 +131,93 @@ class CalibratedESCController:
             print(f"❌ PWM-Initialisierung fehlgeschlagen: {e}")
             sys.exit(1)
 
+    def _init_web_interface(self):
+        """Initialisiert Web-Interface für Remote-Steuerung"""
+        try:
+            # Flask App erstellen
+            self.flask_app = Flask(__name__, template_folder='templates', static_folder='static')
+            self.flask_app.config['SECRET_KEY'] = 'ugv_dronecan_secret_2024'
+
+            # SocketIO für Echtzeit-Kommunikation
+            self.socketio = SocketIO(self.flask_app, cors_allowed_origins="*")
+
+            # Web-Routen definieren
+            self._setup_web_routes()
+
+            # Web-Server in separatem Thread starten
+            self.web_thread = threading.Thread(target=self._run_web_server, daemon=True)
+            self.web_thread.start()
+
+            if not self.quiet:
+                print(f"🌐 Web-Interface gestartet auf Port {self.web_port}")
+                print(f"   URL: http://raspberrycan:{self.web_port}")
+
+        except ImportError:
+            print("❌ FEHLER: Flask/SocketIO nicht installiert!")
+            print("   Installieren mit: pip install flask flask-socketio")
+            sys.exit(1)
+        except Exception as e:
+            print(f"❌ Web-Interface-Initialisierung fehlgeschlagen: {e}")
+            sys.exit(1)
+
+    def _setup_web_routes(self):
+        """Definiert Web-Routen für das Interface"""
+
+        @self.flask_app.route('/')
+        def index():
+            return render_template('index.html')
+
+        @self.flask_app.route('/api/status')
+        def api_status():
+            return jsonify({
+                'can_enabled': self.can_enabled,
+                'pwm_enabled': self.enable_pwm,
+                'monitor_enabled': self.enable_monitor,
+                'last_command_time': getattr(self, 'last_command_time', 0),
+                'current_pwm': getattr(self, 'last_pwm_values', {'left': 1500, 'right': 1500})
+            })
+
+        @self.flask_app.route('/api/can/toggle', methods=['POST'])
+        def api_can_toggle():
+            self.can_enabled = not self.can_enabled
+            if not self.can_enabled:
+                # Bei CAN-Deaktivierung sofort auf Neutral setzen
+                self._emergency_stop()
+            return jsonify({'can_enabled': self.can_enabled})
+
+        # SocketIO Event-Handler
+        @self.socketio.on('connect')
+        def handle_connect():
+            if not self.quiet:
+                print("🌐 Web-Client verbunden")
+            emit('status_update', {
+                'can_enabled': self.can_enabled,
+                'connected': True
+            })
+
+        @self.socketio.on('disconnect')
+        def handle_disconnect():
+            if not self.quiet:
+                print("🌐 Web-Client getrennt")
+
+    def _run_web_server(self):
+        """Läuft Web-Server in separatem Thread"""
+        try:
+            self.socketio.run(self.flask_app,
+                            host='0.0.0.0',
+                            port=self.web_port,
+                            debug=False,
+                            use_reloader=False,
+                            log_output=False)
+        except Exception as e:
+            if not self.quiet:
+                print(f"❌ Web-Server Fehler: {e}")
+
     def _signal_handler(self, signum, frame):
         """Signal-Handler für sauberes Shutdown"""
         print(f"\n🛑 Signal {signum} empfangen - Sicherheits-Shutdown...")
         self._emergency_stop()
+        self._cleanup_web()
         sys.exit(0)
 
     def _emergency_stop(self):
@@ -133,6 +234,13 @@ class CalibratedESCController:
             self.pi.stop()
             if not self.quiet:
                 print("🧹 PWM-Cleanup abgeschlossen")
+
+    def _cleanup_web(self):
+        """Web-Interface-Cleanup beim Beenden"""
+        if self.enable_web and self.web_thread and self.web_thread.is_alive():
+            if not self.quiet:
+                print("🌐 Web-Interface wird beendet...")
+            # Web-Thread ist daemon, wird automatisch beendet
 
     def _apply_ramping(self, side, target_pwm):
         """Wendet Ramping-Logik auf PWM-Werte an"""
@@ -357,6 +465,14 @@ class CalibratedESCController:
         if len(event.message.cmd) < 2:
             return
 
+        # CAN-Enable-Check: Ignoriere Nachrichten wenn CAN deaktiviert
+        if not self.can_enabled:
+            # Bei deaktiviertem CAN: Motoren auf Neutral halten
+            if self.enable_pwm:
+                self._set_motor_pwm('left', 1500)
+                self._set_motor_pwm('right', 1500)
+            return
+
         # Motor-Zuordnung FINAL KORRIGIERT: Tausche Links/Rechts
         right_raw = event.message.cmd[0]  # Motor 0 = Rechts
         left_raw = event.message.cmd[1]   # Motor 1 = Links
@@ -473,6 +589,8 @@ Beispiele:
   python3 dronecan_esc_controller.py --pins 12,13       # Andere GPIO-Pins
   python3 dronecan_esc_controller.py --pwm --no-ramping # PWM ohne Ramping (sofort)
   python3 dronecan_esc_controller.py --pwm --accel-rate 100 --brake-rate 2000  # Angepasste Ramping-Raten
+  python3 dronecan_esc_controller.py --pwm --web        # PWM + Web-Interface
+  python3 dronecan_esc_controller.py --pwm --web --web-port 8080  # Web-Interface auf Port 8080
         """
     )
 
@@ -501,6 +619,12 @@ Beispiele:
                        help='CAN-Bitrate (default: 1000000)')
     parser.add_argument('--node-id', type=int, default=100,
                        help='DroneCAN Node-ID (default: 100)')
+
+    # Web-Interface Argumente
+    parser.add_argument('--web', action='store_true',
+                       help='Web-Interface aktivieren (default: deaktiviert)')
+    parser.add_argument('--web-port', type=int, default=5000,
+                       help='Web-Interface Port (default: 5000)')
 
     args = parser.parse_args()
 
@@ -533,6 +657,9 @@ Beispiele:
                 print(f"🏃 Ramping: Beschl.={args.accel_rate}μs/s, Verzög.={args.decel_rate}μs/s, Brems.={args.brake_rate}μs/s")
             else:
                 print("⚡ Ramping: DEAKTIVIERT (sofortige PWM-Änderungen)")
+        if args.web:
+            print(f"🌐 Web-Interface: http://raspberrycan:{args.web_port}")
+            print("   Features: CAN Ein/Aus, Status-Monitor")
         print("="*70)
 
     # Controller erstellen
@@ -544,7 +671,9 @@ Beispiele:
         enable_ramping=not args.no_ramping,
         acceleration_rate=args.accel_rate,
         deceleration_rate=args.decel_rate,
-        brake_rate=args.brake_rate
+        brake_rate=args.brake_rate,
+        enable_web=args.web,
+        web_port=args.web_port
     )
 
     # Versuche Kalibrierung aus Datei zu laden
