@@ -69,21 +69,31 @@ def esc_rawcommand_handler(event):
         right_raw = event.message.cmd[0]  # Motor 0 = Rechts
         left_raw = event.message.cmd[1]   # Motor 1 = Links
 
-        # Korrekte DroneCAN Konvertierung
-        # DroneCAN ESC: 0 = full reverse, 4096 = neutral, 8191 = full forward
-        def raw_to_percent(raw_value):
-            if raw_value == 4096:
-                return 0.0  # Neutral
-            elif raw_value < 4096:
-                # Reverse: 0-4095 → -100% bis 0%
-                percent = ((raw_value - 4096) / 4096.0) * 100.0
+        # KALIBRIERTE Konvertierung basierend auf gemessenen Werten
+        # Links: Neutral=4038, Min=0, Max=8191
+        # Rechts: Neutral=4095, Min=0, Max=7167
+        def raw_to_percent(raw_value, motor_side):
+            if motor_side == 'left':
+                neutral = 4038
+                max_val = 8191
+                min_val = 0
+            else:  # right
+                neutral = 4095
+                max_val = 7167
+                min_val = 0
+
+            if raw_value == neutral:
+                return 0.0
+            elif raw_value > neutral:
+                # Forward: neutral bis max → 0% bis +100%
+                percent = ((raw_value - neutral) / (max_val - neutral)) * 100.0
             else:
-                # Forward: 4097-8191 → 0% bis +100%
-                percent = ((raw_value - 4096) / 4095.0) * 100.0
+                # Reverse: min bis neutral → -100% bis 0%
+                percent = ((raw_value - neutral) / (neutral - min_val)) * 100.0
             return round(percent, 1)
 
-        left_percent = raw_to_percent(left_raw)
-        right_percent = raw_to_percent(right_raw)
+        left_percent = raw_to_percent(left_raw, 'left')
+        right_percent = raw_to_percent(right_raw, 'right')
 
         # Verbesserte Richtungsanalyse
         def analyze_direction(left_pct, right_pct):
