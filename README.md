@@ -130,6 +130,10 @@ esc-start
 - **Freeze-resistant PWM generation** using pigpio hardware timers
 - **Calibrated ESC command processing** with real Orange Cube parameters
 - **Real-time monitoring** with live percentage and PWM display
+- **Intelligent Ramping System** for smooth acceleration and quick braking
+  - Slow acceleration (25 μs/s default) for gentle starts
+  - Fast deceleration (800 μs/s default) for responsive control
+  - Very fast braking (1500 μs/s default) for emergency stops
 
 ### DroneCAN Integration
 - **Node ID 100** (configurable)
@@ -183,7 +187,7 @@ esc-status
 # Monitor only (no PWM output)
 python3 dronecan_esc_controller.py
 
-# Monitor + PWM output
+# Monitor + PWM output with ramping (default)
 python3 dronecan_esc_controller.py --pwm
 
 # PWM only (silent operation)
@@ -191,6 +195,12 @@ python3 dronecan_esc_controller.py --pwm --quiet
 
 # Custom GPIO pins
 python3 dronecan_esc_controller.py --pwm --pins 12,13
+
+# PWM without ramping (immediate response)
+python3 dronecan_esc_controller.py --pwm --no-ramping
+
+# Custom ramping rates
+python3 dronecan_esc_controller.py --pwm --accel-rate 100 --brake-rate 2000
 ```
 
 ## 📊 System Communication Flow
@@ -279,6 +289,18 @@ PWM_NEUTRAL = 1500               # Neutral position
 # Safety Configuration
 COMMAND_TIMEOUT = 2.0            # Seconds before neutral
 OUTPUT_INTERVAL = 0.5            # Monitor output throttling
+```
+
+### Ramping Configuration
+```bash
+# Default ramping settings (optimized for UGV safety)
+--accel-rate 25      # Very slow acceleration (25 μs/s, ~20 seconds to full speed)
+--decel-rate 800     # Fast deceleration (800 μs/s, ~0.6 seconds to stop)
+--brake-rate 1500    # Very fast braking (1500 μs/s, ~0.3 seconds to neutral)
+
+# Custom ramping examples
+python3 dronecan_esc_controller.py --pwm --accel-rate 50 --brake-rate 2000
+python3 dronecan_esc_controller.py --pwm --no-ramping  # Disable ramping completely
 ```
 
 ### Service Configuration (`dronecan-esc.service`)
@@ -443,6 +465,7 @@ This project evolved from an ESP32-based implementation through Beyond Robotics 
 - ✅ Stable DroneCAN communication at 1 Mbps with Raspberry Pi 3
 - ✅ Hardware-PWM motor control with freeze protection
 - ✅ Calibrated ESC command processing with real Orange Cube parameters
+- ✅ Intelligent ramping system for smooth acceleration and quick braking
 - ✅ Automatic service startup with systemd integration
 - ✅ Professional Python architecture with comprehensive safety features
 
