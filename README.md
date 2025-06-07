@@ -1,47 +1,45 @@
-# 🚁 Beyond Robotics DroneCAN Motor Controller
+# 🚁 UGV DroneCAN ESC Controller
 
-A professional DroneCAN 1.0 motor controller implementation for the Beyond Robotics Dev Board (STM32L431) designed to communicate with Orange Cube flight controllers.
+A professional DroneCAN 1.0 ESC controller implementation for Raspberry Pi 3 designed to communicate with Orange Cube flight controllers for UGV (Unmanned Ground Vehicle) applications.
 
 ## 🎯 Project Overview
 
-This project implements a complete DroneCAN motor controller system that enables seamless communication between an Orange Cube autopilot and a Beyond Robotics Dev Board for 4-channel PWM motor control. The system has been successfully tested and validated with real hardware.
+This project implements a complete DroneCAN ESC controller system that enables seamless communication between an Orange Cube autopilot and a Raspberry Pi for 2-channel PWM motor control in skid steering configuration. The system has been successfully migrated from Beyond Robotics hardware to Raspberry Pi for improved reliability and flexibility.
 
 ### ✅ Project Status: **PRODUCTION READY**
-- ✅ DroneCAN communication established with Orange Cube
-- ✅ 4-channel PWM motor control implemented
-- ✅ Safety timeout system operational
-- ✅ Battery monitoring and reporting functional
-- ✅ Professional modular code architecture
-- ✅ Comprehensive testing tools provided
+- ✅ DroneCAN communication established with Orange Cube (1 Mbps)
+- ✅ Hardware-PWM motor control with freeze protection
+- ✅ Calibrated ESC command processing with real-world values
+- ✅ Safety timeout system and emergency stop functionality
+- ✅ Automatic service startup with systemd integration
+- ✅ Professional Python architecture with comprehensive testing
 
 ## 🏗️ Architecture Overview
 
-### Custom Application Code (`beyond_robotics_working/src/`)
-The core application consists of modular C++ components:
+### Raspberry Pi ESC Controller (`raspberry_pi/`)
+The core application consists of a unified Python implementation:
 
-- **`main.cpp`** - Main application entry point and system orchestration
-- **`config/config.h`** - Centralized configuration management
-- **`motor_controller/`** - PWM motor control implementation
-  - `MotorController.cpp/h` - 4-channel PWM control with safety features
-- **`dronecan_handler/`** - DroneCAN protocol implementation
-  - `DroneCAN_Handler.cpp/h` - ESC command reception and battery broadcasting
-- **`test/`** - Development and testing utilities
-  - `TestMode.cpp/h` - Automated testing and validation
+- **`dronecan_esc_controller.py`** - Main ESC controller with multiple modes
+  - DroneCAN message reception and processing
+  - Calibrated ESC command conversion (raw → % → PWM)
+  - Hardware-PWM output with safety features
+  - Monitoring and logging capabilities
+- **`dronecan-esc.service`** - systemd service for automatic startup
+- **`setup_service.sh`** - Automated service installation script
+- **`README_ESC_Controller.md`** - Detailed usage documentation
 
-### DroneCAN Library Components
-The project integrates official DroneCAN libraries:
+### Key Features
+- **Multi-Mode Operation**: Monitor-only, PWM-only, or combined modes
+- **Hardware-PWM**: Uses pigpio for precise, freeze-resistant PWM generation
+- **Calibrated Processing**: Real-world Orange Cube parameter integration
+- **Safety Systems**: Timeout monitoring, emergency stop, signal handlers
+- **Service Integration**: Automatic startup, restart on failure, easy management
 
-- **`lib/ArduinoDroneCANlib/`** - Beyond Robotics Arduino DroneCAN library
-- **`lib/libcanard/`** - Core libcanard CAN protocol implementation
-- **`dronecan/`** - Complete DroneCAN ecosystem
-  - `DSDL/` - Data Structure Description Language definitions
-  - `libcanard_repo/` - Official libcanard repository
-  - `pydronecan/` - Python DroneCAN tools
-
-### Hardware Support
-- **`boards/BRMicroNode.json`** - PlatformIO board definition
-- **`variants/BRMicroNode/`** - STM32L431 hardware abstraction layer
-- **`AP_Bootloader.bin`** - ArduPilot-compatible bootloader
+### Orange Cube Integration
+- **Skid Steering Configuration**: 2-motor differential drive
+- **DroneCAN Protocol**: Native ESC RawCommand message handling
+- **Calibration Support**: Automatic loading of calibration data
+- **Real-time Monitoring**: Live display of commands, percentages, and PWM values
 
 ## 🛠️ Development Tools (`tools/`)
 
@@ -56,16 +54,29 @@ Professional testing and configuration utilities:
 
 ## 🚀 Quick Start
 
-### 1. Flash the Bootloader
+### 1. Install Dependencies on Raspberry Pi
 ```bash
-# Use STM32CubeProgrammer to flash AP_Bootloader.bin at 0x8000000
+# Install pigpio for Hardware-PWM
+sudo apt install pigpio python3-pigpio
+
+# Install DroneCAN library
+sudo pip3 install dronecan --break-system-packages
+
+# Start pigpio daemon
+sudo systemctl enable pigpiod
+sudo systemctl start pigpiod
 ```
 
-### 2. Build and Upload Firmware
+### 2. Setup ESC Controller Service
 ```bash
-cd beyond_robotics_working
-pio run -t upload
-pio device monitor -b 115200
+# Upload files to Raspberry Pi
+scp dronecan_esc_controller.py setup_service.sh nicolay@raspberrycan:/home/nicolay/
+
+# Run automated setup
+ssh nicolay@raspberrycan
+chmod +x setup_service.sh
+./setup_service.sh
+source ~/.bashrc
 ```
 
 ### 3. Configure Orange Cube
@@ -74,63 +85,122 @@ cd tools/orange_cube
 python set_can_parameters.py
 ```
 
-### 4. Monitor System
+### 4. Test the System
 ```bash
-python monitor_orange_cube.py
+# Check service status
+esc-status
+
+# View live logs
+esc-logs
+
+# Test manually (stop service first)
+esc-stop
+sudo python3 dronecan_esc_controller.py --pwm
+esc-start
 ```
 
 ## 📋 Hardware Configuration
 
-### Beyond Robotics Dev Board
-- **MCU**: STM32L431 (ARM Cortex-M4)
-- **CAN**: Built-in CAN controller
-- **PWM**: 4 channels (PA8, PA9, PA10, PA11)
-- **Programming**: ST-LINK V3 via STLINK header
-- **Serial**: USB or UART (115200 baud)
+### Raspberry Pi 3 Setup
+- **MCU**: Broadcom BCM2837 (ARM Cortex-A53 Quad-Core)
+- **CAN Interface**: Innomaker RS485 CAN HAT (MCP2515 + 16MHz oscillator)
+- **PWM Output**: Hardware-PWM on GPIO 18 (Right) and GPIO 19 (Left)
+- **Operating System**: Raspberry Pi OS (Debian-based)
+- **Network**: WiFi + SSH access (nicolay@raspberrycan)
 
 ### Orange Cube Setup
-- **Firmware**: ArduPilot Rover with Skid Steering
+- **Firmware**: ArduPilot Rover with Skid Steering (2-motor configuration)
 - **CAN Configuration**:
   - `CAN_P1_BITRATE = 1000000` (1 Mbps)
   - `CAN_D1_PROTOCOL = 1` (DroneCAN)
   - `CAN_D1_UC_NODE = 10` (Orange Cube Node ID)
-  - `CAN_D1_UC_ESC_BM = 15` (ESC bitmask)
-  - `SERVO_BLH_MASK = 5` (BLHeli outputs)
+  - `CAN_D1_UC_ESC_BM = 3` (ESC bitmask for 2 motors)
+  - `SERVO_BLH_MASK = 3` (BLHeli outputs for ESC1/ESC2)
 
 ### CAN Bus Wiring
-- **CANH/CANL**: Connect between Orange Cube and Beyond Robotics board
-- **Termination**: 120Ω resistors at both ends
+- **CANH/CANL**: Connect between Orange Cube CAN port and Raspberry Pi CAN HAT
+- **Termination**: 120Ω resistor built into Orange Cube carrier board
 - **Ground**: Common ground connection required
+- **Interface**: can0 on Raspberry Pi (configured via dtoverlay=mcp2515-can1)
 
 ## 🔧 Key Features
 
 ### Motor Control
-- **4-channel PWM output** (1000-2000μs pulse width)
-- **Safety timeout system** (1-second ESC command timeout)
-- **Smooth motor control** with configurable limits
-- **Real-time status monitoring**
+- **2-channel Hardware-PWM output** (1000-2000μs pulse width)
+- **Freeze-resistant PWM generation** using pigpio hardware timers
+- **Calibrated ESC command processing** with real Orange Cube parameters
+- **Real-time monitoring** with live percentage and PWM display
 
 ### DroneCAN Integration
-- **Node ID 25** (configurable)
-- **ESC command reception** from Orange Cube
-- **Battery information broadcasting**
-- **Parameter management system**
-- **ArduPilot compatibility**
+- **Node ID 100** (configurable)
+- **ESC RawCommand reception** from Orange Cube
+- **Calibrated value conversion** (Raw → % → PWM)
+- **Skid steering support** for 2-motor differential drive
+- **ArduPilot compatibility** with Rover firmware
 
 ### Safety Features
-- **Watchdog timer** (2-second timeout)
-- **ESC command timeout** (motors stop if no commands)
-- **Initialization validation** (all systems must initialize)
-- **Error reporting** via serial output
+- **Hardware-PWM independence** (continues running if Python crashes)
+- **Command timeout monitoring** (2-second timeout → automatic neutral)
+- **Emergency stop functionality** with signal handlers
+- **Service integration** with automatic restart on failure
+
+## 🎮 ESC Controller Commands
+
+The system includes convenient aliases for easy management:
+
+### Service Management
+```bash
+# Check service status
+esc-status
+
+# Start/stop service
+esc-start
+esc-stop
+esc-restart
+
+# View logs
+esc-logs          # Live log stream
+esc-logs-tail     # Last 50 lines
+```
+
+### Development Workflow
+```bash
+# Stop service for testing
+esc-stop
+
+# Test new version manually
+sudo python3 dronecan_esc_controller.py --pwm
+
+# Restart service after testing
+esc-start
+
+# Check if everything is working
+esc-status
+```
+
+### Available Modes
+```bash
+# Monitor only (no PWM output)
+python3 dronecan_esc_controller.py
+
+# Monitor + PWM output
+python3 dronecan_esc_controller.py --pwm
+
+# PWM only (silent operation)
+python3 dronecan_esc_controller.py --pwm --quiet
+
+# Custom GPIO pins
+python3 dronecan_esc_controller.py --pwm --pins 12,13
+```
 
 ## 📊 System Communication Flow
 
 ```
-Orange Cube (Node 10) → CAN Bus → Beyond Robotics Board (Node 25)
+Orange Cube (Node 10) → CAN Bus → Raspberry Pi 3 (Node 100)
      ↓                                        ↓
-ESC Commands                           PWM Motor Control
-Battery Requests                      Battery Information
-Parameter Access                      Status Reporting
+ESC RawCommands                       Hardware-PWM Output
+Skid Steering Control                GPIO 18/19 (1000-2000μs)
+Parameter Access                     Calibrated Processing
 ```
 
 ## 🗂️ Project Structure
@@ -138,22 +208,17 @@ Parameter Access                      Status Reporting
 ```
 UGV ESP32CAN/
 ├── 📄 README.md                    # This documentation
-├── 📁 beyond_robotics_working/     # Main project (PRODUCTION)
-│   ├── 📁 src/                    # Custom application code
-│   │   ├── main.cpp              # Application entry point
-│   │   ├── config/               # Configuration management
-│   │   ├── motor_controller/     # PWM motor control
-│   │   ├── dronecan_handler/     # DroneCAN communication
-│   │   └── test/                 # Testing utilities
-│   ├── 📁 lib/                   # DroneCAN libraries
-│   ├── 📁 dronecan/              # DroneCAN ecosystem
-│   ├── 📁 boards/                # Hardware definitions
-│   └── 📁 variants/              # STM32 HAL
+├── 📁 raspberry_pi/               # Main project (PRODUCTION)
+│   ├── dronecan_esc_controller.py # Main ESC controller
+│   ├── dronecan-esc.service      # systemd service file
+│   ├── setup_service.sh          # Automated setup script
+│   └── README_ESC_Controller.md  # Detailed usage guide
 ├── 📁 tools/                      # Testing and configuration
 │   ├── 📁 orange_cube/           # Orange Cube tools
 │   └── 📁 dronecan/              # DroneCAN testing
 └── 📁 archive/                    # Development history
     ├── 📁 esp32_files/           # Legacy ESP32 implementation
+    ├── 📁 beyond_robotics_working/ # Legacy Beyond Robotics code
     ├── 📁 development_scripts/   # Development utilities
     └── 📁 old_documentation/     # Historical documentation
 ```
@@ -162,32 +227,30 @@ UGV ESP32CAN/
 
 ### System Integration Test
 ```bash
-# 1. Upload firmware to Beyond Robotics board
-cd beyond_robotics_working
-pio run -t upload
+# 1. Setup ESC Controller service
+ssh nicolay@raspberrycan
+./setup_service.sh
+source ~/.bashrc
 
-# 2. Monitor serial output
-pio device monitor -b 115200
+# 2. Check service status
+esc-status
 
 # 3. Configure Orange Cube
-cd ../tools/orange_cube
+cd tools/orange_cube
 python set_can_parameters.py
 
-# 4. Monitor Orange Cube
-python monitor_orange_cube.py
+# 4. Monitor ESC Controller
+esc-logs
 ```
 
 ### Expected Output
-**Beyond Robotics Board Serial:**
+**ESC Controller Service:**
 ```
-=====================================
-Beyond Robotix Motor Controller v1.0
-Beyond Robotics Dev Board (STM32L431)
-=====================================
-🚀 System initialization complete!
-🚀 ESC Command: [1500, 1500, 1500, 1500]
-🔓 Motors ARMED by ESC command
-⚙️ Motors: ARMED PWM:[1500,1500,1500,1500]
+[15:33:41] 🚗 ESC RawCommand von Node ID 10:
+    ⬆️ L/R: Links=+85.2% | Rechts=+85.2% | FORWARD
+    🔧 Raw: Links=7000 | Rechts=7000 | Neutral: L=-114 R=0
+    📡 PWM: Links=1927μs | Rechts=1927μs | Neutral=1500μs
+    ⚡ GPIO: Links=GPIO19 | Rechts=GPIO18
 ```
 
 **Orange Cube Monitor:**
@@ -200,38 +263,43 @@ Parameter: CAN_D1_UC_NODE = 10.0
 
 ## 🔧 Configuration Options
 
-### Motor Controller Settings (`config/config.h`)
-```cpp
-#define NUM_MOTORS 4              // Number of motor channels
-#define PWM_MIN 1000              // Minimum PWM (1ms)
-#define PWM_MAX 2000              // Maximum PWM (2ms)
-#define PWM_NEUTRAL 1500          // Neutral PWM (1.5ms)
-#define ESC_TIMEOUT_MS 1000       // Safety timeout
+### ESC Controller Settings (`dronecan_esc_controller.py`)
+```python
+# Node Configuration
+DEFAULT_NODE_ID = 100             # DroneCAN Node ID
+DEFAULT_INTERFACE = 'can0'        # CAN Interface
+DEFAULT_BITRATE = 1000000         # 1 Mbps CAN bitrate
+
+# PWM Configuration
+DEFAULT_PWM_PINS = [18, 19]       # GPIO pins [right, left]
+PWM_FREQUENCY = 50                # 50Hz for ESC/Servo
+PWM_RANGE = (1000, 2000)         # μs range
+PWM_NEUTRAL = 1500               # Neutral position
+
+# Safety Configuration
+COMMAND_TIMEOUT = 2.0            # Seconds before neutral
+OUTPUT_INTERVAL = 0.5            # Monitor output throttling
 ```
 
-### DroneCAN Settings
-```cpp
-#define DRONECAN_NODE_ID 25       // Unique node identifier
-#define CAN_BITRATE 1000000       // 1 Mbps (must match Orange Cube)
-```
-
-### Test Mode (Development)
-```cpp
-#define ENABLE_TEST_MODE          // Enable automated testing
-#define TEST_ESC_INTERVAL_MS 3000 // Test command interval
+### Service Configuration (`dronecan-esc.service`)
+```ini
+[Service]
+ExecStart=/usr/bin/python3 /home/nicolay/dronecan_esc_controller.py --pwm --quiet
+Restart=always
+RestartSec=5
 ```
 
 ## 🐛 Troubleshooting
 
 ### Common Issues
 
-#### ❌ "System initialization failed"
-**Cause**: Hardware or configuration issue
+#### ❌ "Service not starting"
+**Cause**: Dependencies or permissions issue
 **Solution**:
-1. Check ST-LINK connection and SW1 switch position
-2. Verify CAN bus wiring (CANH, CANL, GND)
-3. Confirm 120Ω termination resistors
-4. Check serial output for specific error messages
+1. Check pigpio daemon: `sudo systemctl status pigpiod`
+2. Verify dronecan library: `python3 -c "import dronecan"`
+3. Check service logs: `esc-logs-tail`
+4. Restart service: `esc-restart`
 
 #### ❌ "No DroneCAN messages received"
 **Cause**: CAN communication failure
@@ -241,17 +309,17 @@ Parameter: CAN_D1_UC_NODE = 10.0
    cd tools/orange_cube
    python set_can_parameters.py
    ```
-2. Check CAN bus bitrate (must be 1 Mbps on both devices)
-3. Verify node IDs don't conflict
-4. Test with CAN sniffer (Cangaroo + USB CAN adapter)
+2. Check CAN interface: `ip link show can0`
+3. Verify node IDs don't conflict (Orange Cube=10, Raspberry Pi=100)
+4. Test CAN bus: `cansend can0 123#DEADBEEF`
 
 #### ❌ "Motors not responding"
-**Cause**: ESC timeout or configuration issue
+**Cause**: PWM or ESC configuration issue
 **Solution**:
-1. Check PWM pin connections (PA8, PA9, PA10, PA11)
+1. Check PWM pin connections (GPIO 18/19)
 2. Verify ESC power supply and calibration
-3. Monitor serial output for ESC command reception
-4. Test with manual PWM values in test mode
+3. Test PWM output with oscilloscope
+4. Check service logs: `esc-logs`
 
 #### ❌ "Orange Cube not arming"
 **Cause**: PreArm check failures
@@ -263,41 +331,51 @@ Parameter: CAN_D1_UC_NODE = 10.0
 
 ### Debug Tools
 
-#### Serial Monitoring
+#### Service Management
 ```bash
-# Beyond Robotics board
-pio device monitor -b 115200
+# Check service status
+esc-status
 
-# Orange Cube
-python tools/orange_cube/monitor_orange_cube.py
+# View live logs
+esc-logs
+
+# Stop for manual testing
+esc-stop
+sudo python3 dronecan_esc_controller.py --pwm
+
+# Restart service
+esc-start
 ```
 
-#### CAN Bus Analysis
+#### Hardware Testing
 ```bash
-# Send test commands
-python tools/dronecan/send_dronecan_actuator_commands.py
+# Test CAN interface
+candump can0
 
-# Monitor with external sniffer
-# Use Cangaroo + USB CAN adapter for detailed analysis
+# Test PWM output (oscilloscope on GPIO 18/19)
+sudo python3 dronecan_esc_controller.py --pwm
+
+# Monitor Orange Cube
+python tools/orange_cube/monitor_orange_cube.py
 ```
 
 ## 📈 Performance Characteristics
 
 ### System Specifications
-- **Update Rate**: 50 Hz (20ms cycle time)
+- **Update Rate**: Real-time (no artificial throttling)
 - **CAN Bitrate**: 1 Mbps
-- **PWM Resolution**: 1μs precision
-- **Safety Timeout**: 1 second
-- **Memory Usage**: ~32KB Flash, ~8KB RAM
+- **PWM Resolution**: Hardware-PWM precision
+- **Safety Timeout**: 2 seconds
+- **Memory Usage**: Python runtime (~50MB RAM)
 
 ### Communication Latency
-- **Orange Cube → Beyond Robotics**: <5ms
-- **ESC Command → PWM Output**: <1ms
-- **Battery Info Update**: 100ms interval
+- **Orange Cube → Raspberry Pi**: <5ms
+- **ESC Command → PWM Output**: <1ms (Hardware-PWM)
+- **Service Restart**: <3 seconds
 
 ## 🔄 Development History
 
-This project evolved from an ESP32-based implementation to a professional Beyond Robotics solution:
+This project evolved from an ESP32-based implementation through Beyond Robotics to the current Raspberry Pi solution:
 
 ### Phase 1: ESP32 Prototype (`archive/esp32_files/`)
 - Initial DroneCAN implementation
@@ -315,11 +393,12 @@ This project evolved from an ESP32-based implementation to a professional Beyond
 - Production-ready code quality
 - Complete testing framework
 
-### Phase 4: Project Cleanup
-- Organized development tools
-- Archived legacy implementations
-- Created comprehensive documentation
-- Established professional project structure
+### Phase 4: Raspberry Pi Migration (Current)
+- Migrated from Beyond Robotics to Raspberry Pi 3
+- Implemented Hardware-PWM with freeze protection
+- Added calibrated ESC command processing
+- Created systemd service integration
+- Achieved superior reliability and flexibility
 
 ## 🤝 Contributing
 
@@ -330,39 +409,48 @@ This project evolved from an ESP32-based implementation to a professional Beyond
 - **Testing**: Validate all changes with hardware
 
 ### Development Workflow
-1. **Test on hardware** - Always validate with real Orange Cube
-2. **Maintain compatibility** - Preserve Beyond Robotics integration
+1. **Test on hardware** - Always validate with real Orange Cube and Raspberry Pi
+2. **Use service management** - Stop service before testing new versions
 3. **Document changes** - Update README and inline comments
 4. **Archive old code** - Move obsolete files to archive/
 
 ## 📞 Support and Resources
 
 ### Official Documentation
-- **Beyond Robotics**: https://beyond-robotix.gitbook.io/docs/
+- **Raspberry Pi Foundation**: https://www.raspberrypi.org/documentation/
 - **DroneCAN Protocol**: https://dronecan.github.io/
 - **ArduPilot**: https://ardupilot.org/rover/
+- **pigpio Library**: http://abyz.me.uk/rpi/pigpio/
 
 ### Hardware Support
-- **Beyond Robotics Dev Board**: STM32L431 with integrated CAN
+- **Raspberry Pi 3**: ARM Cortex-A53 with GPIO Hardware-PWM
+- **Innomaker CAN HAT**: MCP2515-based CAN interface
 - **Orange Cube**: ArduPilot-compatible autopilot
 - **CAN Tools**: USB CAN adapters, Cangaroo software
 
 ### Community
 - **ArduPilot Forum**: https://discuss.ardupilot.org/
 - **DroneCAN Community**: GitHub discussions and issues
-- **Beyond Robotics Support**: Official documentation and examples
+- **Raspberry Pi Community**: Official forums and documentation
 
 ---
 
 ## 🎯 Project Status Summary
 
-**✅ PRODUCTION READY** - This DroneCAN motor controller implementation is fully functional and tested with real hardware. The system successfully enables 4-channel PWM motor control via DroneCAN commands from an Orange Cube autopilot, with comprehensive safety features and professional code architecture.
+**✅ PRODUCTION READY** - This DroneCAN ESC controller implementation is fully functional and tested with real hardware. The system successfully enables 2-channel Hardware-PWM motor control via DroneCAN commands from an Orange Cube autopilot for UGV applications, with comprehensive safety features and professional Python architecture.
 
 **Key Achievements:**
-- ✅ Stable DroneCAN communication at 1 Mbps
-- ✅ 4-channel PWM motor control with safety timeout
-- ✅ Battery monitoring and reporting
-- ✅ Professional modular code architecture
+- ✅ Stable DroneCAN communication at 1 Mbps with Raspberry Pi 3
+- ✅ Hardware-PWM motor control with freeze protection
+- ✅ Calibrated ESC command processing with real Orange Cube parameters
+- ✅ Automatic service startup with systemd integration
+- ✅ Professional Python architecture with comprehensive safety features
+
+**Migration Success:**
+- 🔄 Successfully migrated from Beyond Robotics to Raspberry Pi
+- 🛡️ Improved reliability with Hardware-PWM freeze protection
+- ⚙️ Enhanced usability with service management commands
+- 📊 Better monitoring with calibrated value display
 - ✅ Comprehensive testing and configuration tools
 - ✅ Complete documentation and troubleshooting guides
 
