@@ -30,7 +30,7 @@ from flask_socketio import SocketIO, emit
 class CalibratedESCController:
     def __init__(self, enable_pwm=False, pwm_pins=[18, 19], enable_monitor=True, quiet=False,
                  enable_ramping=True, acceleration_rate=25, deceleration_rate=800, brake_rate=1500,
-                 enable_web=False, web_port=5000):
+                 enable_web=False, web_port=80):
         # Kalibrierungswerte AKTUALISIERT mit neuen Orange Cube Parametern
         # Motor 0 = Rechts, Motor 1 = Links
         # Neue Werte: Rückwärts ~-8000, Neutral ~0, Vorwärts ~+8000
@@ -159,6 +159,7 @@ class CalibratedESCController:
             if not self.quiet:
                 print(f"🌐 Web-Interface gestartet auf Port {self.web_port}")
                 print(f"   URL: http://raspberrycan:{self.web_port}")
+                print(f"   👑 Quassel UGV Controller bereit!")
 
         except ImportError:
             print("❌ FEHLER: Flask/SocketIO nicht installiert!")
@@ -742,7 +743,7 @@ Beispiele:
   python3 dronecan_esc_controller.py --pins 12,13       # Andere GPIO-Pins
   python3 dronecan_esc_controller.py --pwm --no-ramping # PWM ohne Ramping (sofort)
   python3 dronecan_esc_controller.py --pwm --accel-rate 100 --brake-rate 2000  # Angepasste Ramping-Raten
-  python3 dronecan_esc_controller.py --pwm --web        # PWM + Web-Interface
+  python3 dronecan_esc_controller.py --pwm --web        # PWM + Web-Interface (Port 80)
   python3 dronecan_esc_controller.py --pwm --web --web-port 8080  # Web-Interface auf Port 8080
         """
     )
@@ -776,8 +777,8 @@ Beispiele:
     # Web-Interface Argumente
     parser.add_argument('--web', action='store_true',
                        help='Web-Interface aktivieren (default: deaktiviert)')
-    parser.add_argument('--web-port', type=int, default=5000,
-                       help='Web-Interface Port (default: 5000)')
+    parser.add_argument('--web-port', type=int, default=80,
+                       help='Web-Interface Port (default: 80)')
 
     args = parser.parse_args()
 
@@ -812,7 +813,9 @@ Beispiele:
                 print("⚡ Ramping: DEAKTIVIERT (sofortige PWM-Änderungen)")
         if args.web:
             print(f"🌐 Web-Interface: http://raspberrycan:{args.web_port}")
-            print("   Features: CAN Ein/Aus, Status-Monitor")
+            if args.web_port == 80:
+                print(f"   👑 Quassel UGV Controller: http://raspberrycan")
+            print("   Features: CAN Ein/Aus, Joystick, Status-Monitor")
         print("="*70)
 
     # Controller erstellen

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>UGV DroneCAN Controller</title>
+    <title>👑 Quassel UGV Controller 👑</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <style>
         * {
@@ -19,9 +19,9 @@
         }
 
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-            color: white;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            background: linear-gradient(135deg, #2d5016 0%, #4a7c59 50%, #1a3d0f 100%);
+            color: #f5f5dc;
             height: 100vh;
             overflow: hidden;
             display: flex;
@@ -29,45 +29,93 @@
         }
 
         .header {
-            background: rgba(0,0,0,0.3);
-            padding: 15px;
+            background: linear-gradient(135deg, rgba(212, 175, 55, 0.15) 0%, rgba(45, 80, 22, 0.25) 100%);
+            padding: 20px;
             text-align: center;
-            border-bottom: 2px solid rgba(255,255,255,0.2);
+            border-bottom: 3px solid rgba(212, 175, 55, 0.4);
+            backdrop-filter: blur(15px);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
         }
 
         .header h1 {
-            font-size: 1.5em;
-            margin-bottom: 5px;
+            font-size: 2.2em;
+            margin-bottom: 15px;
+            color: #ffd700;
+            font-weight: bold;
+            letter-spacing: 2px;
+            text-shadow: 3px 3px 8px rgba(0, 0, 0, 0.8);
+            font-family: 'Georgia', 'Times New Roman', serif;
+        }
+
+        .header-controls {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .info-toggle-btn {
+            padding: 8px 16px;
+            background: linear-gradient(45deg, rgba(212, 175, 55, 0.3), rgba(212, 175, 55, 0.5));
+            border: 2px solid rgba(212, 175, 55, 0.6);
+            border-radius: 20px;
+            color: #ffd700;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            font-weight: bold;
+            font-size: 0.9em;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .info-toggle-btn:hover {
+            background: linear-gradient(45deg, rgba(212, 175, 55, 0.5), rgba(212, 175, 55, 0.7));
+            transform: translateY(-1px);
         }
 
         .status-bar {
-            display: flex;
-            justify-content: space-between;
+            display: none;
+            justify-content: center;
             align-items: center;
+            gap: 30px;
             font-size: 0.9em;
+            background: rgba(45, 80, 22, 0.4);
+            padding: 12px 25px;
+            border-radius: 20px;
+            border: 2px solid rgba(212, 175, 55, 0.5);
+            backdrop-filter: blur(10px);
+            margin-top: 15px;
+        }
+
+        .status-bar.visible {
+            display: flex;
         }
 
         .status-indicator {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
+            color: #f5f5dc;
+            font-weight: 600;
         }
 
         .status-dot {
-            width: 12px;
-            height: 12px;
+            width: 14px;
+            height: 14px;
             border-radius: 50%;
             transition: all 0.3s ease;
+            border: 2px solid rgba(212, 175, 55, 0.4);
         }
 
         .status-dot.active {
-            background: #4CAF50;
-            box-shadow: 0 0 10px #4CAF50;
+            background: #32cd32;
+            border-color: #32cd32;
+            box-shadow: 0 0 15px rgba(50, 205, 50, 0.7);
         }
 
         .status-dot.inactive {
-            background: #f44336;
-            box-shadow: 0 0 10px #f44336;
+            background: #8b4513;
+            border-color: #8b4513;
+            box-shadow: 0 0 10px rgba(139, 69, 19, 0.5);
         }
 
         .main-content {
@@ -79,57 +127,64 @@
         }
 
         .control-section {
-            background: rgba(255,255,255,0.1);
-            border-radius: 15px;
-            padding: 20px;
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255,255,255,0.2);
+            background: linear-gradient(135deg, rgba(212, 175, 55, 0.1) 0%, rgba(45, 80, 22, 0.15) 100%);
+            border-radius: 20px;
+            padding: 25px;
+            backdrop-filter: blur(15px);
+            border: 2px solid rgba(212, 175, 55, 0.3);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.2);
         }
 
         .section-title {
-            font-size: 1.2em;
-            margin-bottom: 15px;
+            font-size: 1.4em;
+            margin-bottom: 20px;
             text-align: center;
-            color: #fff;
+            color: #ffd700;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.7);
+            font-family: 'Georgia', 'Times New Roman', serif;
         }
 
         .emergency-controls {
             display: flex;
-            gap: 15px;
+            gap: 20px;
             justify-content: center;
         }
 
         .btn {
-            padding: 15px 25px;
+            padding: 12px 20px;
             border: none;
-            border-radius: 10px;
-            font-size: 1.1em;
+            border-radius: 12px;
+            font-size: 1.0em;
             font-weight: bold;
             cursor: pointer;
             transition: all 0.3s ease;
             text-transform: uppercase;
             letter-spacing: 1px;
-            min-width: 120px;
+            min-width: 100px;
+            font-family: 'Georgia', 'Times New Roman', serif;
         }
 
         .btn-emergency {
-            background: linear-gradient(45deg, #ff4444, #cc0000);
-            color: white;
-            box-shadow: 0 4px 15px rgba(255, 68, 68, 0.4);
+            background: linear-gradient(45deg, #8b4513, #a0522d);
+            color: #ffd700;
+            box-shadow: 0 4px 15px rgba(139, 69, 19, 0.5);
+            border: 2px solid rgba(212, 175, 55, 0.4);
         }
 
         .btn-emergency:hover {
             transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(255, 68, 68, 0.6);
+            box-shadow: 0 6px 20px rgba(139, 69, 19, 0.7);
         }
 
         .btn-emergency.active {
-            background: linear-gradient(45deg, #4CAF50, #45a049);
-            box-shadow: 0 4px 15px rgba(76, 175, 80, 0.4);
+            background: linear-gradient(45deg, #2d5016, #4a7c59);
+            box-shadow: 0 4px 15px rgba(45, 80, 22, 0.6);
+            border: 2px solid rgba(212, 175, 55, 0.6);
         }
 
         .btn-emergency.active:hover {
-            box-shadow: 0 6px 20px rgba(76, 175, 80, 0.6);
+            box-shadow: 0 6px 20px rgba(45, 80, 22, 0.8);
         }
 
         .info-grid {
@@ -140,52 +195,63 @@
         }
 
         .info-card {
-            background: rgba(255,255,255,0.05);
-            border-radius: 10px;
-            padding: 15px;
+            background: linear-gradient(135deg, rgba(212, 175, 55, 0.1) 0%, rgba(45, 80, 22, 0.1) 100%);
+            border-radius: 15px;
+            padding: 18px;
             text-align: center;
-            border: 1px solid rgba(255,255,255,0.1);
+            border: 2px solid rgba(212, 175, 55, 0.3);
+            backdrop-filter: blur(10px);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
         }
 
         .info-label {
-            font-size: 0.9em;
-            opacity: 0.8;
-            margin-bottom: 5px;
+            font-size: 1.0em;
+            color: #d4af37;
+            margin-bottom: 8px;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            font-weight: bold;
         }
 
         .info-value {
             font-size: 1.3em;
             font-weight: bold;
-            color: #4CAF50;
+            color: #32cd32;
         }
 
         .connection-status {
             position: fixed;
             top: 10px;
             right: 10px;
-            padding: 8px 12px;
+            padding: 8px 15px;
             border-radius: 20px;
-            font-size: 0.8em;
+            font-size: 0.9em;
             font-weight: bold;
             transition: all 0.3s ease;
+            background: rgba(212, 175, 55, 0.2);
+            border: 1px solid rgba(212, 175, 55, 0.5);
+            color: #d4af37;
         }
 
         .connection-status.connected {
-            background: rgba(76, 175, 80, 0.8);
-            color: white;
+            background: rgba(212, 175, 55, 0.3);
+            border-color: #d4af37;
+            color: #ffd700;
         }
 
         .connection-status.disconnected {
-            background: rgba(244, 67, 54, 0.8);
-            color: white;
+            background: rgba(139, 69, 19, 0.3);
+            border-color: #8b4513;
+            color: #cd853f;
         }
 
         .footer {
-            background: rgba(0,0,0,0.3);
-            padding: 10px;
+            background: linear-gradient(135deg, rgba(45, 80, 22, 0.3) 0%, rgba(212, 175, 55, 0.1) 100%);
+            padding: 15px;
             text-align: center;
-            font-size: 0.8em;
-            opacity: 0.7;
+            font-size: 0.9em;
+            color: #d4af37;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            border-top: 2px solid rgba(212, 175, 55, 0.3);
         }
 
         /* Responsive Design für Smartphone hochkant */
@@ -223,12 +289,13 @@
         }
 
         #joystickCanvas {
-            border: 3px solid rgba(255, 255, 255, 0.3);
+            border: 4px solid rgba(212, 175, 55, 0.5);
             border-radius: 50%;
-            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%);
+            background: radial-gradient(circle, rgba(212, 175, 55, 0.15) 0%, rgba(45, 80, 22, 0.1) 100%);
             cursor: pointer;
             touch-action: none;
             user-select: none;
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
         }
 
         .joystick-info {
@@ -242,9 +309,10 @@
         .joystick-values {
             display: flex;
             gap: 20px;
-            font-family: 'Courier New', monospace;
+            font-family: 'Georgia', 'Times New Roman', serif;
             font-size: 1.1em;
-            color: #00ff88;
+            color: #ffd700;
+            font-weight: bold;
         }
 
         .speed-control {
@@ -258,35 +326,39 @@
 
         .speed-control label {
             font-size: 1.1em;
-            color: #ffffff;
+            color: #ffd700;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            font-weight: bold;
         }
 
         #speedSlider {
             width: 100%;
-            height: 8px;
-            border-radius: 5px;
-            background: rgba(255, 255, 255, 0.2);
+            height: 10px;
+            border-radius: 8px;
+            background: rgba(212, 175, 55, 0.3);
             outline: none;
             -webkit-appearance: none;
+            border: 1px solid rgba(212, 175, 55, 0.5);
         }
 
         #speedSlider::-webkit-slider-thumb {
             -webkit-appearance: none;
             appearance: none;
-            width: 25px;
-            height: 25px;
+            width: 28px;
+            height: 28px;
             border-radius: 50%;
-            background: #00ff88;
+            background: #ffd700;
             cursor: pointer;
+            border: 2px solid #d4af37;
         }
 
         #speedSlider::-moz-range-thumb {
-            width: 25px;
-            height: 25px;
+            width: 28px;
+            height: 28px;
             border-radius: 50%;
-            background: #00ff88;
+            background: #ffd700;
             cursor: pointer;
-            border: none;
+            border: 2px solid #d4af37;
         }
 
         /* Joystick nur anzeigen wenn CAN aktiv */
@@ -313,8 +385,12 @@
     <div class="connection-status" id="connectionStatus">Verbinde...</div>
     
     <div class="header">
-        <h1>🚗 UGV DroneCAN Controller</h1>
-        <div class="status-bar">
+        <h1>👑 Quassel UGV 👑</h1>
+        <div class="header-controls">
+            <button class="info-toggle-btn" onclick="toggleStatusInfo()">📊 Info</button>
+            <!-- Platz für zukünftige Buttons: Mäher, Licht -->
+        </div>
+        <div class="status-bar" id="statusBar">
             <div class="status-indicator">
                 <div class="status-dot" id="canStatus"></div>
                 <span>CAN Bus</span>
@@ -332,7 +408,6 @@
 
     <div class="main-content">
         <div class="control-section">
-            <div class="section-title">🚨 Not-Aus Steuerung</div>
             <div class="emergency-controls">
                 <button class="btn btn-emergency" id="canToggleBtn" onclick="toggleCAN()">
                     <span id="canToggleText">CAN STOPPEN</span>
@@ -342,7 +417,6 @@
 
         <!-- Phase 2: Virtueller Joystick -->
         <div class="control-section" id="joystickSection">
-            <div class="section-title">🕹️ Virtueller Joystick</div>
             <div class="joystick-container">
                 <canvas id="joystickCanvas" width="300" height="300"></canvas>
                 <div class="joystick-info">
@@ -382,7 +456,7 @@
     </div>
 
     <div class="footer">
-        Raspberry Pi DroneCAN Controller v2.0 | Phase 2: Virtueller Joystick
+        👑 Quassel UGV Controller v2.0 | Schloss Quassel 👑
     </div>
 
     <script>
@@ -433,6 +507,12 @@
         socket.on('status_update', function(data) {
             updateStatus(data);
         });
+
+        // Status Info Toggle Funktion
+        function toggleStatusInfo() {
+            const statusBar = document.getElementById('statusBar');
+            statusBar.classList.toggle('visible');
+        }
 
         // CAN Toggle Funktion
         function toggleCAN() {
