@@ -203,12 +203,36 @@ curl http://raspberrycan:5000/api/status
 curl -X POST http://raspberrycan:5000/api/can/toggle
 ```
 
-## Nächste Schritte (Phase 2)
+## ✅ Phase 2: Virtueller Joystick (IMPLEMENTIERT)
 
-1. **Virtueller Joystick**: HTML5 Canvas-basierte Touch-Steuerung
-2. **Joystick-zu-DroneCAN**: Konvertierung von Touch-Input zu ESC-Kommandos
-3. **Erweiterte Features**: Lampe, Mähen, Geschwindigkeitsregelung
-4. **Konfiguration**: Web-basierte Parameter-Einstellung
+### Features
+- **HTML5 Canvas Joystick**: Touch-optimierte Steuerung für Smartphones
+- **Skid Steering Logic**: X/Y-Koordinaten → Links/Rechts Motor-PWM
+- **WebSocket-Kommunikation**: Niedrige Latenz für Echtzeit-Steuerung
+- **Geschwindigkeitsregelung**: Einstellbarer Max-Speed-Slider (10-100%)
+- **Sicherheitsfeatures**: Joystick nur aktiv wenn CAN **DEAKTIVIERT** (Not-Aus-Modus)
+- **Autonomie-Schutz**: Verhindert Störung des autonomen Fahrens (GPS/RTK)
+- **Smooth Release**: Automatische Rückkehr zu Neutral-Position
+
+### Bedienung
+1. **CAN deaktivieren**: "CAN STOPPEN" drücken (Not-Aus-Modus aktivieren)
+2. **Joystick verwenden**: Touch/Drag auf dem grünen Kreis (nur bei CAN AUS)
+3. **Geschwindigkeit einstellen**: Slider für Max-Speed anpassen
+4. **Loslassen**: Joystick kehrt automatisch zu Neutral zurück
+5. **Autonomie aktivieren**: "CAN STARTEN" für GPS/RTK-Navigation
+
+### Technische Details
+- **Joystick-Priorität**: Joystick überschreibt DroneCAN-Kommandos
+- **Timeout-Überwachung**: 1 Sekunde Joystick-Timeout
+- **PWM-Konvertierung**: -1.0→1000μs, 0→1500μs, +1.0→2000μs
+- **Ramping**: Bestehende Beschleunigungs-/Verzögerungslogik wird verwendet
+
+## Nächste Schritte (Phase 3)
+
+1. **Erweiterte Features**: Lampe, Mähen, Geschwindigkeitsregelung
+2. **Konfiguration**: Web-basierte Parameter-Einstellung
+3. **Logging**: Fahrt-Aufzeichnung und Replay
+4. **Autonomie**: Wegpunkt-Navigation
 
 ---
 

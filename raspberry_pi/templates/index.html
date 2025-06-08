@@ -213,11 +213,98 @@
             }
         }
 
+        /* Joystick Styles (Phase 2) */
+        .joystick-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            padding: 20px;
+        }
+
+        #joystickCanvas {
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, rgba(255,255,255,0.05) 100%);
+            cursor: pointer;
+            touch-action: none;
+            user-select: none;
+        }
+
+        .joystick-info {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+            width: 100%;
+        }
+
+        .joystick-values {
+            display: flex;
+            gap: 20px;
+            font-family: 'Courier New', monospace;
+            font-size: 1.1em;
+            color: #00ff88;
+        }
+
+        .speed-control {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            width: 100%;
+            max-width: 300px;
+        }
+
+        .speed-control label {
+            font-size: 1.1em;
+            color: #ffffff;
+        }
+
+        #speedSlider {
+            width: 100%;
+            height: 8px;
+            border-radius: 5px;
+            background: rgba(255, 255, 255, 0.2);
+            outline: none;
+            -webkit-appearance: none;
+        }
+
+        #speedSlider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 25px;
+            height: 25px;
+            border-radius: 50%;
+            background: #00ff88;
+            cursor: pointer;
+        }
+
+        #speedSlider::-moz-range-thumb {
+            width: 25px;
+            height: 25px;
+            border-radius: 50%;
+            background: #00ff88;
+            cursor: pointer;
+            border: none;
+        }
+
+        /* Joystick nur anzeigen wenn CAN aktiv */
+        .joystick-disabled {
+            opacity: 0.3;
+            pointer-events: none;
+        }
+
         /* Touch-optimierte Buttons */
         @media (hover: none) and (pointer: coarse) {
             .btn {
                 padding: 20px 25px;
                 font-size: 1.2em;
+            }
+
+            #joystickCanvas {
+                width: 280px;
+                height: 280px;
             }
         }
     </style>
@@ -253,6 +340,24 @@
             </div>
         </div>
 
+        <!-- Phase 2: Virtueller Joystick -->
+        <div class="control-section" id="joystickSection">
+            <div class="section-title">🕹️ Virtueller Joystick</div>
+            <div class="joystick-container">
+                <canvas id="joystickCanvas" width="300" height="300"></canvas>
+                <div class="joystick-info">
+                    <div class="joystick-values">
+                        <span>X: <span id="joystickX">0.00</span></span>
+                        <span>Y: <span id="joystickY">0.00</span></span>
+                    </div>
+                    <div class="speed-control">
+                        <label for="speedSlider">Max Speed: <span id="speedValue">100</span>%</label>
+                        <input type="range" id="speedSlider" min="10" max="100" value="100" step="5">
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div class="control-section">
             <div class="section-title">📊 System Status</div>
             <div class="info-grid">
@@ -265,8 +370,8 @@
                     <div class="info-value" id="rightPwm">1500μs</div>
                 </div>
                 <div class="info-card">
-                    <div class="info-label">Letztes Kommando</div>
-                    <div class="info-value" id="lastCommand">--</div>
+                    <div class="info-label">Joystick Status</div>
+                    <div class="info-value" id="joystickStatus">Inaktiv</div>
                 </div>
                 <div class="info-card">
                     <div class="info-label">Verbindung</div>
@@ -277,7 +382,7 @@
     </div>
 
     <div class="footer">
-        Raspberry Pi DroneCAN Controller v1.0 | Phase 1: CAN Ein/Aus
+        Raspberry Pi DroneCAN Controller v2.0 | Phase 2: Virtueller Joystick
     </div>
 
     <script>
@@ -285,6 +390,31 @@
         const socket = io();
         let canEnabled = true;
         let connectionStartTime = Date.now();
+
+        // Joystick-Variablen (Phase 2)
+        let joystickCanvas, joystickCtx;
+        let joystickCenter = { x: 150, y: 150 };
+        let joystickRadius = 140;
+        let knobRadius = 30;
+        let isDragging = false;
+        let currentKnobPos = { x: 150, y: 150 };
+        let maxSpeed = 100;
+
+        // WebSocket Event-Handler für Debugging
+        socket.on('connect', function() {
+            console.log('✅ WebSocket verbunden');
+        });
+
+        socket.on('disconnect', function() {
+            console.log('❌ WebSocket getrennt');
+        });
+
+        socket.on('pwm_update', function(data) {
+            console.log('📡 PWM Update empfangen:', data);
+            // PWM-Werte in der UI aktualisieren
+            if (data.left) document.getElementById('leftPwm').textContent = data.left + 'μs';
+            if (data.right) document.getElementById('rightPwm').textContent = data.right + 'μs';
+        });
 
         // Verbindungsstatus
         socket.on('connect', function() {
@@ -339,30 +469,40 @@
         // UI Status aktualisieren
         function updateStatus(data) {
             canEnabled = data.can_enabled;
-            
+
             // Status-Dots aktualisieren
-            document.getElementById('canStatus').className = 
+            document.getElementById('canStatus').className =
                 'status-dot ' + (data.can_enabled ? 'active' : 'inactive');
-            document.getElementById('pwmStatus').className = 
+            document.getElementById('pwmStatus').className =
                 'status-dot ' + (data.pwm_enabled ? 'active' : 'inactive');
-            document.getElementById('monitorStatus').className = 
+            document.getElementById('monitorStatus').className =
                 'status-dot ' + (data.monitor_enabled ? 'active' : 'inactive');
-            
+
             // PWM-Werte aktualisieren
             if (data.current_pwm) {
-                document.getElementById('leftPwm').textContent = 
+                document.getElementById('leftPwm').textContent =
                     Math.round(data.current_pwm.left) + 'μs';
-                document.getElementById('rightPwm').textContent = 
+                document.getElementById('rightPwm').textContent =
                     Math.round(data.current_pwm.right) + 'μs';
             }
-            
-            // Letztes Kommando
-            if (data.last_command_time > 0) {
-                const timeDiff = (Date.now() / 1000) - data.last_command_time;
-                document.getElementById('lastCommand').textContent = 
-                    timeDiff < 60 ? Math.round(timeDiff) + 's' : 'vor ' + Math.round(timeDiff/60) + 'min';
+
+            // Joystick-Status
+            const joystickStatus = data.joystick_enabled ? 'Aktiv' : 'Inaktiv';
+            document.getElementById('joystickStatus').textContent = joystickStatus;
+
+            // Joystick-Bereich aktivieren/deaktivieren (umgekehrte Logik!)
+            const joystickSection = document.getElementById('joystickSection');
+            if (data.can_enabled) {
+                joystickSection.classList.add('joystick-disabled');  // CAN aktiv → Joystick deaktiviert
+            } else {
+                joystickSection.classList.remove('joystick-disabled');  // CAN deaktiviert → Joystick aktiv
             }
-            
+
+            // Joystick neu zeichnen falls CAN-Status geändert
+            if (joystickCtx) {
+                drawJoystick();
+            }
+
             updateCANButton();
         }
 
@@ -390,14 +530,183 @@
                 minutes > 0 ? `${minutes}:${seconds.toString().padStart(2, '0')}` : `${seconds}s`;
         }
 
+        // Joystick-Funktionen (Phase 2)
+        function initJoystick() {
+            joystickCanvas = document.getElementById('joystickCanvas');
+            joystickCtx = joystickCanvas.getContext('2d');
+
+            // Event-Listener für Touch und Mouse
+            joystickCanvas.addEventListener('mousedown', startDrag);
+            joystickCanvas.addEventListener('mousemove', drag);
+            joystickCanvas.addEventListener('mouseup', endDrag);
+            joystickCanvas.addEventListener('mouseleave', endDrag);
+
+            // Touch-Events
+            joystickCanvas.addEventListener('touchstart', handleTouch);
+            joystickCanvas.addEventListener('touchmove', handleTouch);
+            joystickCanvas.addEventListener('touchend', endDrag);
+
+            // Speed-Slider
+            const speedSlider = document.getElementById('speedSlider');
+            speedSlider.addEventListener('input', function() {
+                maxSpeed = parseInt(this.value);
+                document.getElementById('speedValue').textContent = maxSpeed;
+            });
+
+            drawJoystick();
+        }
+
+        function drawJoystick() {
+            joystickCtx.clearRect(0, 0, 300, 300);
+
+            // Äußerer Kreis (Joystick-Bereich)
+            joystickCtx.beginPath();
+            joystickCtx.arc(joystickCenter.x, joystickCenter.y, joystickRadius, 0, 2 * Math.PI);
+            joystickCtx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+            joystickCtx.lineWidth = 2;
+            joystickCtx.stroke();
+
+            // Mittelkreuz
+            joystickCtx.beginPath();
+            joystickCtx.moveTo(joystickCenter.x - 20, joystickCenter.y);
+            joystickCtx.lineTo(joystickCenter.x + 20, joystickCenter.y);
+            joystickCtx.moveTo(joystickCenter.x, joystickCenter.y - 20);
+            joystickCtx.lineTo(joystickCenter.x, joystickCenter.y + 20);
+            joystickCtx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+            joystickCtx.lineWidth = 1;
+            joystickCtx.stroke();
+
+            // Knob (beweglicher Teil)
+            joystickCtx.beginPath();
+            joystickCtx.arc(currentKnobPos.x, currentKnobPos.y, knobRadius, 0, 2 * Math.PI);
+            joystickCtx.fillStyle = canEnabled ? '#ff4444' : '#00ff88';  // Grün wenn CAN AUS (Joystick aktiv)
+            joystickCtx.fill();
+            joystickCtx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+            joystickCtx.lineWidth = 2;
+            joystickCtx.stroke();
+        }
+
+        function getEventPos(event) {
+            const rect = joystickCanvas.getBoundingClientRect();
+            const scaleX = joystickCanvas.width / rect.width;
+            const scaleY = joystickCanvas.height / rect.height;
+
+            if (event.touches && event.touches.length > 0) {
+                return {
+                    x: (event.touches[0].clientX - rect.left) * scaleX,
+                    y: (event.touches[0].clientY - rect.top) * scaleY
+                };
+            } else {
+                return {
+                    x: (event.clientX - rect.left) * scaleX,
+                    y: (event.clientY - rect.top) * scaleY
+                };
+            }
+        }
+
+        function startDrag(event) {
+            if (canEnabled) return;  // Joystick nur aktiv wenn CAN DEAKTIVIERT
+
+            const pos = getEventPos(event);
+            const distance = Math.sqrt(
+                Math.pow(pos.x - currentKnobPos.x, 2) +
+                Math.pow(pos.y - currentKnobPos.y, 2)
+            );
+
+            if (distance <= knobRadius) {
+                isDragging = true;
+                event.preventDefault();
+            }
+        }
+
+        function drag(event) {
+            if (!isDragging || canEnabled) return;  // Joystick nur aktiv wenn CAN DEAKTIVIERT
+
+            const pos = getEventPos(event);
+            const deltaX = pos.x - joystickCenter.x;
+            const deltaY = pos.y - joystickCenter.y;
+            const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+
+            if (distance <= joystickRadius) {
+                currentKnobPos.x = pos.x;
+                currentKnobPos.y = pos.y;
+            } else {
+                // Begrenze auf Joystick-Radius
+                const angle = Math.atan2(deltaY, deltaX);
+                currentKnobPos.x = joystickCenter.x + Math.cos(angle) * joystickRadius;
+                currentKnobPos.y = joystickCenter.y + Math.sin(angle) * joystickRadius;
+            }
+
+            // SOFORT aktualisieren bei jeder Bewegung
+            updateJoystickValues();
+            drawJoystick();
+            event.preventDefault();
+        }
+
+        function endDrag() {
+            if (!isDragging) return;
+
+            isDragging = false;
+
+            // Smooth return to center
+            const returnToCenter = () => {
+                const deltaX = joystickCenter.x - currentKnobPos.x;
+                const deltaY = joystickCenter.y - currentKnobPos.y;
+                const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+
+                if (distance > 2) {
+                    currentKnobPos.x += deltaX * 0.2;
+                    currentKnobPos.y += deltaY * 0.2;
+                    updateJoystickValues();
+                    drawJoystick();
+                    requestAnimationFrame(returnToCenter);
+                } else {
+                    currentKnobPos.x = joystickCenter.x;
+                    currentKnobPos.y = joystickCenter.y;
+                    updateJoystickValues();
+                    drawJoystick();
+                    socket.emit('joystick_release');
+                }
+            };
+
+            requestAnimationFrame(returnToCenter);
+        }
+
+        function handleTouch(event) {
+            event.preventDefault();
+
+            if (event.type === 'touchstart') {
+                startDrag(event);
+            } else if (event.type === 'touchmove') {
+                drag(event);
+            }
+        }
+
+        function updateJoystickValues() {
+            // Konvertiere Pixel-Position zu -1.0 bis +1.0
+            const x = (currentKnobPos.x - joystickCenter.x) / joystickRadius;
+            const y = -(currentKnobPos.y - joystickCenter.y) / joystickRadius; // Y invertiert
+
+            // Anzeige aktualisieren
+            document.getElementById('joystickX').textContent = x.toFixed(3);
+            document.getElementById('joystickY').textContent = y.toFixed(3);
+
+            // IMMER an Server senden (auch bei kleinen Bewegungen)
+            console.log(`Sending joystick: X=${x.toFixed(3)} Y=${y.toFixed(3)}`);
+            socket.emit('joystick_update', { x: x, y: y });
+        }
+
         // Initialisierung
         document.addEventListener('DOMContentLoaded', function() {
+            // Joystick initialisieren
+            initJoystick();
+
             // Status alle 2 Sekunden aktualisieren
             setInterval(fetchStatus, 2000);
-            
+
             // Verbindungszeit alle Sekunde aktualisieren
             setInterval(updateConnectionTime, 1000);
-            
+
             // Initialer Status-Abruf
             setTimeout(fetchStatus, 500);
         });

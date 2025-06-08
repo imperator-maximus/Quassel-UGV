@@ -89,6 +89,14 @@ class CalibratedESCController:
         self.last_command_time = time.time()
         self.command_timeout = 2.0  # 2 Sekunden Timeout
 
+        # Joystick-Steuerung (Phase 2)
+        self.joystick_enabled = False
+        self.joystick_x = 0.0  # -1.0 bis +1.0 (links/rechts)
+        self.joystick_y = 0.0  # -1.0 bis +1.0 (rückwärts/vorwärts)
+        self.joystick_last_update = 0
+        self.joystick_timeout = 1.0  # Sekunden
+        self.max_speed_percent = 100.0  # Geschwindigkeitsbegrenzung
+
         # PWM initialisieren falls aktiviert
         if self.enable_pwm:
             self._init_pwm()
@@ -174,7 +182,11 @@ class CalibratedESCController:
                 'pwm_enabled': self.enable_pwm,
                 'monitor_enabled': self.enable_monitor,
                 'last_command_time': getattr(self, 'last_command_time', 0),
-                'current_pwm': getattr(self, 'last_pwm_values', {'left': 1500, 'right': 1500})
+                'current_pwm': getattr(self, 'last_pwm_values', {'left': 1500, 'right': 1500}),
+                'joystick_enabled': getattr(self, 'joystick_enabled', False),
+                'joystick_x': getattr(self, 'joystick_x', 0.0),
+                'joystick_y': getattr(self, 'joystick_y', 0.0),
+                'max_speed_percent': getattr(self, 'max_speed_percent', 100.0)
             })
 
         @self.flask_app.route('/api/can/toggle', methods=['POST'])
@@ -199,6 +211,57 @@ class CalibratedESCController:
         def handle_disconnect():
             if not self.quiet:
                 print("🌐 Web-Client getrennt")
+
+        # Joystick Event-Handler (Phase 2)
+        @self.socketio.on('joystick_update')
+        def handle_joystick_update(data):
+            """Verarbeitet Joystick-Input vom Web-Interface"""
+            if self.can_enabled:
+                if not self.quiet:
+                    print("🚫 Joystick ignoriert - CAN ist aktiviert (Autonomie-Modus)")
+                return  # Joystick nur aktiv wenn CAN DEAKTIVIERT (Not-Aus-Modus)
+
+            try:
+                # Joystick-Werte extrahieren
+                x = float(data.get('x', 0.0))  # -1.0 bis +1.0
+                y = float(data.get('y', 0.0))  # -1.0 bis +1.0
+
+                # Begrenze Werte
+                x = max(-1.0, min(1.0, x))
+                y = max(-1.0, min(1.0, y))
+
+                # Debug-Ausgabe für jede Eingabe
+                if not self.quiet:
+                    print(f"🕹️ Joystick-Input: X={x:.3f} Y={y:.3f}")
+
+                # Joystick-Status aktualisieren
+                self.joystick_x = x
+                self.joystick_y = y
+                self.joystick_last_update = time.time()
+                self.joystick_enabled = True
+
+                # Joystick zu Motor-Kommandos konvertieren
+                self._process_joystick_input(x, y)
+
+            except Exception as e:
+                if not self.quiet:
+                    print(f"❌ Joystick-Fehler: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+        @self.socketio.on('joystick_release')
+        def handle_joystick_release():
+            """Behandelt Joystick-Release (zurück zu Neutral)"""
+            self.joystick_x = 0.0
+            self.joystick_y = 0.0
+            self.joystick_last_update = time.time()
+
+            # Motoren DIREKT auf Neutral setzen (nur wenn CAN deaktiviert - Not-Aus-Modus)
+            if not self.can_enabled and self.enable_pwm:
+                self._set_motor_pwm_direct('left', 1500)
+                self._set_motor_pwm_direct('right', 1500)
+                if not self.quiet:
+                    print("🕹️ Joystick-Release: Motoren auf Neutral (DIREKT)")
 
     def _run_web_server(self):
         """Läuft Web-Server in separatem Thread"""
@@ -324,6 +387,30 @@ class CalibratedESCController:
             print(f"🔧 PWM Debug: {side.capitalize()} GPIO{pin} = {ramped_pwm:.0f}μs")
             self._last_pwm_debug = time.time()
 
+    def _set_motor_pwm_direct(self, side, pwm_us):
+        """Setzt PWM-Wert DIREKT ohne Ramping (für Joystick-Input)"""
+        if not self.enable_pwm or not hasattr(self, 'pi'):
+            return
+
+        # Sicherheitsbegrenzung
+        pwm_us = max(1000, min(2000, pwm_us))
+
+        # Konvertiere μs zu pigpio duty cycle (0-1000000)
+        # Bei 50Hz: 1000μs = 5%, 1500μs = 7.5%, 2000μs = 10%
+        duty_cycle = int((pwm_us / 20000.0) * 1000000)
+
+        pin = self.pwm_pins[side]
+        self.pi.hardware_PWM(pin, 50, duty_cycle)
+
+        # Aktualisiere auch die internen Werte für Konsistenz
+        self.current_pwm_values[side] = pwm_us
+        self.target_pwm_values[side] = pwm_us
+        self.last_pwm_values[side] = pwm_us
+
+        # Debug-Ausgabe für Joystick
+        if not self.quiet:
+            print(f"⚡ DIREKT-PWM: {side.capitalize()} GPIO{pin} = {pwm_us}μs (ohne Ramping)")
+
     def _update_ramping(self):
         """Aktualisiert Ramping-Zustand (muss regelmäßig aufgerufen werden)"""
         if not self.enable_ramping or not self.enable_pwm:
@@ -349,13 +436,72 @@ class CalibratedESCController:
 
     def _check_command_timeout(self):
         """Prüft Kommando-Timeout und setzt ggf. auf Neutral"""
-        if self.enable_pwm and time.time() - self.last_command_time > self.command_timeout:
+        current_time = time.time()
+
+        # Prüfe Joystick-Timeout
+        if (self.joystick_enabled and
+            current_time - self.joystick_last_update > self.joystick_timeout):
+            self.joystick_enabled = False
+            if not self.quiet:
+                print("⚠️ Joystick-Timeout - Joystick deaktiviert")
+
+        # Prüfe DroneCAN-Kommando-Timeout (nur wenn Joystick nicht aktiv)
+        if (self.enable_pwm and not self.joystick_enabled and
+            current_time - self.last_command_time > self.command_timeout):
             # Timeout erreicht - auf Neutral setzen (mit Ramping)
             self._set_motor_pwm('left', 1500)
             self._set_motor_pwm('right', 1500)
             if not self.quiet:
                 print("⚠️ Kommando-Timeout - Motoren auf Neutral gesetzt")
-            self.last_command_time = time.time()  # Reset um Spam zu vermeiden
+            self.last_command_time = current_time  # Reset um Spam zu vermeiden
+
+    def _process_joystick_input(self, x, y):
+        """Konvertiert Joystick-Input zu Motor-PWM-Werten (Skid Steering)"""
+        if not self.enable_pwm or self.can_enabled:
+            if not self.quiet:
+                print(f"🚫 PWM ignoriert - PWM={self.enable_pwm}, CAN={self.can_enabled}")
+            return  # Joystick nur aktiv wenn PWM enabled UND CAN deaktiviert
+
+        # Geschwindigkeitsbegrenzung anwenden
+        speed_factor = self.max_speed_percent / 100.0
+        x_scaled = x * speed_factor
+        y_scaled = y * speed_factor
+
+        # Skid Steering Logic: X/Y zu Links/Rechts Motor
+        # Y = Vorwärts/Rückwärts, X = Links/Rechts
+        left_power = y_scaled + x_scaled   # Links = Vorwärts + Rechtsdrehung
+        right_power = y_scaled - x_scaled  # Rechts = Vorwärts - Rechtsdrehung
+
+        # Normalisierung falls Werte > 1.0
+        max_power = max(abs(left_power), abs(right_power))
+        if max_power > 1.0:
+            left_power /= max_power
+            right_power /= max_power
+
+        # Konvertiere zu PWM-Werten (1000-2000μs)
+        left_pwm = int(1500 + left_power * 500)   # -1.0→1000μs, 0→1500μs, +1.0→2000μs
+        right_pwm = int(1500 + right_power * 500)
+
+        # Sicherheitsbegrenzung
+        left_pwm = max(1000, min(2000, left_pwm))
+        right_pwm = max(1000, min(2000, right_pwm))
+
+        # PWM setzen - DIREKT ohne Ramping für Joystick
+        self._set_motor_pwm_direct('left', left_pwm)
+        self._set_motor_pwm_direct('right', right_pwm)
+
+        # Debug-Ausgabe für JEDE Bewegung
+        if not self.quiet:
+            print(f"🕹️ PWM-Update: X={x:.3f}→{x_scaled:.3f} Y={y:.3f}→{y_scaled:.3f} | L={left_pwm}μs R={right_pwm}μs")
+
+        # WebSocket-Status an Client senden
+        if hasattr(self, 'socketio') and self.socketio:
+            self.socketio.emit('pwm_update', {
+                'left': left_pwm,
+                'right': right_pwm,
+                'joystick_x': x,
+                'joystick_y': y
+            })
         
     def raw_to_percent(self, raw_value, motor_side):
         """Konvertiert Raw-Werte zu kalibrierten Prozent-Werten"""
@@ -471,6 +617,13 @@ class CalibratedESCController:
             if self.enable_pwm:
                 self._set_motor_pwm('left', 1500)
                 self._set_motor_pwm('right', 1500)
+            return
+
+        # Joystick-Priorität: Ignoriere DroneCAN wenn Joystick aktiv
+        if self.joystick_enabled:
+            # Joystick hat Priorität - ignoriere DroneCAN-Kommandos
+            # Aber aktualisiere trotzdem Timestamp für Monitor
+            self.last_command_time = time.time()
             return
 
         # Motor-Zuordnung FINAL KORRIGIERT: Tausche Links/Rechts
