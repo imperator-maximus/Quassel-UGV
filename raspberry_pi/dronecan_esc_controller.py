@@ -30,7 +30,7 @@ from flask_socketio import SocketIO, emit
 class CalibratedESCController:
     def __init__(self, enable_pwm=False, pwm_pins=[18, 19], enable_monitor=True, quiet=False,
                  enable_ramping=True, acceleration_rate=25, deceleration_rate=800, brake_rate=1500,
-                 enable_web=False, web_port=80):
+                 enable_web=False, web_port=80, safety_pin=17):
         # Kalibrierungswerte AKTUALISIERT mit neuen Orange Cube Parametern
         # Motor 0 = Rechts, Motor 1 = Links
         # Neue Werte: Rückwärts ~-8000, Neutral ~0, Vorwärts ~+8000
@@ -56,6 +56,11 @@ class CalibratedESCController:
         self.enable_monitor = enable_monitor
         self.quiet = quiet
         self.pwm_pins = {'left': pwm_pins[1], 'right': pwm_pins[0]}  # Links=GPIO19, Rechts=GPIO18
+
+        # Sicherheitsschaltleiste Konfiguration
+        self.safety_pin = safety_pin
+        self.safety_enabled = True  # Sicherheitsschaltleiste aktiviert
+        self.last_safety_trigger = 0  # Entprellung
 
         # Web-Interface Konfiguration
         self.enable_web = enable_web
@@ -101,6 +106,9 @@ class CalibratedESCController:
         if self.enable_pwm:
             self._init_pwm()
 
+        # Sicherheitsschaltleiste initialisieren
+        self._init_safety_switch()
+
         # Web-Interface initialisieren falls aktiviert
         if self.enable_web:
             self._init_web_interface()
@@ -138,6 +146,79 @@ class CalibratedESCController:
         except Exception as e:
             print(f"❌ PWM-Initialisierung fehlgeschlagen: {e}")
             sys.exit(1)
+
+    def _init_safety_switch(self):
+        """Initialisiert Sicherheitsschaltleiste auf GPIO17"""
+        if not self.safety_enabled:
+            return
+
+        try:
+            # Verwende das bereits initialisierte pigpio-Objekt falls PWM aktiv
+            if self.enable_pwm and hasattr(self, 'pi'):
+                pi = self.pi
+            else:
+                # Separates pigpio-Objekt für GPIO-Überwachung
+                import pigpio
+                pi = pigpio.pi()
+                if not pi.connected:
+                    raise Exception("Kann nicht mit pigpio daemon verbinden")
+                self.pi_safety = pi
+
+            # GPIO als Input mit Pull-Up konfigurieren
+            pi.set_mode(self.safety_pin, pigpio.INPUT)
+            pi.set_pull_up_down(self.safety_pin, pigpio.PUD_UP)
+
+            # Interrupt für fallende Flanke (Schaltleiste gedrückt)
+            pi.callback(self.safety_pin, pigpio.FALLING_EDGE, self._safety_switch_callback)
+
+            if not self.quiet:
+                print(f"🛡️ Sicherheitsschaltleiste initialisiert auf GPIO{self.safety_pin}")
+                print(f"   Betätigungswiderstand: ≤ 500 Ohm")
+                print(f"   Ansprechweg: 5,2 mm bei 100 mm/s")
+
+        except ImportError:
+            print("⚠️ WARNUNG: pigpio library nicht verfügbar - Sicherheitsschaltleiste deaktiviert")
+            self.safety_enabled = False
+        except Exception as e:
+            print(f"⚠️ WARNUNG: Sicherheitsschaltleiste-Initialisierung fehlgeschlagen: {e}")
+            print("   System läuft ohne Hardware-Sicherheitsschaltleiste weiter")
+            self.safety_enabled = False
+
+    def _safety_switch_callback(self, gpio, level, tick):
+        """Callback für Sicherheitsschaltleiste (GPIO-Interrupt)"""
+        current_time = time.time()
+
+        # Entprellung: Mindestens 100ms zwischen Auslösungen
+        if current_time - self.last_safety_trigger < 0.1:
+            return
+
+        self.last_safety_trigger = current_time
+
+        # Nur bei fallender Flanke (Schaltleiste gedrückt) und wenn CAN noch aktiv
+        if level == 0 and self.can_enabled:
+            if not self.quiet:
+                print(f"🚨 SICHERHEITSSCHALTLEISTE AUSGELÖST! GPIO{gpio} → Notaus aktiviert")
+
+            # Bestehenden Notaus-Modus aktivieren
+            self.can_enabled = False
+            self._emergency_stop()
+
+            # Web-Interface über Statusänderung informieren
+            if self.enable_web and self.socketio:
+                try:
+                    self.socketio.emit('status_update', {
+                        'can_enabled': self.can_enabled,
+                        'safety_triggered': True,
+                        'timestamp': current_time
+                    })
+                except Exception as e:
+                    if not self.quiet:
+                        print(f"⚠️ Web-Interface Benachrichtigung fehlgeschlagen: {e}")
+
+        elif level == 0 and not self.can_enabled:
+            # Schaltleiste gedrückt, aber bereits im Notaus-Modus
+            if not self.quiet:
+                print(f"🛡️ Sicherheitsschaltleiste gedrückt - bereits im Notaus-Modus")
 
     def _init_web_interface(self):
         """Initialisiert Web-Interface für Remote-Steuerung"""
@@ -182,6 +263,8 @@ class CalibratedESCController:
                 'can_enabled': self.can_enabled,
                 'pwm_enabled': self.enable_pwm,
                 'monitor_enabled': self.enable_monitor,
+                'safety_enabled': self.safety_enabled,
+                'safety_pin': self.safety_pin,
                 'last_command_time': getattr(self, 'last_command_time', 0),
                 'current_pwm': getattr(self, 'last_pwm_values', {'left': 1500, 'right': 1500}),
                 'joystick_enabled': getattr(self, 'joystick_enabled', False),
@@ -298,6 +381,12 @@ class CalibratedESCController:
             self.pi.stop()
             if not self.quiet:
                 print("🧹 PWM-Cleanup abgeschlossen")
+
+        # Separates pigpio-Objekt für Sicherheitsschaltleiste cleanup
+        if hasattr(self, 'pi_safety'):
+            self.pi_safety.stop()
+            if not self.quiet:
+                print("🧹 Sicherheitsschaltleiste-Cleanup abgeschlossen")
 
     def _cleanup_web(self):
         """Web-Interface-Cleanup beim Beenden"""
@@ -780,6 +869,12 @@ Beispiele:
     parser.add_argument('--web-port', type=int, default=80,
                        help='Web-Interface Port (default: 80)')
 
+    # Sicherheitsschaltleiste Argumente
+    parser.add_argument('--safety-pin', type=int, default=17,
+                       help='GPIO-Pin für Sicherheitsschaltleiste (default: 17)')
+    parser.add_argument('--no-safety', action='store_true',
+                       help='Sicherheitsschaltleiste deaktivieren')
+
     args = parser.parse_args()
 
     # GPIO-Pins parsen
@@ -816,6 +911,10 @@ Beispiele:
             if args.web_port == 80:
                 print(f"   👑 Quassel UGV Controller: http://raspberrycan")
             print("   Features: CAN Ein/Aus, Joystick, Status-Monitor")
+        if not args.no_safety:
+            print(f"🛡️ Sicherheitsschaltleiste: GPIO{args.safety_pin} (≤500Ω, 5.2mm Ansprechweg)")
+        else:
+            print("⚠️ Sicherheitsschaltleiste: DEAKTIVIERT")
         print("="*70)
 
     # Controller erstellen
@@ -829,8 +928,13 @@ Beispiele:
         deceleration_rate=args.decel_rate,
         brake_rate=args.brake_rate,
         enable_web=args.web,
-        web_port=args.web_port
+        web_port=args.web_port,
+        safety_pin=args.safety_pin
     )
+
+    # Sicherheitsschaltleiste deaktivieren falls gewünscht
+    if args.no_safety:
+        controller.safety_enabled = False
 
     # Versuche Kalibrierung aus Datei zu laden
     file_calibration = load_calibration_from_file()

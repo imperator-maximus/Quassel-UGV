@@ -79,12 +79,14 @@ SERVO_BLH_AUTO=1          # Auto ESC detection
 raspberry_pi/
 ├── setup_innomaker_can.sh         # 🔧 Complete setup script
 ├── can_monitor.py                  # 📡 DroneCAN communication
-├── dronecan_esc_controller.py      # 🎮 ESC Controller + PWM + Web Interface
+├── dronecan_esc_controller.py      # 🎮 ESC Controller + PWM + Web Interface + Safety
 ├── install_web_dependencies.sh    # 🌐 Web Interface setup
 ├── templates/index.html            # 📱 Smartphone Web Interface
 ├── test-can-detailed              # 🧪 CAN testing utility
+├── test_safety_switch.py          # 🛡️ Safety switch testing utility
 ├── README.md                       # 📚 This documentation
-└── README_Web_Interface.md         # 🌐 Web Interface documentation
+├── README_Web_Interface.md         # 🌐 Web Interface documentation
+└── README_Safety_Switch.md         # 🛡️ Safety switch documentation
 ```
 
 ## 🧪 Testing & Validation
@@ -201,6 +203,39 @@ python3 dronecan_esc_controller.py --pwm --web
 - **Mähen Ein/Aus**: Mähwerk-Steuerung
 
 📚 **Detaillierte Dokumentation**: [README_Web_Interface.md](README_Web_Interface.md)
+
+## 🛡️ Sicherheitsschaltleiste (Hardware-Notaus)
+
+### Features
+- **Hardware-Sicherheit**: Physische Sicherheitsschaltleiste an GPIO17
+- **Sofortige Reaktion**: GPIO-Interrupt aktiviert Notaus-Modus
+- **Fail-Safe Design**: Funktioniert unabhängig von Orange Cube
+- **Entprellung**: 100ms Mindestabstand zwischen Auslösungen
+- **IP67 Schutzart**: Wetterfest für Außeneinsatz
+
+### Hardware-Spezifikationen
+- **Betätigungswiderstand**: ≤ 500 Ohm
+- **Ansprechweg**: 5,2 mm bei 100 mm/s
+- **Betätigungskraft**: 52,9 N bei 100 mm/s
+- **Schaltspiele**: 10.000 (mechanisch)
+- **Normen**: EN ISO 13849-1, EN ISO 13856-2
+
+### Verwendung
+```bash
+# Standard-Betrieb mit Sicherheitsschaltleiste
+python3 dronecan_esc_controller.py --pwm
+
+# Anderen GPIO-Pin verwenden
+python3 dronecan_esc_controller.py --pwm --safety-pin 22
+
+# Sicherheitsschaltleiste deaktivieren (nur für Tests!)
+python3 dronecan_esc_controller.py --pwm --no-safety
+
+# Hardware-Test
+python3 test_safety_switch.py
+```
+
+📚 **Detaillierte Dokumentation**: [README_Safety_Switch.md](README_Safety_Switch.md)
 
 ## 🌐 WiFi Integration
 
