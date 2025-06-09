@@ -30,7 +30,7 @@ from flask_socketio import SocketIO, emit
 class CalibratedESCController:
     def __init__(self, enable_pwm=False, pwm_pins=[18, 19], enable_monitor=True, quiet=False,
                  enable_ramping=True, acceleration_rate=25, deceleration_rate=800, brake_rate=1500,
-                 enable_web=False, web_port=80, safety_pin=17):
+                 enable_web=False, web_port=80, safety_pin=17, light_enabled=True, light_pin=22):
         # Kalibrierungswerte AKTUALISIERT mit neuen Orange Cube Parametern
         # Motor 0 = Rechts, Motor 1 = Links
         # Neue Werte: Rückwärts ~-8000, Neutral ~0, Vorwärts ~+8000
@@ -61,6 +61,11 @@ class CalibratedESCController:
         self.safety_pin = safety_pin
         self.safety_enabled = True  # Sicherheitsschaltleiste aktiviert
         self.last_safety_trigger = 0  # Entprellung
+
+        # Licht-Steuerung Konfiguration
+        self.light_enabled = light_enabled
+        self.light_pin = light_pin
+        self.light_state = False  # Licht initial aus
 
         # Web-Interface Konfiguration
         self.enable_web = enable_web
@@ -106,6 +111,10 @@ class CalibratedESCController:
         if self.enable_pwm:
             self._init_pwm()
 
+        # Licht-Steuerung initialisieren falls aktiviert
+        if self.light_enabled:
+            self._init_light()
+
         # Sicherheitsschaltleiste initialisieren
         self._init_safety_switch()
 
@@ -147,9 +156,79 @@ class CalibratedESCController:
             print(f"❌ PWM-Initialisierung fehlgeschlagen: {e}")
             sys.exit(1)
 
+    def _init_light(self):
+        """Initialisiert Licht-Steuerung auf GPIO22"""
+        if not self.light_enabled:
+            if not self.quiet:
+                print("⚠️ Licht-Steuerung: Explizit deaktiviert")
+            return
+
+        # Import pigpio am Anfang für korrekten Scope
+        try:
+            import pigpio
+        except ImportError as e:
+            print(f"❌ FEHLER: pigpio library nicht verfügbar - {e}")
+            print("   Installieren mit: sudo apt install pigpio python3-pigpio")
+            print("   Licht-Steuerung deaktiviert")
+            self.light_enabled = False
+            return
+
+        try:
+            if not self.quiet:
+                print(f"🔧 Initialisiere Licht-Steuerung auf GPIO{self.light_pin}...")
+
+            # Verwende das bereits initialisierte pigpio-Objekt falls PWM aktiv
+            if self.enable_pwm and hasattr(self, 'pi'):
+                pi = self.pi
+                if not self.quiet:
+                    print("   Verwende bestehendes pigpio-Objekt (PWM)")
+            else:
+                # Separates pigpio-Objekt für GPIO-Steuerung
+                pi = pigpio.pi()
+                if not pi.connected:
+                    raise Exception("Kann nicht mit pigpio daemon verbinden")
+                self.pi_light = pi
+                if not self.quiet:
+                    print("   Neues pigpio-Objekt erstellt")
+
+            # GPIO als Output konfigurieren
+            pi.set_mode(self.light_pin, pigpio.OUTPUT)
+            if not self.quiet:
+                print(f"   GPIO{self.light_pin} als OUTPUT konfiguriert")
+
+            # Initial ausschalten (LOW = Relais aus)
+            pi.write(self.light_pin, 0)
+            self.light_state = False
+            if not self.quiet:
+                print(f"   GPIO{self.light_pin} auf LOW gesetzt (Relais aus)")
+
+            if not self.quiet:
+                print(f"✅ Licht-Steuerung initialisiert auf GPIO{self.light_pin}")
+                print(f"   Relais-Steuerung: HIGH = Ein, LOW = Aus")
+                print(f"   Initial-Status: {'Ein' if self.light_state else 'Aus'}")
+
+        except Exception as e:
+            print(f"❌ FEHLER: Licht-Initialisierung fehlgeschlagen: {e}")
+            print("   Details:")
+            print(f"     - light_enabled: {self.light_enabled}")
+            print(f"     - light_pin: {self.light_pin}")
+            print(f"     - enable_pwm: {self.enable_pwm}")
+            print(f"     - hasattr(self, 'pi'): {hasattr(self, 'pi')}")
+            print("   System läuft ohne Licht-Steuerung weiter")
+            self.light_enabled = False
+
     def _init_safety_switch(self):
         """Initialisiert Sicherheitsschaltleiste auf GPIO17"""
         if not self.safety_enabled:
+            return
+
+        # Import pigpio am Anfang für korrekten Scope
+        try:
+            import pigpio
+        except ImportError:
+            print("⚠️ WARNUNG: pigpio library nicht verfügbar - Sicherheitsschaltleiste deaktiviert")
+            print("   Installieren mit: sudo apt install pigpio python3-pigpio")
+            self.safety_enabled = False
             return
 
         try:
@@ -158,7 +237,6 @@ class CalibratedESCController:
                 pi = self.pi
             else:
                 # Separates pigpio-Objekt für GPIO-Überwachung
-                import pigpio
                 pi = pigpio.pi()
                 if not pi.connected:
                     raise Exception("Kann nicht mit pigpio daemon verbinden")
@@ -176,9 +254,6 @@ class CalibratedESCController:
                 print(f"   Betätigungswiderstand: ≤ 500 Ohm")
                 print(f"   Ansprechweg: 5,2 mm bei 100 mm/s")
 
-        except ImportError:
-            print("⚠️ WARNUNG: pigpio library nicht verfügbar - Sicherheitsschaltleiste deaktiviert")
-            self.safety_enabled = False
         except Exception as e:
             print(f"⚠️ WARNUNG: Sicherheitsschaltleiste-Initialisierung fehlgeschlagen: {e}")
             print("   System läuft ohne Hardware-Sicherheitsschaltleiste weiter")
@@ -265,6 +340,9 @@ class CalibratedESCController:
                 'monitor_enabled': self.enable_monitor,
                 'safety_enabled': self.safety_enabled,
                 'safety_pin': self.safety_pin,
+                'light_enabled': self.light_enabled,
+                'light_state': getattr(self, 'light_state', False),
+                'light_pin': self.light_pin,
                 'last_command_time': getattr(self, 'last_command_time', 0),
                 'current_pwm': getattr(self, 'last_pwm_values', {'left': 1500, 'right': 1500}),
                 'joystick_enabled': getattr(self, 'joystick_enabled', False),
@@ -280,6 +358,33 @@ class CalibratedESCController:
                 # Bei CAN-Deaktivierung sofort auf Neutral setzen
                 self._emergency_stop()
             return jsonify({'can_enabled': self.can_enabled})
+
+        @self.flask_app.route('/api/light/toggle', methods=['POST'])
+        def api_light_toggle():
+            if not self.quiet:
+                print(f"🌐 API: Licht-Toggle angefordert (enabled={self.light_enabled})")
+
+            if not self.light_enabled:
+                if not self.quiet:
+                    print("⚠️ API: Licht-Steuerung ist deaktiviert")
+                return jsonify({
+                    'success': False,
+                    'error': 'Light control disabled',
+                    'light_enabled': False,
+                    'light_state': False
+                })
+
+            success = self.toggle_light()
+            result = {
+                'success': success,
+                'light_enabled': self.light_enabled,
+                'light_state': getattr(self, 'light_state', False)
+            }
+
+            if not self.quiet:
+                print(f"🌐 API: Licht-Toggle Ergebnis: {result}")
+
+            return jsonify(result)
 
         # SocketIO Event-Handler
         @self.socketio.on('connect')
@@ -374,6 +479,68 @@ class CalibratedESCController:
                 self.pi.hardware_PWM(pin, 50, 75000)  # 1500μs neutral
             print("🚨 EMERGENCY STOP: Alle Motoren auf Neutral (1500μs)")
 
+    def toggle_light(self):
+        """Schaltet das Licht um (an/aus)"""
+        if not self.light_enabled:
+            return False
+
+        try:
+            # Bestimme das pigpio-Objekt
+            if self.enable_pwm and hasattr(self, 'pi'):
+                pi = self.pi
+            elif hasattr(self, 'pi_light'):
+                pi = self.pi_light
+            else:
+                print("❌ Licht-Toggle fehlgeschlagen: Kein pigpio-Objekt verfügbar")
+                return False
+
+            # Status umschalten
+            self.light_state = not self.light_state
+
+            # GPIO setzen (HIGH = Relais ein, LOW = Relais aus)
+            pi.write(self.light_pin, 1 if self.light_state else 0)
+
+            if not self.quiet:
+                status_text = "EIN" if self.light_state else "AUS"
+                print(f"💡 Licht {status_text} (GPIO{self.light_pin} = {'HIGH' if self.light_state else 'LOW'})")
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Licht-Toggle fehlgeschlagen: {e}")
+            return False
+
+    def set_light(self, state):
+        """Setzt das Licht auf einen bestimmten Zustand"""
+        if not self.light_enabled:
+            return False
+
+        try:
+            # Bestimme das pigpio-Objekt
+            if self.enable_pwm and hasattr(self, 'pi'):
+                pi = self.pi
+            elif hasattr(self, 'pi_light'):
+                pi = self.pi_light
+            else:
+                print("❌ Licht-Steuerung fehlgeschlagen: Kein pigpio-Objekt verfügbar")
+                return False
+
+            # Status setzen
+            self.light_state = bool(state)
+
+            # GPIO setzen (HIGH = Relais ein, LOW = Relais aus)
+            pi.write(self.light_pin, 1 if self.light_state else 0)
+
+            if not self.quiet:
+                status_text = "EIN" if self.light_state else "AUS"
+                print(f"💡 Licht {status_text} (GPIO{self.light_pin} = {'HIGH' if self.light_state else 'LOW'})")
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Licht-Steuerung fehlgeschlagen: {e}")
+            return False
+
     def _cleanup_pwm(self):
         """PWM-Cleanup beim Beenden"""
         if self.enable_pwm and hasattr(self, 'pi'):
@@ -387,6 +554,17 @@ class CalibratedESCController:
             self.pi_safety.stop()
             if not self.quiet:
                 print("🧹 Sicherheitsschaltleiste-Cleanup abgeschlossen")
+
+        # Separates pigpio-Objekt für Licht-Steuerung cleanup
+        if hasattr(self, 'pi_light'):
+            # Licht ausschalten beim Beenden
+            if self.light_enabled:
+                self.pi_light.write(self.light_pin, 0)
+                if not self.quiet:
+                    print("💡 Licht ausgeschaltet beim Beenden")
+            self.pi_light.stop()
+            if not self.quiet:
+                print("🧹 Licht-Steuerung-Cleanup abgeschlossen")
 
     def _cleanup_web(self):
         """Web-Interface-Cleanup beim Beenden"""
@@ -875,6 +1053,12 @@ Beispiele:
     parser.add_argument('--no-safety', action='store_true',
                        help='Sicherheitsschaltleiste deaktivieren')
 
+    # Licht-Steuerung Argumente
+    parser.add_argument('--light-pin', type=int, default=22,
+                       help='GPIO-Pin für Licht-Relais (default: 22)')
+    parser.add_argument('--no-light', action='store_true',
+                       help='Licht-Steuerung deaktivieren')
+
     args = parser.parse_args()
 
     # GPIO-Pins parsen
@@ -915,6 +1099,10 @@ Beispiele:
             print(f"🛡️ Sicherheitsschaltleiste: GPIO{args.safety_pin} (≤500Ω, 5.2mm Ansprechweg)")
         else:
             print("⚠️ Sicherheitsschaltleiste: DEAKTIVIERT")
+        if not args.no_light:
+            print(f"💡 Licht-Steuerung: GPIO{args.light_pin} (Relais-Steuerung)")
+        else:
+            print("⚠️ Licht-Steuerung: DEAKTIVIERT")
         print("="*70)
 
     # Controller erstellen
@@ -929,7 +1117,9 @@ Beispiele:
         brake_rate=args.brake_rate,
         enable_web=args.web,
         web_port=args.web_port,
-        safety_pin=args.safety_pin
+        safety_pin=args.safety_pin,
+        light_enabled=not args.no_light,
+        light_pin=args.light_pin
     )
 
     # Sicherheitsschaltleiste deaktivieren falls gewünscht

@@ -72,6 +72,36 @@
             transform: translateY(-1px);
         }
 
+        .light-toggle-btn {
+            padding: 8px 16px;
+            background: linear-gradient(45deg, rgba(128, 128, 128, 0.3), rgba(128, 128, 128, 0.5));
+            border: 2px solid rgba(128, 128, 128, 0.6);
+            border-radius: 20px;
+            color: #cccccc;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            font-weight: bold;
+            font-size: 0.9em;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .light-toggle-btn:hover {
+            background: linear-gradient(45deg, rgba(128, 128, 128, 0.5), rgba(128, 128, 128, 0.7));
+            transform: translateY(-1px);
+        }
+
+        .light-toggle-btn.active {
+            background: linear-gradient(45deg, rgba(255, 215, 0, 0.4), rgba(255, 215, 0, 0.6));
+            border: 2px solid rgba(255, 215, 0, 0.8);
+            color: #ffd700;
+            box-shadow: 0 0 15px rgba(255, 215, 0, 0.3);
+        }
+
+        .light-toggle-btn.active:hover {
+            background: linear-gradient(45deg, rgba(255, 215, 0, 0.6), rgba(255, 215, 0, 0.8));
+            box-shadow: 0 0 20px rgba(255, 215, 0, 0.5);
+        }
+
         .status-bar {
             display: none;
             justify-content: center;
@@ -388,7 +418,7 @@
         <h1>👑 Quassel UGV 👑</h1>
         <div class="header-controls">
             <button class="info-toggle-btn" onclick="toggleStatusInfo()">📊 Info</button>
-            <!-- Platz für zukünftige Buttons: Mäher, Licht -->
+            <button class="light-toggle-btn" id="lightToggleBtn" onclick="toggleLight()">💡 Licht</button>
         </div>
         <div class="status-bar" id="statusBar">
             <div class="status-indicator">
@@ -402,6 +432,10 @@
             <div class="status-indicator">
                 <div class="status-dot" id="monitorStatus"></div>
                 <span>Monitor</span>
+            </div>
+            <div class="status-indicator">
+                <div class="status-dot" id="lightStatus"></div>
+                <span>Licht</span>
             </div>
         </div>
     </div>
@@ -534,6 +568,45 @@
             });
         }
 
+        // Licht Toggle Funktion
+        function toggleLight() {
+            console.log('🔄 Licht-Toggle gestartet...');
+
+            fetch('/api/light/toggle', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => {
+                console.log('📡 HTTP Response Status:', response.status);
+                console.log('📡 HTTP Response OK:', response.ok);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                return response.json();
+            })
+            .then(data => {
+                console.log('📦 API Response Data:', data);
+
+                if (data.success) {
+                    console.log('✅ Licht-Toggle erfolgreich:', data.light_state ? 'EIN' : 'AUS');
+                    updateLightButton(data.light_state);
+                    // Status sofort aktualisieren
+                    fetchStatus();
+                } else {
+                    console.error('❌ Licht-Toggle fehlgeschlagen:', data.error || 'Unbekannter Fehler');
+                    alert('Licht-Toggle fehlgeschlagen: ' + (data.error || 'Unbekannter Fehler'));
+                }
+            })
+            .catch(error => {
+                console.error('❌ Fehler beim Licht Toggle:', error);
+                alert('Netzwerk-Fehler beim Licht Toggle: ' + error.message);
+            });
+        }
+
         // Status vom Server abrufen
         function fetchStatus() {
             fetch('/api/status')
@@ -557,6 +630,8 @@
                 'status-dot ' + (data.pwm_enabled ? 'active' : 'inactive');
             document.getElementById('monitorStatus').className =
                 'status-dot ' + (data.monitor_enabled ? 'active' : 'inactive');
+            document.getElementById('lightStatus').className =
+                'status-dot ' + (data.light_state ? 'active' : 'inactive');
 
             // PWM-Werte aktualisieren
             if (data.current_pwm) {
@@ -584,19 +659,37 @@
             }
 
             updateCANButton();
+
+            // Licht-Button aktualisieren
+            if (data.light_enabled !== undefined && data.light_state !== undefined) {
+                updateLightButton(data.light_state);
+            }
         }
 
         // CAN Button aktualisieren
         function updateCANButton() {
             const btn = document.getElementById('canToggleBtn');
             const text = document.getElementById('canToggleText');
-            
+
             if (canEnabled) {
                 btn.className = 'btn btn-emergency';
                 text.textContent = 'CAN STOPPEN';
             } else {
                 btn.className = 'btn btn-emergency active';
                 text.textContent = 'CAN STARTEN';
+            }
+        }
+
+        // Licht Button aktualisieren
+        function updateLightButton(lightState) {
+            const btn = document.getElementById('lightToggleBtn');
+
+            if (lightState) {
+                btn.className = 'light-toggle-btn active';
+                btn.innerHTML = '💡 Licht EIN';
+            } else {
+                btn.className = 'light-toggle-btn';
+                btn.innerHTML = '💡 Licht AUS';
             }
         }
 

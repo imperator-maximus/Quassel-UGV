@@ -108,6 +108,29 @@ esc-start
 - **Operating System**: Raspberry Pi OS (Debian-based)
 - **Network**: WiFi + SSH access (nicolay@raspberrycan)
 
+### GPIO Pin Configuration
+**Innomaker RS485 CAN HAT Pin Usage:**
+- **GPIO 7 (CS1)**: CAN-Chip SPI Chip Select (spi0.1)
+- **GPIO 8 (CS0)**: RS485-Chip SPI Chip Select (spi0.0)
+- **GPIO 24**: RS485-Interrupt (SC16IS752-Chip)
+- **GPIO 25**: CAN-Interrupt (MCP2515 CAN-Chip)
+- **SPI Interface**: Shared SPI bus for both chips
+  - MOSI, MISO, SCLK pins used by HAT
+
+**ESC Controller Pin Usage:**
+- **GPIO 18**: Right Motor PWM Output (Hardware-PWM)
+- **GPIO 19**: Left Motor PWM Output (Hardware-PWM)
+- **GPIO 12**: Emergency Stop/Safety Switch Input (pulled high, active low)
+- **GPIO 22**: Light Control Relay Output (HIGH = On, LOW = Off)
+
+**Reserved/System Pins:**
+- **GPIO 2/3**: I2C (reserved for system use)
+- **GPIO 14/15**: UART (console/debugging)
+- **GPIO 9-11**: SPI (used by HAT)
+
+**Available GPIO Pins:**
+- GPIO 4, 5, 6, 13, 16, 17, 20, 21, 23, 26, 27 (free for expansion)
+
 ### Orange Cube Setup
 - **Firmware**: ArduPilot Rover with Skid Steering (2-motor configuration)
 - **CAN Configuration**:
