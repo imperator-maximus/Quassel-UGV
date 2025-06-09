@@ -102,6 +102,36 @@
             box-shadow: 0 0 20px rgba(255, 215, 0, 0.5);
         }
 
+        .mower-toggle-btn {
+            padding: 8px 16px;
+            background: linear-gradient(45deg, rgba(34, 139, 34, 0.3), rgba(34, 139, 34, 0.5));
+            border: 2px solid rgba(34, 139, 34, 0.6);
+            border-radius: 20px;
+            color: #90EE90;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            font-weight: bold;
+            font-size: 0.9em;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .mower-toggle-btn:hover {
+            background: linear-gradient(45deg, rgba(34, 139, 34, 0.5), rgba(34, 139, 34, 0.7));
+            transform: translateY(-1px);
+        }
+
+        .mower-toggle-btn.active {
+            background: linear-gradient(45deg, rgba(34, 139, 34, 0.6), rgba(34, 139, 34, 0.8));
+            border: 2px solid rgba(34, 139, 34, 0.9);
+            color: #00ff00;
+            box-shadow: 0 0 15px rgba(34, 139, 34, 0.4);
+        }
+
+        .mower-toggle-btn.active:hover {
+            background: linear-gradient(45deg, rgba(34, 139, 34, 0.8), rgba(34, 139, 34, 1.0));
+            box-shadow: 0 0 20px rgba(34, 139, 34, 0.6);
+        }
+
         .status-bar {
             display: none;
             justify-content: center;
@@ -409,6 +439,210 @@
                 height: 280px;
             }
         }
+
+        /* Modal Styles */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(5px);
+        }
+
+        .modal-content {
+            background: linear-gradient(135deg, rgba(20, 40, 20, 0.95), rgba(40, 60, 40, 0.95));
+            margin: 5% auto;
+            padding: 0;
+            border: 2px solid rgba(212, 175, 55, 0.6);
+            border-radius: 15px;
+            width: 90%;
+            max-width: 500px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            animation: modalSlideIn 0.3s ease-out;
+        }
+
+        @keyframes modalSlideIn {
+            from { transform: translateY(-50px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+
+        .modal-header {
+            background: linear-gradient(135deg, rgba(212, 175, 55, 0.3), rgba(212, 175, 55, 0.2));
+            padding: 20px;
+            border-bottom: 1px solid rgba(212, 175, 55, 0.3);
+            border-radius: 15px 15px 0 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h2 {
+            margin: 0;
+            color: #d4af37;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            font-size: 1.5em;
+        }
+
+        .close {
+            color: #d4af37;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: color 0.3s ease;
+        }
+
+        .close:hover {
+            color: #fff;
+        }
+
+        .modal-body {
+            padding: 25px;
+        }
+
+        .mower-controls {
+            margin-bottom: 25px;
+        }
+
+        .mower-power-section {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            border: 1px solid rgba(212, 175, 55, 0.2);
+        }
+
+        .mower-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .mower-power-btn {
+            padding: 12px 24px;
+            background: linear-gradient(45deg, rgba(34, 139, 34, 0.4), rgba(34, 139, 34, 0.6));
+            border: 2px solid rgba(34, 139, 34, 0.7);
+            border-radius: 25px;
+            color: #90EE90;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            font-weight: bold;
+            font-size: 1em;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .mower-power-btn:hover {
+            background: linear-gradient(45deg, rgba(34, 139, 34, 0.6), rgba(34, 139, 34, 0.8));
+            transform: translateY(-2px);
+        }
+
+        .mower-power-btn.active {
+            background: linear-gradient(45deg, rgba(34, 139, 34, 0.7), rgba(34, 139, 34, 0.9));
+            border: 2px solid rgba(34, 139, 34, 1.0);
+            color: #00ff00;
+            box-shadow: 0 0 15px rgba(34, 139, 34, 0.5);
+        }
+
+        .mower-speed-section {
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+            border: 1px solid rgba(212, 175, 55, 0.2);
+        }
+
+        .speed-label {
+            color: #d4af37;
+            font-weight: bold;
+            margin-bottom: 15px;
+            text-align: center;
+            font-size: 1.1em;
+        }
+
+        .speed-slider-container {
+            position: relative;
+            margin: 20px 0;
+        }
+
+        #mowerSpeedSlider {
+            width: 100%;
+            height: 8px;
+            border-radius: 5px;
+            background: rgba(255, 255, 255, 0.2);
+            outline: none;
+            -webkit-appearance: none;
+        }
+
+        #mowerSpeedSlider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: linear-gradient(45deg, #34a853, #4caf50);
+            cursor: pointer;
+            box-shadow: 0 0 10px rgba(52, 168, 83, 0.5);
+        }
+
+        #mowerSpeedSlider::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: linear-gradient(45deg, #34a853, #4caf50);
+            cursor: pointer;
+            border: none;
+            box-shadow: 0 0 10px rgba(52, 168, 83, 0.5);
+        }
+
+        #mowerSpeedSlider:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .speed-markers {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+            font-size: 0.8em;
+            color: rgba(255, 255, 255, 0.6);
+        }
+
+        .speed-info {
+            text-align: center;
+            margin-top: 15px;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        .mower-info {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 15px;
+            border-radius: 10px;
+            border: 1px solid rgba(212, 175, 55, 0.2);
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            color: #cccccc;
+        }
+
+        .info-row:last-child {
+            margin-bottom: 0;
+        }
+
+        .info-label {
+            font-weight: bold;
+        }
+
+        .info-value {
+            color: #d4af37;
+        }
     </style>
 </head>
 <body>
@@ -419,6 +653,7 @@
         <div class="header-controls">
             <button class="info-toggle-btn" onclick="toggleStatusInfo()">📊 Info</button>
             <button class="light-toggle-btn" id="lightToggleBtn" onclick="toggleLight()">💡 Licht</button>
+            <button class="mower-toggle-btn" id="mowerToggleBtn" onclick="openMowerModal()">🌾 Mäher</button>
         </div>
         <div class="status-bar" id="statusBar">
             <div class="status-indicator">
@@ -436,6 +671,10 @@
             <div class="status-indicator">
                 <div class="status-dot" id="lightStatus"></div>
                 <span>Licht</span>
+            </div>
+            <div class="status-indicator">
+                <div class="status-dot" id="mowerStatus"></div>
+                <span>Mäher</span>
             </div>
         </div>
     </div>
@@ -491,6 +730,62 @@
 
     <div class="footer">
         👑 Quassel UGV Controller v2.0 | Schloss Quassel 👑
+    </div>
+
+    <!-- Mäher-Modal -->
+    <div id="mowerModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>🌾 Mäher-Steuerung</h2>
+                <span class="close" onclick="closeMowerModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="mower-controls">
+                    <div class="mower-power-section">
+                        <div class="mower-status">
+                            <div class="status-indicator">
+                                <div class="status-dot" id="mowerModalStatus"></div>
+                                <span id="mowerStatusText">Aus</span>
+                            </div>
+                        </div>
+                        <button class="mower-power-btn" id="mowerPowerBtn" onclick="toggleMowerPower()">
+                            <span id="mowerPowerText">🌾 Mäher EIN</span>
+                        </button>
+                    </div>
+
+                    <div class="mower-speed-section" id="mowerSpeedSection">
+                        <div class="speed-label">
+                            <span>Geschwindigkeit: <span id="mowerSpeedValue">0</span>%</span>
+                        </div>
+                        <div class="speed-slider-container">
+                            <input type="range" id="mowerSpeedSlider" min="0" max="100" value="0" step="5"
+                                   oninput="updateMowerSpeed(this.value)" disabled>
+                            <div class="speed-markers">
+                                <span>0%</span>
+                                <span>25%</span>
+                                <span>50%</span>
+                                <span>75%</span>
+                                <span>100%</span>
+                            </div>
+                        </div>
+                        <div class="speed-info">
+                            <small>PWM-Bereich: 16%-84% (0.8V-4.2V)</small>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mower-info">
+                    <div class="info-row">
+                        <span class="info-label">Relais (GPIO 23):</span>
+                        <span class="info-value" id="mowerRelayStatus">AUS</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">PWM (GPIO 12):</span>
+                        <span class="info-value" id="mowerPwmStatus">0%</span>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -632,6 +927,8 @@
                 'status-dot ' + (data.monitor_enabled ? 'active' : 'inactive');
             document.getElementById('lightStatus').className =
                 'status-dot ' + (data.light_state ? 'active' : 'inactive');
+            document.getElementById('mowerStatus').className =
+                'status-dot ' + (data.mower_state ? 'active' : 'inactive');
 
             // PWM-Werte aktualisieren
             if (data.current_pwm) {
@@ -664,6 +961,17 @@
             if (data.light_enabled !== undefined && data.light_state !== undefined) {
                 updateLightButton(data.light_state);
             }
+
+            // Mäher-Button aktualisieren
+            if (data.mower_enabled !== undefined) {
+                updateMowerButton(data.mower_state || false);
+            }
+
+            // Mäher-Modal aktualisieren falls geöffnet
+            const mowerModal = document.getElementById('mowerModal');
+            if (mowerModal.style.display === 'block' && data.mower_enabled !== undefined) {
+                updateMowerModal(data);
+            }
         }
 
         // CAN Button aktualisieren
@@ -691,6 +999,154 @@
                 btn.className = 'light-toggle-btn';
                 btn.innerHTML = '💡 Licht AUS';
             }
+        }
+
+        // Mäher Button aktualisieren
+        function updateMowerButton(mowerState) {
+            const btn = document.getElementById('mowerToggleBtn');
+
+            if (mowerState) {
+                btn.className = 'mower-toggle-btn active';
+                btn.innerHTML = '🌾 Mäher EIN';
+            } else {
+                btn.className = 'mower-toggle-btn';
+                btn.innerHTML = '🌾 Mäher AUS';
+            }
+        }
+
+        // Mäher-Modal Funktionen
+        function openMowerModal() {
+            document.getElementById('mowerModal').style.display = 'block';
+            // Status beim Öffnen aktualisieren
+            fetchStatus();
+        }
+
+        function closeMowerModal() {
+            document.getElementById('mowerModal').style.display = 'none';
+        }
+
+        // Modal schließen wenn außerhalb geklickt wird
+        window.onclick = function(event) {
+            const modal = document.getElementById('mowerModal');
+            if (event.target == modal) {
+                closeMowerModal();
+            }
+        }
+
+        // Mäher Power Toggle
+        function toggleMowerPower() {
+            console.log('🔄 Mäher-Toggle gestartet...');
+
+            fetch('/api/mower/toggle', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => {
+                console.log('📡 HTTP Response Status:', response.status);
+                console.log('📡 HTTP Response OK:', response.ok);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                return response.json();
+            })
+            .then(data => {
+                console.log('📦 API Response Data:', data);
+
+                if (data.success) {
+                    console.log('✅ Mäher-Toggle erfolgreich:', data.mower_state ? 'EIN' : 'AUS');
+                    updateMowerModal(data);
+                    // Status sofort aktualisieren
+                    fetchStatus();
+                } else {
+                    console.error('❌ Mäher-Toggle fehlgeschlagen:', data.error || 'Unbekannter Fehler');
+                    alert('Mäher-Toggle fehlgeschlagen: ' + (data.error || 'Unbekannter Fehler'));
+                }
+            })
+            .catch(error => {
+                console.error('❌ Fehler beim Mäher Toggle:', error);
+                alert('Netzwerk-Fehler beim Mäher Toggle: ' + error.message);
+            });
+        }
+
+        // Mäher-Geschwindigkeit aktualisieren
+        function updateMowerSpeed(speed) {
+            console.log('🔄 Mäher-Geschwindigkeit:', speed + '%');
+
+            // Anzeige sofort aktualisieren
+            document.getElementById('mowerSpeedValue').textContent = speed;
+
+            fetch('/api/mower/speed', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ speed: parseInt(speed) })
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log('📦 Mäher-Geschwindigkeit Response:', data);
+
+                if (data.success) {
+                    console.log('✅ Mäher-Geschwindigkeit erfolgreich:', data.mower_speed + '%');
+                    updateMowerModal(data);
+                } else {
+                    console.error('❌ Mäher-Geschwindigkeit fehlgeschlagen:', data.error || 'Unbekannter Fehler');
+                    alert('Mäher-Geschwindigkeit fehlgeschlagen: ' + (data.error || 'Unbekannter Fehler'));
+                }
+            })
+            .catch(error => {
+                console.error('❌ Fehler bei Mäher-Geschwindigkeit:', error);
+                alert('Netzwerk-Fehler bei Mäher-Geschwindigkeit: ' + error.message);
+            });
+        }
+
+        // Mäher-Modal UI aktualisieren
+        function updateMowerModal(data) {
+            const mowerState = data.mower_state || false;
+            const mowerSpeed = data.mower_speed || 0;
+
+            // Status-Dot im Modal
+            document.getElementById('mowerModalStatus').className =
+                'status-dot ' + (mowerState ? 'active' : 'inactive');
+
+            // Status-Text
+            document.getElementById('mowerStatusText').textContent = mowerState ? 'Ein' : 'Aus';
+
+            // Power-Button
+            const powerBtn = document.getElementById('mowerPowerBtn');
+            const powerText = document.getElementById('mowerPowerText');
+
+            if (mowerState) {
+                powerBtn.className = 'mower-power-btn active';
+                powerText.textContent = '🌾 Mäher AUS';
+            } else {
+                powerBtn.className = 'mower-power-btn';
+                powerText.textContent = '🌾 Mäher EIN';
+            }
+
+            // Geschwindigkeits-Slider
+            const speedSlider = document.getElementById('mowerSpeedSlider');
+            const speedValue = document.getElementById('mowerSpeedValue');
+
+            speedSlider.disabled = !mowerState;
+            speedSlider.value = mowerSpeed;
+            speedValue.textContent = mowerSpeed;
+
+            // Info-Anzeigen
+            document.getElementById('mowerRelayStatus').textContent = mowerState ? 'EIN' : 'AUS';
+
+            // PWM-Berechnung (16-84% für 0-100%)
+            const pwmPercent = mowerState ? (16 + (mowerSpeed / 100) * (84 - 16)) : 0;
+            document.getElementById('mowerPwmStatus').textContent = pwmPercent.toFixed(1) + '%';
         }
 
         // Verbindungszeit aktualisieren

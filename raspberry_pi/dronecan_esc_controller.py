@@ -30,7 +30,8 @@ from flask_socketio import SocketIO, emit
 class CalibratedESCController:
     def __init__(self, enable_pwm=False, pwm_pins=[18, 19], enable_monitor=True, quiet=False,
                  enable_ramping=True, acceleration_rate=25, deceleration_rate=800, brake_rate=1500,
-                 enable_web=False, web_port=80, safety_pin=17, light_enabled=True, light_pin=22):
+                 enable_web=False, web_port=80, safety_pin=17, light_enabled=True, light_pin=22,
+                 mower_enabled=True, mower_relay_pin=23, mower_pwm_pin=12):
         # Kalibrierungswerte AKTUALISIERT mit neuen Orange Cube Parametern
         # Motor 0 = Rechts, Motor 1 = Links
         # Neue Werte: Rückwärts ~-8000, Neutral ~0, Vorwärts ~+8000
@@ -66,6 +67,19 @@ class CalibratedESCController:
         self.light_enabled = light_enabled
         self.light_pin = light_pin
         self.light_state = False  # Licht initial aus
+
+        # Mäher-Steuerung Konfiguration
+        self.mower_enabled = mower_enabled
+        self.mower_relay_pin = mower_relay_pin
+        self.mower_pwm_pin = mower_pwm_pin
+        self.mower_state = False  # Mäher initial aus
+        self.mower_speed = 0  # Geschwindigkeit 0-100%
+
+        # PWM-Konfiguration für Mäher (16-84% Duty Cycle für 0.8V-4.2V)
+        self.mower_pwm_frequency = 1000  # 1000 Hz
+        self.mower_duty_min = 16  # 16% = ca. 0.8V (Leerlauf)
+        self.mower_duty_max = 84  # 84% = ca. 4.2V (Vollgas)
+        self.mower_duty_off = 0   # 0% = 0V (Disarmed/Fehler)
 
         # Web-Interface Konfiguration
         self.enable_web = enable_web
@@ -114,6 +128,10 @@ class CalibratedESCController:
         # Licht-Steuerung initialisieren falls aktiviert
         if self.light_enabled:
             self._init_light()
+
+        # Mäher-Steuerung initialisieren falls aktiviert
+        if self.mower_enabled:
+            self._init_mower()
 
         # Sicherheitsschaltleiste initialisieren
         self._init_safety_switch()
@@ -216,6 +234,79 @@ class CalibratedESCController:
             print(f"     - hasattr(self, 'pi'): {hasattr(self, 'pi')}")
             print("   System läuft ohne Licht-Steuerung weiter")
             self.light_enabled = False
+
+    def _init_mower(self):
+        """Initialisiert Mäher-Steuerung (Relais + PWM)"""
+        if not self.mower_enabled:
+            if not self.quiet:
+                print("⚠️ Mäher-Steuerung: Explizit deaktiviert")
+            return
+
+        # Import pigpio am Anfang für korrekten Scope
+        try:
+            import pigpio
+        except ImportError as e:
+            print(f"❌ FEHLER: pigpio library nicht verfügbar - {e}")
+            print("   Installieren mit: sudo apt install pigpio python3-pigpio")
+            print("   Mäher-Steuerung deaktiviert")
+            self.mower_enabled = False
+            return
+
+        try:
+            if not self.quiet:
+                print(f"🔧 Initialisiere Mäher-Steuerung...")
+                print(f"   Relais: GPIO{self.mower_relay_pin}")
+                print(f"   PWM: GPIO{self.mower_pwm_pin}")
+
+            # Verwende das bereits initialisierte pigpio-Objekt falls PWM aktiv
+            if self.enable_pwm and hasattr(self, 'pi'):
+                pi = self.pi
+                if not self.quiet:
+                    print("   Verwende bestehendes pigpio-Objekt (PWM)")
+            else:
+                # Separates pigpio-Objekt für GPIO-Steuerung
+                pi = pigpio.pi()
+                if not pi.connected:
+                    raise Exception("Kann nicht mit pigpio daemon verbinden")
+                self.pi_mower = pi
+                if not self.quiet:
+                    print("   Neues pigpio-Objekt erstellt")
+
+            # Relais-GPIO als Output konfigurieren
+            pi.set_mode(self.mower_relay_pin, pigpio.OUTPUT)
+            pi.write(self.mower_relay_pin, 0)  # Initial aus
+            if not self.quiet:
+                print(f"   GPIO{self.mower_relay_pin} als OUTPUT konfiguriert (Relais aus)")
+
+            # PWM-GPIO als Output konfigurieren
+            pi.set_mode(self.mower_pwm_pin, pigpio.OUTPUT)
+
+            # PWM initialisieren mit 0% (Disarmed-Zustand)
+            pi.hardware_PWM(self.mower_pwm_pin, self.mower_pwm_frequency,
+                           int(self.mower_duty_off * 10000))  # pigpio erwartet Mikrosekunden * 10000
+            if not self.quiet:
+                print(f"   GPIO{self.mower_pwm_pin} PWM initialisiert ({self.mower_pwm_frequency}Hz, {self.mower_duty_off}% Duty)")
+
+            # Initial-Status setzen
+            self.mower_state = False
+            self.mower_speed = 0
+
+            if not self.quiet:
+                print(f"✅ Mäher-Steuerung initialisiert")
+                print(f"   Relais: HIGH = Ein, LOW = Aus")
+                print(f"   PWM-Bereich: {self.mower_duty_min}%-{self.mower_duty_max}% ({self.mower_duty_min/100*5:.1f}V-{self.mower_duty_max/100*5:.1f}V)")
+                print(f"   Initial-Status: Aus, 0% Geschwindigkeit")
+
+        except Exception as e:
+            print(f"❌ FEHLER: Mäher-Initialisierung fehlgeschlagen: {e}")
+            print("   Details:")
+            print(f"     - mower_enabled: {self.mower_enabled}")
+            print(f"     - mower_relay_pin: {self.mower_relay_pin}")
+            print(f"     - mower_pwm_pin: {self.mower_pwm_pin}")
+            print(f"     - enable_pwm: {self.enable_pwm}")
+            print(f"     - hasattr(self, 'pi'): {hasattr(self, 'pi')}")
+            print("   System läuft ohne Mäher-Steuerung weiter")
+            self.mower_enabled = False
 
     def _init_safety_switch(self):
         """Initialisiert Sicherheitsschaltleiste auf GPIO17"""
@@ -343,6 +434,11 @@ class CalibratedESCController:
                 'light_enabled': self.light_enabled,
                 'light_state': getattr(self, 'light_state', False),
                 'light_pin': self.light_pin,
+                'mower_enabled': self.mower_enabled,
+                'mower_state': getattr(self, 'mower_state', False),
+                'mower_speed': getattr(self, 'mower_speed', 0),
+                'mower_relay_pin': self.mower_relay_pin,
+                'mower_pwm_pin': self.mower_pwm_pin,
                 'last_command_time': getattr(self, 'last_command_time', 0),
                 'current_pwm': getattr(self, 'last_pwm_values', {'left': 1500, 'right': 1500}),
                 'joystick_enabled': getattr(self, 'joystick_enabled', False),
@@ -385,6 +481,78 @@ class CalibratedESCController:
                 print(f"🌐 API: Licht-Toggle Ergebnis: {result}")
 
             return jsonify(result)
+
+        @self.flask_app.route('/api/mower/toggle', methods=['POST'])
+        def api_mower_toggle():
+            if not self.quiet:
+                print(f"🌐 API: Mäher-Toggle angefordert (enabled={self.mower_enabled})")
+
+            if not self.mower_enabled:
+                if not self.quiet:
+                    print("⚠️ API: Mäher-Steuerung ist deaktiviert")
+                return jsonify({
+                    'success': False,
+                    'error': 'Mower control disabled',
+                    'mower_enabled': False,
+                    'mower_state': False,
+                    'mower_speed': 0
+                })
+
+            success = self.toggle_mower()
+            result = {
+                'success': success,
+                'mower_enabled': self.mower_enabled,
+                'mower_state': getattr(self, 'mower_state', False),
+                'mower_speed': getattr(self, 'mower_speed', 0)
+            }
+
+            if not self.quiet:
+                print(f"🌐 API: Mäher-Toggle Ergebnis: {result}")
+
+            return jsonify(result)
+
+        @self.flask_app.route('/api/mower/speed', methods=['POST'])
+        def api_mower_speed():
+            try:
+                data = request.get_json()
+                speed = data.get('speed', 0)
+
+                if not self.quiet:
+                    print(f"🌐 API: Mäher-Geschwindigkeit angefordert: {speed}%")
+
+                if not self.mower_enabled:
+                    return jsonify({
+                        'success': False,
+                        'error': 'Mower control disabled',
+                        'mower_speed': 0
+                    })
+
+                if not self.mower_state:
+                    return jsonify({
+                        'success': False,
+                        'error': 'Mower is off',
+                        'mower_speed': 0
+                    })
+
+                success = self.set_mower_speed(speed)
+                result = {
+                    'success': success,
+                    'mower_speed': getattr(self, 'mower_speed', 0),
+                    'mower_state': getattr(self, 'mower_state', False)
+                }
+
+                if not self.quiet:
+                    print(f"🌐 API: Mäher-Geschwindigkeit Ergebnis: {result}")
+
+                return jsonify(result)
+
+            except Exception as e:
+                print(f"❌ API: Mäher-Geschwindigkeit Fehler: {e}")
+                return jsonify({
+                    'success': False,
+                    'error': str(e),
+                    'mower_speed': 0
+                })
 
         # SocketIO Event-Handler
         @self.socketio.on('connect')
@@ -473,11 +641,14 @@ class CalibratedESCController:
         sys.exit(0)
 
     def _emergency_stop(self):
-        """Notfall-Stop: Alle Motoren auf Neutral"""
+        """Notfall-Stop: Alle Motoren auf Neutral + Mäher aus"""
         if self.enable_pwm and hasattr(self, 'pi'):
             for side, pin in self.pwm_pins.items():
                 self.pi.hardware_PWM(pin, 50, 75000)  # 1500μs neutral
             print("🚨 EMERGENCY STOP: Alle Motoren auf Neutral (1500μs)")
+
+        # Mäher bei Not-Aus ebenfalls ausschalten
+        self.emergency_stop_mower()
 
     def toggle_light(self):
         """Schaltet das Licht um (an/aus)"""
@@ -541,6 +712,118 @@ class CalibratedESCController:
             print(f"❌ Licht-Steuerung fehlgeschlagen: {e}")
             return False
 
+    def toggle_mower(self):
+        """Schaltet den Mäher um (an/aus)"""
+        if not self.mower_enabled:
+            return False
+
+        try:
+            # Bestimme das pigpio-Objekt
+            if self.enable_pwm and hasattr(self, 'pi'):
+                pi = self.pi
+            elif hasattr(self, 'pi_mower'):
+                pi = self.pi_mower
+            else:
+                print("❌ Mäher-Toggle fehlgeschlagen: Kein pigpio-Objekt verfügbar")
+                return False
+
+            # Status umschalten
+            self.mower_state = not self.mower_state
+
+            if self.mower_state:
+                # Mäher einschalten: Relais an + PWM auf Leerlauf
+                pi.write(self.mower_relay_pin, 1)  # Relais ein
+                # PWM auf Leerlauf (16% = 0.8V)
+                duty_cycle_us = int(self.mower_duty_min * 10000)
+                pi.hardware_PWM(self.mower_pwm_pin, self.mower_pwm_frequency, duty_cycle_us)
+                self.mower_speed = 0  # Geschwindigkeit auf 0 setzen
+            else:
+                # Mäher ausschalten: PWM auf 0% + Relais aus
+                pi.hardware_PWM(self.mower_pwm_pin, self.mower_pwm_frequency,
+                               int(self.mower_duty_off * 10000))  # 0% = 0V
+                pi.write(self.mower_relay_pin, 0)  # Relais aus
+                self.mower_speed = 0
+
+            if not self.quiet:
+                status_text = "EIN" if self.mower_state else "AUS"
+                relay_text = "HIGH" if self.mower_state else "LOW"
+                pwm_duty = self.mower_duty_min if self.mower_state else self.mower_duty_off
+                print(f"🌾 Mäher {status_text} (Relais GPIO{self.mower_relay_pin} = {relay_text}, PWM = {pwm_duty}%)")
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Mäher-Toggle fehlgeschlagen: {e}")
+            return False
+
+    def set_mower_speed(self, speed_percent):
+        """Setzt die Mäher-Geschwindigkeit (0-100%)"""
+        if not self.mower_enabled or not self.mower_state:
+            return False
+
+        try:
+            # Eingabe validieren
+            speed_percent = max(0, min(100, speed_percent))
+
+            # Bestimme das pigpio-Objekt
+            if self.enable_pwm and hasattr(self, 'pi'):
+                pi = self.pi
+            elif hasattr(self, 'pi_mower'):
+                pi = self.pi_mower
+            else:
+                print("❌ Mäher-Geschwindigkeit fehlgeschlagen: Kein pigpio-Objekt verfügbar")
+                return False
+
+            # Konvertiere 0-100% zu 16-84% Duty Cycle (0.8V-4.2V)
+            duty_range = self.mower_duty_max - self.mower_duty_min
+            target_duty = self.mower_duty_min + ((speed_percent / 100.0) * duty_range)
+
+            # PWM setzen
+            duty_cycle_us = int(target_duty * 10000)  # pigpio erwartet Mikrosekunden * 10000
+            pi.hardware_PWM(self.mower_pwm_pin, self.mower_pwm_frequency, duty_cycle_us)
+
+            # Status speichern
+            self.mower_speed = speed_percent
+
+            if not self.quiet:
+                voltage = (target_duty / 100.0) * 5.0  # Berechne Spannung
+                print(f"🌾 Mäher-Geschwindigkeit: {speed_percent}% (PWM {target_duty:.1f}%, {voltage:.1f}V)")
+
+            return True
+
+        except Exception as e:
+            print(f"❌ Mäher-Geschwindigkeit fehlgeschlagen: {e}")
+            return False
+
+    def emergency_stop_mower(self):
+        """Not-Aus für Mäher: Sofort ausschalten"""
+        if not self.mower_enabled:
+            return
+
+        try:
+            # Bestimme das pigpio-Objekt
+            if self.enable_pwm and hasattr(self, 'pi'):
+                pi = self.pi
+            elif hasattr(self, 'pi_mower'):
+                pi = self.pi_mower
+            else:
+                return
+
+            # Sofort ausschalten: PWM auf 0% + Relais aus
+            pi.hardware_PWM(self.mower_pwm_pin, self.mower_pwm_frequency,
+                           int(self.mower_duty_off * 10000))  # 0% = 0V
+            pi.write(self.mower_relay_pin, 0)  # Relais aus
+
+            # Status zurücksetzen
+            self.mower_state = False
+            self.mower_speed = 0
+
+            if not self.quiet:
+                print("🚨 MÄHER NOT-AUS: Mäher sofort ausgeschaltet")
+
+        except Exception as e:
+            print(f"❌ Mäher Not-Aus fehlgeschlagen: {e}")
+
     def _cleanup_pwm(self):
         """PWM-Cleanup beim Beenden"""
         if self.enable_pwm and hasattr(self, 'pi'):
@@ -565,6 +848,19 @@ class CalibratedESCController:
             self.pi_light.stop()
             if not self.quiet:
                 print("🧹 Licht-Steuerung-Cleanup abgeschlossen")
+
+        # Separates pigpio-Objekt für Mäher-Steuerung cleanup
+        if hasattr(self, 'pi_mower'):
+            # Mäher sicher ausschalten beim Beenden
+            if self.mower_enabled:
+                self.pi_mower.hardware_PWM(self.mower_pwm_pin, self.mower_pwm_frequency,
+                                          int(self.mower_duty_off * 10000))  # 0% PWM
+                self.pi_mower.write(self.mower_relay_pin, 0)  # Relais aus
+                if not self.quiet:
+                    print("🌾 Mäher ausgeschaltet beim Beenden")
+            self.pi_mower.stop()
+            if not self.quiet:
+                print("🧹 Mäher-Steuerung-Cleanup abgeschlossen")
 
     def _cleanup_web(self):
         """Web-Interface-Cleanup beim Beenden"""
@@ -1059,6 +1355,14 @@ Beispiele:
     parser.add_argument('--no-light', action='store_true',
                        help='Licht-Steuerung deaktivieren')
 
+    # Mäher-Steuerung Argumente
+    parser.add_argument('--mower-relay-pin', type=int, default=23,
+                       help='GPIO-Pin für Mäher-Relais (default: 23)')
+    parser.add_argument('--mower-pwm-pin', type=int, default=12,
+                       help='GPIO-Pin für Mäher-PWM (default: 12)')
+    parser.add_argument('--no-mower', action='store_true',
+                       help='Mäher-Steuerung deaktivieren')
+
     args = parser.parse_args()
 
     # GPIO-Pins parsen
@@ -1103,6 +1407,11 @@ Beispiele:
             print(f"💡 Licht-Steuerung: GPIO{args.light_pin} (Relais-Steuerung)")
         else:
             print("⚠️ Licht-Steuerung: DEAKTIVIERT")
+        if not args.no_mower:
+            print(f"🌾 Mäher-Steuerung: Relais=GPIO{args.mower_relay_pin}, PWM=GPIO{args.mower_pwm_pin}")
+            print(f"   PWM-Bereich: 16%-84% (0.8V-4.2V), Frequenz: 1000Hz")
+        else:
+            print("⚠️ Mäher-Steuerung: DEAKTIVIERT")
         print("="*70)
 
     # Controller erstellen
@@ -1119,7 +1428,10 @@ Beispiele:
         web_port=args.web_port,
         safety_pin=args.safety_pin,
         light_enabled=not args.no_light,
-        light_pin=args.light_pin
+        light_pin=args.light_pin,
+        mower_enabled=not args.no_mower,
+        mower_relay_pin=args.mower_relay_pin,
+        mower_pwm_pin=args.mower_pwm_pin
     )
 
     # Sicherheitsschaltleiste deaktivieren falls gewünscht

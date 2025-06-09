@@ -120,8 +120,10 @@ esc-start
 **ESC Controller Pin Usage:**
 - **GPIO 18**: Right Motor PWM Output (Hardware-PWM)
 - **GPIO 19**: Left Motor PWM Output (Hardware-PWM)
-- **GPIO 12**: Emergency Stop/Safety Switch Input (pulled high, active low)
+- **GPIO 12**: Mower Speed PWM Output (16-84% Duty Cycle, 1000Hz)
+- **GPIO 17**: Emergency Stop/Safety Switch Input (pulled high, active low)
 - **GPIO 22**: Light Control Relay Output (HIGH = On, LOW = Off)
+- **GPIO 23**: Mower Control Relay Output (HIGH = On, LOW = Off)
 
 **Reserved/System Pins:**
 - **GPIO 2/3**: I2C (reserved for system use)
@@ -129,7 +131,7 @@ esc-start
 - **GPIO 9-11**: SPI (used by HAT)
 
 **Available GPIO Pins:**
-- GPIO 4, 5, 6, 13, 16, 17, 20, 21, 23, 26, 27 (free for expansion)
+- GPIO 4, 5, 6, 13, 16, 20, 21, 26, 27 (free for expansion)
 
 ### Orange Cube Setup
 - **Firmware**: ArduPilot Rover with Skid Steering (2-motor configuration)
