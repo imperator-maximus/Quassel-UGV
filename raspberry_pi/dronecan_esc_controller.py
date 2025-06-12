@@ -75,10 +75,10 @@ class CalibratedESCController:
         self.mower_state = False  # Mäher initial aus
         self.mower_speed = 0  # Geschwindigkeit 0-100%
 
-        # PWM-Konfiguration für Mäher (16-84% Duty Cycle für 0.8V-4.2V)
+        # PWM-Konfiguration für Mäher (24-100% Duty Cycle für 0.8V-3.3V bei 3.3V GPIO)
         self.mower_pwm_frequency = 1000  # 1000 Hz
-        self.mower_duty_min = 16  # 16% = ca. 0.8V (Leerlauf)
-        self.mower_duty_max = 84  # 84% = ca. 4.2V (Vollgas)
+        self.mower_duty_min = 24  # 24% = ca. 0.8V (Leerlauf bei 3.3V GPIO)
+        self.mower_duty_max = 100  # 100% = 3.3V (Vollgas bei 3.3V GPIO)
         self.mower_duty_off = 0   # 0% = 0V (Disarmed/Fehler)
 
         # Web-Interface Konfiguration
@@ -294,7 +294,7 @@ class CalibratedESCController:
             if not self.quiet:
                 print(f"✅ Mäher-Steuerung initialisiert")
                 print(f"   Relais: HIGH = Ein, LOW = Aus")
-                print(f"   PWM-Bereich: {self.mower_duty_min}%-{self.mower_duty_max}% ({self.mower_duty_min/100*5:.1f}V-{self.mower_duty_max/100*5:.1f}V)")
+                print(f"   PWM-Bereich: {self.mower_duty_min}%-{self.mower_duty_max}% ({self.mower_duty_min/100*3.3:.1f}V-{self.mower_duty_max/100*3.3:.1f}V)")
                 print(f"   Initial-Status: Aus, 0% Geschwindigkeit")
 
         except Exception as e:
@@ -733,7 +733,7 @@ class CalibratedESCController:
             if self.mower_state:
                 # Mäher einschalten: Relais an + PWM auf Leerlauf
                 pi.write(self.mower_relay_pin, 1)  # Relais ein
-                # PWM auf Leerlauf (16% = 0.8V)
+                # PWM auf Leerlauf (24% = 0.8V bei 3.3V GPIO)
                 duty_cycle_us = int(self.mower_duty_min * 10000)
                 pi.hardware_PWM(self.mower_pwm_pin, self.mower_pwm_frequency, duty_cycle_us)
                 self.mower_speed = 0  # Geschwindigkeit auf 0 setzen
@@ -774,7 +774,7 @@ class CalibratedESCController:
                 print("❌ Mäher-Geschwindigkeit fehlgeschlagen: Kein pigpio-Objekt verfügbar")
                 return False
 
-            # Konvertiere 0-100% zu 16-84% Duty Cycle (0.8V-4.2V)
+            # Konvertiere 0-100% zu 24-100% Duty Cycle (0.8V-3.3V bei 3.3V GPIO)
             duty_range = self.mower_duty_max - self.mower_duty_min
             target_duty = self.mower_duty_min + ((speed_percent / 100.0) * duty_range)
 
@@ -786,7 +786,7 @@ class CalibratedESCController:
             self.mower_speed = speed_percent
 
             if not self.quiet:
-                voltage = (target_duty / 100.0) * 5.0  # Berechne Spannung
+                voltage = (target_duty / 100.0) * 3.3  # Berechne Spannung bei 3.3V GPIO
                 print(f"🌾 Mäher-Geschwindigkeit: {speed_percent}% (PWM {target_duty:.1f}%, {voltage:.1f}V)")
 
             return True
@@ -1409,7 +1409,7 @@ Beispiele:
             print("⚠️ Licht-Steuerung: DEAKTIVIERT")
         if not args.no_mower:
             print(f"🌾 Mäher-Steuerung: Relais=GPIO{args.mower_relay_pin}, PWM=GPIO{args.mower_pwm_pin}")
-            print(f"   PWM-Bereich: 16%-84% (0.8V-4.2V), Frequenz: 1000Hz")
+            print(f"   PWM-Bereich: 24%-100% (0.8V-3.3V bei 3.3V GPIO), Frequenz: 1000Hz")
         else:
             print("⚠️ Mäher-Steuerung: DEAKTIVIERT")
         print("="*70)
