@@ -644,7 +644,7 @@ class CalibratedESCController:
         """Notfall-Stop: Alle Motoren auf Neutral + Mäher aus"""
         if self.enable_pwm and hasattr(self, 'pi'):
             for side, pin in self.pwm_pins.items():
-                self.pi.hardware_PWM(pin, 50, 75000)  # 1500μs neutral
+                self.pi.hardware_PWM(pin, 50, 1500 * 50)  # 1500μs neutral = 75000
             print("🚨 EMERGENCY STOP: Alle Motoren auf Neutral (1500μs)")
 
         # Mäher bei Not-Aus ebenfalls ausschalten
@@ -939,8 +939,9 @@ class CalibratedESCController:
         self.current_pwm_values[side] = ramped_pwm
 
         # Konvertiere μs zu pigpio duty cycle (0-1000000)
-        # Bei 50Hz: 1000μs = 5%, 1500μs = 7.5%, 2000μs = 10%
-        duty_cycle = int((ramped_pwm / 20000.0) * 1000000)
+        # Bei 50Hz: 1000μs = 500000, 1500μs = 750000, 2000μs = 1000000
+        # Korrekte Formel: (μs / 2000) * 1000000 für 100% bei 2000μs
+        duty_cycle = int((ramped_pwm / 2000.0) * 1000000)
 
         pin = self.pwm_pins[side]
         self.pi.hardware_PWM(pin, 50, duty_cycle)
@@ -960,8 +961,9 @@ class CalibratedESCController:
         pwm_us = max(1000, min(2000, pwm_us))
 
         # Konvertiere μs zu pigpio duty cycle (0-1000000)
-        # Bei 50Hz: 1000μs = 5%, 1500μs = 7.5%, 2000μs = 10%
-        duty_cycle = int((pwm_us / 20000.0) * 1000000)
+        # Bei 50Hz: 1000μs = 500000, 1500μs = 750000, 2000μs = 1000000
+        # Korrekte Formel: (μs / 2000) * 1000000
+        duty_cycle = int((pwm_us / 2000.0) * 1000000)
 
         pin = self.pwm_pins[side]
         self.pi.hardware_PWM(pin, 50, duty_cycle)
@@ -991,7 +993,7 @@ class CalibratedESCController:
 
                 # PWM Hardware aktualisieren
                 if hasattr(self, 'pi'):
-                    duty_cycle = int((ramped_pwm / 20000.0) * 1000000)
+                    duty_cycle = int((ramped_pwm / 2000.0) * 1000000)
                     pin = self.pwm_pins[side]
                     self.pi.hardware_PWM(pin, 50, duty_cycle)
                     self.last_pwm_values[side] = ramped_pwm
