@@ -120,7 +120,7 @@ esc-start
 **ESC Controller Pin Usage:**
 - **GPIO 18**: Right Motor PWM Output (Hardware-PWM)
 - **GPIO 19**: Left Motor PWM Output (Hardware-PWM)
-- **GPIO 12**: Mower Speed PWM Output (16-84% Duty Cycle, 1000Hz)
+- **GPIO 12**: Mower Speed PWM Output (24-100% Duty Cycle, 1000Hz, 3.3V GPIO)
 - **GPIO 17**: Emergency Stop/Safety Switch Input (pulled high, active low)
 - **GPIO 22**: Light Control Relay Output (HIGH = On, LOW = Off)
 - **GPIO 23**: Mower Control Relay Output (HIGH = On, LOW = Off)
@@ -132,6 +132,30 @@ esc-start
 
 **Available GPIO Pins:**
 - GPIO 4, 5, 6, 13, 16, 20, 21, 26, 27 (free for expansion)
+
+### Mower Speed Control (PWM-to-Analog Conversion)
+
+The mower speed control uses PWM-to-analog conversion via RC filter circuit:
+
+**Circuit Configuration:**
+```
+GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
+                           |
+                         [15µF]
+                           |
+                         GND
+```
+
+**PWM Specifications:**
+- **Frequency**: 1000Hz
+- **Duty Cycle Range**: 24-100% (optimized for 3.3V GPIO)
+- **Output Voltage Range**: 0.8V - 3.3V
+- **Speed Mapping**: 0% = 0.8V (idle), 100% = 3.3V (full speed)
+
+**RC Filter Analysis:**
+- **Time Constant**: τ = 1kΩ × 15µF = 15ms
+- **Smoothing Factor**: 15x PWM period (excellent filtering)
+- **Ripple**: <1% of output voltage
 
 ### Orange Cube Setup
 - **Firmware**: ArduPilot Rover with Skid Steering (2-motor configuration)
