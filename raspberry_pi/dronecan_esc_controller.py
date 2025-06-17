@@ -118,8 +118,13 @@ class CalibratedESCController:
         self.joystick_x = 0.0  # -1.0 bis +1.0 (links/rechts)
         self.joystick_y = 0.0  # -1.0 bis +1.0 (rückwärts/vorwärts)
         self.joystick_last_update = 0
-        self.joystick_timeout = 1.0  # Sekunden
+        # KEIN joystick_timeout mehr - Joystick bleibt aktiv bis explizit released
         self.max_speed_percent = 100.0  # Geschwindigkeitsbegrenzung
+
+        # Debug-Variablen
+        self._last_joystick_debug = 0
+        self._last_x = 0
+        self._last_y = 0
 
         # PWM initialisieren falls aktiviert
         if self.enable_pwm:
@@ -393,7 +398,7 @@ class CalibratedESCController:
             self.flask_app = Flask(__name__, template_folder='templates', static_folder='static')
             self.flask_app.config['SECRET_KEY'] = 'ugv_dronecan_secret_2024'
 
-            # SocketIO für Echtzeit-Kommunikation
+            # SocketIO EINFACH - Standard-Einstellungen
             self.socketio = SocketIO(self.flask_app, cors_allowed_origins="*")
 
             # Web-Routen definieren
@@ -569,27 +574,17 @@ class CalibratedESCController:
             if not self.quiet:
                 print("🌐 Web-Client getrennt")
 
-        # Joystick Event-Handler (Phase 2)
+        # Joystick Event-Handler (Phase 2) - EINFACH und SCHNELL
         @self.socketio.on('joystick_update')
         def handle_joystick_update(data):
             """Verarbeitet Joystick-Input vom Web-Interface"""
             if self.can_enabled:
-                if not self.quiet:
-                    print("🚫 Joystick ignoriert - CAN ist aktiviert (Autonomie-Modus)")
                 return  # Joystick nur aktiv wenn CAN DEAKTIVIERT (Not-Aus-Modus)
 
             try:
-                # Joystick-Werte extrahieren
-                x = float(data.get('x', 0.0))  # -1.0 bis +1.0
-                y = float(data.get('y', 0.0))  # -1.0 bis +1.0
-
-                # Begrenze Werte
-                x = max(-1.0, min(1.0, x))
-                y = max(-1.0, min(1.0, y))
-
-                # Debug-Ausgabe für jede Eingabe
-                if not self.quiet:
-                    print(f"🕹️ Joystick-Input: X={x:.3f} Y={y:.3f}")
+                # Joystick-Werte extrahieren und begrenzen
+                x = max(-1.0, min(1.0, float(data.get('x', 0.0))))
+                y = max(-1.0, min(1.0, float(data.get('y', 0.0))))
 
                 # Joystick-Status aktualisieren
                 self.joystick_x = x
@@ -597,14 +592,12 @@ class CalibratedESCController:
                 self.joystick_last_update = time.time()
                 self.joystick_enabled = True
 
-                # Joystick zu Motor-Kommandos konvertieren
+                # DIREKT verarbeiten - KEIN Throttling
                 self._process_joystick_input(x, y)
 
             except Exception as e:
                 if not self.quiet:
                     print(f"❌ Joystick-Fehler: {e}")
-                    import traceback
-                    traceback.print_exc()
 
         @self.socketio.on('joystick_release')
         def handle_joystick_release():
@@ -1002,12 +995,8 @@ class CalibratedESCController:
         """Prüft Kommando-Timeout und setzt ggf. auf Neutral"""
         current_time = time.time()
 
-        # Prüfe Joystick-Timeout
-        if (self.joystick_enabled and
-            current_time - self.joystick_last_update > self.joystick_timeout):
-            self.joystick_enabled = False
-            if not self.quiet:
-                print("⚠️ Joystick-Timeout - Joystick deaktiviert")
+        # KEIN Joystick-Timeout mehr - Joystick bleibt aktiv bis explizit released
+        # Joystick wird nur durch joystick_release Event deaktiviert
 
         # Prüfe DroneCAN-Kommando-Timeout (nur wenn Joystick nicht aktiv)
         if (self.enable_pwm and not self.joystick_enabled and
@@ -1054,9 +1043,11 @@ class CalibratedESCController:
         self._set_motor_pwm_direct('left', left_pwm)
         self._set_motor_pwm_direct('right', right_pwm)
 
-        # Debug-Ausgabe für JEDE Bewegung
-        if not self.quiet:
-            print(f"🕹️ PWM-Update: X={x:.3f}→{x_scaled:.3f} Y={y:.3f}→{y_scaled:.3f} | L={left_pwm}μs R={right_pwm}μs")
+        # Debug-Ausgabe reduziert (nur bei größeren Änderungen)
+        if not self.quiet and hasattr(self, '_last_joystick_debug'):
+            if abs(x - getattr(self, '_last_x', 0)) > 0.1 or abs(y - getattr(self, '_last_y', 0)) > 0.1:
+                print(f"🕹️ PWM-Update: X={x:.3f}→{x_scaled:.3f} Y={y:.3f}→{y_scaled:.3f} | L={left_pwm}μs R={right_pwm}μs")
+                self._last_x, self._last_y = x, y
 
         # WebSocket-Status an Client senden
         if hasattr(self, 'socketio') and self.socketio:

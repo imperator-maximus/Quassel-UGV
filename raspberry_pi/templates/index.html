@@ -803,24 +803,14 @@
         let currentKnobPos = { x: 150, y: 150 };
         let maxSpeed = 100;
 
-        // WebSocket Event-Handler für Debugging
+        // Hochfrequente Updates für flüssige Steuerung
+        let lastJoystickSend = 0;
+        const joystickThrottleMs = 20; // Alle 20ms senden (50 Hz) - viel flüssiger!
+        let joystickUpdateInterval = null;
+
+        // WebSocket Event-Handler
         socket.on('connect', function() {
             console.log('✅ WebSocket verbunden');
-        });
-
-        socket.on('disconnect', function() {
-            console.log('❌ WebSocket getrennt');
-        });
-
-        socket.on('pwm_update', function(data) {
-            console.log('📡 PWM Update empfangen:', data);
-            // PWM-Werte in der UI aktualisieren
-            if (data.left) document.getElementById('leftPwm').textContent = data.left + 'μs';
-            if (data.right) document.getElementById('rightPwm').textContent = data.right + 'μs';
-        });
-
-        // Verbindungsstatus
-        socket.on('connect', function() {
             document.getElementById('connectionStatus').textContent = 'Verbunden';
             document.getElementById('connectionStatus').className = 'connection-status connected';
             connectionStartTime = Date.now();
@@ -828,8 +818,16 @@
         });
 
         socket.on('disconnect', function() {
+            console.log('❌ WebSocket getrennt');
             document.getElementById('connectionStatus').textContent = 'Getrennt';
             document.getElementById('connectionStatus').className = 'connection-status disconnected';
+        });
+
+        socket.on('pwm_update', function(data) {
+            console.log('📡 PWM Update empfangen:', data);
+            // PWM-Werte in der UI aktualisieren
+            if (data.left) document.getElementById('leftPwm').textContent = data.left + 'μs';
+            if (data.right) document.getElementById('rightPwm').textContent = data.right + 'μs';
         });
 
         // Status Updates vom Server
@@ -1244,6 +1242,7 @@
 
             if (distance <= knobRadius) {
                 isDragging = true;
+                startContinuousUpdates();
                 event.preventDefault();
             }
         }
@@ -1276,6 +1275,7 @@
             if (!isDragging) return;
 
             isDragging = false;
+            stopContinuousUpdates();
 
             // Smooth return to center
             const returnToCenter = () => {
@@ -1316,13 +1316,29 @@
             const x = (currentKnobPos.x - joystickCenter.x) / joystickRadius;
             const y = -(currentKnobPos.y - joystickCenter.y) / joystickRadius; // Y invertiert
 
-            // Anzeige aktualisieren
+            // Anzeige IMMER aktualisieren
             document.getElementById('joystickX').textContent = x.toFixed(3);
             document.getElementById('joystickY').textContent = y.toFixed(3);
 
-            // IMMER an Server senden (auch bei kleinen Bewegungen)
-            console.log(`Sending joystick: X=${x.toFixed(3)} Y=${y.toFixed(3)}`);
+            // KEIN Throttling mehr - maximale Flüssigkeit!
             socket.emit('joystick_update', { x: x, y: y });
+        }
+
+        function startContinuousUpdates() {
+            if (joystickUpdateInterval) return; // Bereits aktiv
+
+            joystickUpdateInterval = setInterval(() => {
+                if (isDragging || (currentKnobPos.x !== joystickCenter.x || currentKnobPos.y !== joystickCenter.y)) {
+                    updateJoystickValues();
+                }
+            }, joystickThrottleMs);
+        }
+
+        function stopContinuousUpdates() {
+            if (joystickUpdateInterval) {
+                clearInterval(joystickUpdateInterval);
+                joystickUpdateInterval = null;
+            }
         }
 
         // Initialisierung
