@@ -1046,7 +1046,10 @@ class CalibratedESCController:
 
         # Geschwindigkeitsbegrenzung anwenden
         speed_factor = self.max_speed_percent / 100.0
-        x_scaled = x * speed_factor
+
+        # VERBESSERT: Verstärktes Kurvenverhalten
+        x_turn_factor = 1.3  # Verstärkt Drehmoment um 30%
+        x_scaled = x * speed_factor * x_turn_factor
         y_scaled = y * speed_factor
 
         # Skid Steering Logic: X/Y zu Links/Rechts Motor
@@ -1072,9 +1075,11 @@ class CalibratedESCController:
         self._set_motor_pwm_direct('left', left_pwm)
         self._set_motor_pwm_direct('right', right_pwm)
 
-        # Debug-Ausgabe für JEDE Bewegung
-        if not self.quiet:
-            print(f"🕹️ PWM-Update: X={x:.3f}→{x_scaled:.3f} Y={y:.3f}→{y_scaled:.3f} | L={left_pwm}μs R={right_pwm}μs")
+        # Debug-Ausgabe (nur bei größeren Änderungen)
+        if not self.quiet and hasattr(self, '_last_joystick_debug'):
+            if abs(x - getattr(self, '_last_x', 0)) > 0.1 or abs(y - getattr(self, '_last_y', 0)) > 0.1:
+                print(f"🕹️ Joystick: X={x:.2f}→{x_scaled:.2f} Y={y:.2f}→{y_scaled:.2f} | L={left_pwm}μs R={right_pwm}μs")
+                self._last_x, self._last_y = x, y
 
         # WebSocket-Status an Client senden
         if hasattr(self, 'socketio') and self.socketio:
