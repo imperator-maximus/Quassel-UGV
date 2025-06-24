@@ -803,6 +803,7 @@
         let isDragging = false;
         let currentKnobPos = { x: 150, y: 150 };
         let maxSpeed = 100;
+        let maxSpeedInitialized = false;  // Flag um zu verhindern, dass Server den Slider überschreibt
 
         // Hochfrequente Updates für flüssige Steuerung
         let lastJoystickSend = 0;
@@ -834,6 +835,12 @@
         // Status Updates vom Server
         socket.on('status_update', function(data) {
             updateStatus(data);
+        });
+
+        // Connect Event - hier darf Max Speed aktualisiert werden
+        socket.on('connect', function() {
+            console.log('🔌 WebSocket verbunden');
+            maxSpeedInitialized = false;  // Reset Flag bei Neuverbindung
         });
 
         // Status Info Toggle Funktion
@@ -940,6 +947,15 @@
             // Joystick-Status
             const joystickStatus = data.joystick_enabled ? 'Aktiv' : 'Inaktiv';
             document.getElementById('joystickStatus').textContent = joystickStatus;
+
+            // Max Speed Slider aktualisieren (nur beim ersten Connect, nicht bei regelmäßigen Updates)
+            if (data.max_speed_percent !== undefined && !maxSpeedInitialized) {
+                maxSpeed = data.max_speed_percent;
+                document.getElementById('speedSlider').value = maxSpeed;
+                document.getElementById('speedValue').textContent = maxSpeed;
+                maxSpeedInitialized = true;  // Flag setzen, damit weitere Updates ignoriert werden
+                console.log('🎚️ Max Speed initial vom Server gesetzt:', maxSpeed + '%');
+            }
 
             // Joystick-Bereich aktivieren/deaktivieren (umgekehrte Logik!)
             const joystickSection = document.getElementById('joystickSection');
@@ -1179,6 +1195,10 @@
             speedSlider.addEventListener('input', function() {
                 maxSpeed = parseInt(this.value);
                 document.getElementById('speedValue').textContent = maxSpeed;
+
+                // Max Speed an Server senden
+                socket.emit('max_speed_update', { max_speed: maxSpeed });
+                console.log('🎚️ Max Speed geändert:', maxSpeed + '%');
             });
 
             drawJoystick();

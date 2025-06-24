@@ -75,10 +75,10 @@ class CalibratedESCController:
         self.mower_state = False  # Mäher initial aus
         self.mower_speed = 0  # Geschwindigkeit 0-100%
 
-        # PWM-Konfiguration für Mäher (24-100% Duty Cycle für 0.8V-3.3V bei 3.3V GPIO)
+        # PWM-Konfiguration für Mäher (16-84% Duty Cycle für 0.8V-4.2V)
         self.mower_pwm_frequency = 1000  # 1000 Hz
-        self.mower_duty_min = 24  # 24% = ca. 0.8V (Leerlauf bei 3.3V GPIO)
-        self.mower_duty_max = 100  # 100% = 3.3V (Vollgas bei 3.3V GPIO)
+        self.mower_duty_min = 16  # 16% = ca. 0.8V (Leerlauf)
+        self.mower_duty_max = 84  # 84% = ca. 4.2V (Vollgas)
         self.mower_duty_off = 0   # 0% = 0V (Disarmed/Fehler)
 
         # Web-Interface Konfiguration
@@ -118,13 +118,8 @@ class CalibratedESCController:
         self.joystick_x = 0.0  # -1.0 bis +1.0 (links/rechts)
         self.joystick_y = 0.0  # -1.0 bis +1.0 (rückwärts/vorwärts)
         self.joystick_last_update = 0
-        # KEIN joystick_timeout mehr - Joystick bleibt aktiv bis explizit released
+        self.joystick_timeout = 1.0  # Sekunden
         self.max_speed_percent = 100.0  # Geschwindigkeitsbegrenzung
-
-        # Debug-Variablen
-        self._last_joystick_debug = 0
-        self._last_x = 0
-        self._last_y = 0
 
         # PWM initialisieren falls aktiviert
         if self.enable_pwm:
@@ -299,7 +294,7 @@ class CalibratedESCController:
             if not self.quiet:
                 print(f"✅ Mäher-Steuerung initialisiert")
                 print(f"   Relais: HIGH = Ein, LOW = Aus")
-                print(f"   PWM-Bereich: {self.mower_duty_min}%-{self.mower_duty_max}% ({self.mower_duty_min/100*3.3:.1f}V-{self.mower_duty_max/100*3.3:.1f}V)")
+                print(f"   PWM-Bereich: {self.mower_duty_min}%-{self.mower_duty_max}% ({self.mower_duty_min/100*5:.1f}V-{self.mower_duty_max/100*5:.1f}V)")
                 print(f"   Initial-Status: Aus, 0% Geschwindigkeit")
 
         except Exception as e:
@@ -398,7 +393,7 @@ class CalibratedESCController:
             self.flask_app = Flask(__name__, template_folder='templates', static_folder='static')
             self.flask_app.config['SECRET_KEY'] = 'ugv_dronecan_secret_2024'
 
-            # SocketIO EINFACH - Standard-Einstellungen
+            # SocketIO für Echtzeit-Kommunikation
             self.socketio = SocketIO(self.flask_app, cors_allowed_origins="*")
 
             # Web-Routen definieren
@@ -566,7 +561,8 @@ class CalibratedESCController:
                 print("🌐 Web-Client verbunden")
             emit('status_update', {
                 'can_enabled': self.can_enabled,
-                'connected': True
+                'connected': True,
+                'max_speed_percent': self.max_speed_percent
             })
 
         @self.socketio.on('disconnect')
@@ -574,17 +570,27 @@ class CalibratedESCController:
             if not self.quiet:
                 print("🌐 Web-Client getrennt")
 
-        # Joystick Event-Handler (Phase 2) - EINFACH und SCHNELL
+        # Joystick Event-Handler (Phase 2)
         @self.socketio.on('joystick_update')
         def handle_joystick_update(data):
             """Verarbeitet Joystick-Input vom Web-Interface"""
             if self.can_enabled:
+                if not self.quiet:
+                    print("🚫 Joystick ignoriert - CAN ist aktiviert (Autonomie-Modus)")
                 return  # Joystick nur aktiv wenn CAN DEAKTIVIERT (Not-Aus-Modus)
 
             try:
-                # Joystick-Werte extrahieren und begrenzen
-                x = max(-1.0, min(1.0, float(data.get('x', 0.0))))
-                y = max(-1.0, min(1.0, float(data.get('y', 0.0))))
+                # Joystick-Werte extrahieren
+                x = float(data.get('x', 0.0))  # -1.0 bis +1.0
+                y = float(data.get('y', 0.0))  # -1.0 bis +1.0
+
+                # Begrenze Werte
+                x = max(-1.0, min(1.0, x))
+                y = max(-1.0, min(1.0, y))
+
+                # Debug-Ausgabe für jede Eingabe
+                if not self.quiet:
+                    print(f"🕹️ Joystick-Input: X={x:.3f} Y={y:.3f}")
 
                 # Joystick-Status aktualisieren
                 self.joystick_x = x
@@ -592,12 +598,14 @@ class CalibratedESCController:
                 self.joystick_last_update = time.time()
                 self.joystick_enabled = True
 
-                # DIREKT verarbeiten - KEIN Throttling
+                # Joystick zu Motor-Kommandos konvertieren
                 self._process_joystick_input(x, y)
 
             except Exception as e:
                 if not self.quiet:
                     print(f"❌ Joystick-Fehler: {e}")
+                    import traceback
+                    traceback.print_exc()
 
         @self.socketio.on('joystick_release')
         def handle_joystick_release():
@@ -612,6 +620,21 @@ class CalibratedESCController:
                 self._set_motor_pwm_direct('right', 1500)
                 if not self.quiet:
                     print("🕹️ Joystick-Release: Motoren auf Neutral (DIREKT)")
+
+        @self.socketio.on('max_speed_update')
+        def handle_max_speed_update(data):
+            """Max Speed Slider Update vom Web-Interface"""
+            try:
+                max_speed = float(data.get('max_speed', 100.0))
+                max_speed = max(10.0, min(100.0, max_speed))  # Begrenzen auf 10-100%
+
+                self.max_speed_percent = max_speed
+
+                if not self.quiet:
+                    print(f"🎚️ Max Speed aktualisiert: {max_speed}%")
+
+            except Exception as e:
+                print(f"❌ Max Speed Update Fehler: {e}")
 
     def _run_web_server(self):
         """Läuft Web-Server in separatem Thread"""
@@ -726,7 +749,7 @@ class CalibratedESCController:
             if self.mower_state:
                 # Mäher einschalten: Relais an + PWM auf Leerlauf
                 pi.write(self.mower_relay_pin, 1)  # Relais ein
-                # PWM auf Leerlauf (24% = 0.8V bei 3.3V GPIO)
+                # PWM auf Leerlauf (16% = 0.8V)
                 duty_cycle_us = int(self.mower_duty_min * 10000)
                 pi.hardware_PWM(self.mower_pwm_pin, self.mower_pwm_frequency, duty_cycle_us)
                 self.mower_speed = 0  # Geschwindigkeit auf 0 setzen
@@ -767,7 +790,7 @@ class CalibratedESCController:
                 print("❌ Mäher-Geschwindigkeit fehlgeschlagen: Kein pigpio-Objekt verfügbar")
                 return False
 
-            # Konvertiere 0-100% zu 24-100% Duty Cycle (0.8V-3.3V bei 3.3V GPIO)
+            # Konvertiere 0-100% zu 16-84% Duty Cycle (0.8V-4.2V)
             duty_range = self.mower_duty_max - self.mower_duty_min
             target_duty = self.mower_duty_min + ((speed_percent / 100.0) * duty_range)
 
@@ -779,7 +802,7 @@ class CalibratedESCController:
             self.mower_speed = speed_percent
 
             if not self.quiet:
-                voltage = (target_duty / 100.0) * 3.3  # Berechne Spannung bei 3.3V GPIO
+                voltage = (target_duty / 100.0) * 5.0  # Berechne Spannung
                 print(f"🌾 Mäher-Geschwindigkeit: {speed_percent}% (PWM {target_duty:.1f}%, {voltage:.1f}V)")
 
             return True
@@ -932,8 +955,9 @@ class CalibratedESCController:
         self.current_pwm_values[side] = ramped_pwm
 
         # Konvertiere μs zu pigpio duty cycle (0-1000000)
-        # Bei 50Hz: 1000μs = 5%, 1500μs = 7.5%, 2000μs = 10%
-        duty_cycle = int((ramped_pwm / 20000.0) * 1000000)
+        # KORRIGIERT: Verwende die funktionierenden Test-Werte als Basis
+        # 1500μs → 75000 duty (funktionierte), 2000μs → 100000 duty (funktionierte)
+        duty_cycle = int(ramped_pwm * 50)
 
         pin = self.pwm_pins[side]
         self.pi.hardware_PWM(pin, 50, duty_cycle)
@@ -953,8 +977,9 @@ class CalibratedESCController:
         pwm_us = max(1000, min(2000, pwm_us))
 
         # Konvertiere μs zu pigpio duty cycle (0-1000000)
-        # Bei 50Hz: 1000μs = 5%, 1500μs = 7.5%, 2000μs = 10%
-        duty_cycle = int((pwm_us / 20000.0) * 1000000)
+        # KORRIGIERT: Verwende die funktionierenden Test-Werte als Basis
+        # 1500μs → 75000 duty (funktionierte), 2000μs → 100000 duty (funktionierte)
+        duty_cycle = int(pwm_us * 50)
 
         pin = self.pwm_pins[side]
         self.pi.hardware_PWM(pin, 50, duty_cycle)
@@ -984,7 +1009,7 @@ class CalibratedESCController:
 
                 # PWM Hardware aktualisieren
                 if hasattr(self, 'pi'):
-                    duty_cycle = int((ramped_pwm / 20000.0) * 1000000)
+                    duty_cycle = int(ramped_pwm * 50)
                     pin = self.pwm_pins[side]
                     self.pi.hardware_PWM(pin, 50, duty_cycle)
                     self.last_pwm_values[side] = ramped_pwm
@@ -995,17 +1020,21 @@ class CalibratedESCController:
         """Prüft Kommando-Timeout und setzt ggf. auf Neutral"""
         current_time = time.time()
 
-        # KEIN Joystick-Timeout mehr - Joystick bleibt aktiv bis explizit released
-        # Joystick wird nur durch joystick_release Event deaktiviert
+        # Prüfe Joystick-Timeout
+        if (self.joystick_enabled and
+            current_time - self.joystick_last_update > self.joystick_timeout):
+            self.joystick_enabled = False
+            if not self.quiet:
+                print("⚠️ Joystick-Timeout - Joystick deaktiviert")
 
         # Prüfe DroneCAN-Kommando-Timeout (nur wenn Joystick nicht aktiv)
         if (self.enable_pwm and not self.joystick_enabled and
             current_time - self.last_command_time > self.command_timeout):
-            # Timeout erreicht - auf Neutral setzen (mit Ramping)
-            self._set_motor_pwm('left', 1500)
-            self._set_motor_pwm('right', 1500)
+            # Timeout erreicht - auf Neutral setzen (DIREKT ohne Ramping für sofortige Reaktion)
+            self._set_motor_pwm_direct('left', 1500)
+            self._set_motor_pwm_direct('right', 1500)
             if not self.quiet:
-                print("⚠️ Kommando-Timeout - Motoren auf Neutral gesetzt")
+                print("⚠️ Kommando-Timeout - Motoren auf Neutral gesetzt (DIREKT)")
             self.last_command_time = current_time  # Reset um Spam zu vermeiden
 
     def _process_joystick_input(self, x, y):
@@ -1017,13 +1046,11 @@ class CalibratedESCController:
 
         # Geschwindigkeitsbegrenzung anwenden
         speed_factor = self.max_speed_percent / 100.0
-
-        # VERBESSERT: Verstärktes Kurvenverhalten
-        x_turn_factor = 1.3  # Verstärkt Drehmoment um 30%
-        x_scaled = x * speed_factor * x_turn_factor
+        x_scaled = x * speed_factor
         y_scaled = y * speed_factor
 
         # Skid Steering Logic: X/Y zu Links/Rechts Motor
+        # Y = Vorwärts/Rückwärts, X = Links/Rechts
         left_power = y_scaled + x_scaled   # Links = Vorwärts + Rechtsdrehung
         right_power = y_scaled - x_scaled  # Rechts = Vorwärts - Rechtsdrehung
 
@@ -1045,11 +1072,9 @@ class CalibratedESCController:
         self._set_motor_pwm_direct('left', left_pwm)
         self._set_motor_pwm_direct('right', right_pwm)
 
-        # Debug-Ausgabe (nur bei größeren Änderungen)
-        if not self.quiet and hasattr(self, '_last_joystick_debug'):
-            if abs(x - getattr(self, '_last_x', 0)) > 0.1 or abs(y - getattr(self, '_last_y', 0)) > 0.1:
-                print(f"🕹️ Joystick: X={x:.2f}→{x_scaled:.2f} Y={y:.2f}→{y_scaled:.2f} | L={left_pwm}μs R={right_pwm}μs")
-                self._last_x, self._last_y = x, y
+        # Debug-Ausgabe für JEDE Bewegung
+        if not self.quiet:
+            print(f"🕹️ PWM-Update: X={x:.3f}→{x_scaled:.3f} Y={y:.3f}→{y_scaled:.3f} | L={left_pwm}μs R={right_pwm}μs")
 
         # WebSocket-Status an Client senden
         if hasattr(self, 'socketio') and self.socketio:
@@ -1402,7 +1427,7 @@ Beispiele:
             print("⚠️ Licht-Steuerung: DEAKTIVIERT")
         if not args.no_mower:
             print(f"🌾 Mäher-Steuerung: Relais=GPIO{args.mower_relay_pin}, PWM=GPIO{args.mower_pwm_pin}")
-            print(f"   PWM-Bereich: 24%-100% (0.8V-3.3V bei 3.3V GPIO), Frequenz: 1000Hz")
+            print(f"   PWM-Bereich: 16%-84% (0.8V-4.2V), Frequenz: 1000Hz")
         else:
             print("⚠️ Mäher-Steuerung: DEAKTIVIERT")
         print("="*70)
