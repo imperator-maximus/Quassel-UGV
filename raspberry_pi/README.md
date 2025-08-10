@@ -239,7 +239,9 @@ python3 test_safety_switch.py
 
 ## 🌐 WiFi Integration
 
-### ESP32 DroneBridge Configuration
+### ESP32-S3 DroneBridge Configuration
+- **Hardware:** ESP32-S3 WiFi Bridge
+- **UART Pins:** GPIO13 (TX), GPIO12 (RX)
 - **IP Address:** 192.168.178.134
 - **MAVLink Ports:** 14550 (Host), 14555 (Client)
 - **Baudrate:** 57600

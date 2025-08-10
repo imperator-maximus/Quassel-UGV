@@ -157,6 +157,17 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
 - **Smoothing Factor**: 15x PWM period (excellent filtering)
 - **Ripple**: <1% of output voltage
 
+### ESP32-S3 DroneBridge Setup
+- **Hardware**: ESP32-S3 WiFi Bridge for MAVLink communication
+- **UART Configuration**:
+  - `GPIO13 (TX)` - Serial Transmit to Orange Cube
+  - `GPIO12 (RX)` - Serial Receive from Orange Cube
+  - `Baudrate: 57600`
+- **Network Configuration**:
+  - `IP Address: 192.168.178.134`
+  - `MAVLink Port: 14550` (Ground Station)
+  - `MAVLink Port: 14555` (Companion Computer)
+
 ### Orange Cube Setup
 - **Firmware**: ArduPilot Rover with Skid Steering (2-motor configuration)
 - **CAN Configuration**:
