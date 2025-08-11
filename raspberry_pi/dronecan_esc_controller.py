@@ -24,6 +24,9 @@ import sys
 import atexit
 import threading
 import queue
+import socket
+import base64
+
 from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO, emit
 
@@ -31,7 +34,9 @@ class CalibratedESCController:
     def __init__(self, enable_pwm=False, pwm_pins=[18, 19], enable_monitor=True, quiet=False,
                  enable_ramping=True, acceleration_rate=25, deceleration_rate=800, brake_rate=1500,
                  enable_web=False, web_port=80, safety_pin=17, light_enabled=True, light_pin=22,
-                 mower_enabled=True, mower_relay_pin=23, mower_pwm_pin=12):
+                 mower_enabled=True, mower_relay_pin=23, mower_pwm_pin=12, enable_rtk=False,
+                 ntrip_host="openrtk-mv.de", ntrip_port=2101, ntrip_user="", ntrip_pass="",
+                 ntrip_mountpoint="VRS_3_4G_MV"):
         # Kalibrierungswerte AKTUALISIERT mit neuen Orange Cube Parametern
         # Motor 0 = Rechts, Motor 1 = Links
         # Neue Werte: Rückwärts ~-8000, Neutral ~0, Vorwärts ~+8000
@@ -139,6 +144,28 @@ class CalibratedESCController:
         # Web-Interface initialisieren falls aktiviert
         if self.enable_web:
             self._init_web_interface()
+
+        # RTK-NTRIP initialisieren falls aktiviert
+        self.enable_rtk = enable_rtk
+        if self.enable_rtk:
+            self.ntrip_config = {
+                'host': ntrip_host,
+                'port': ntrip_port,
+                'user': ntrip_user,
+                'pass': ntrip_pass,
+                'mountpoint': ntrip_mountpoint
+            }
+            self.ntrip_socket = None
+            self.gps_position = None
+            self.last_gga_time = 0
+            self.gga_interval = 10  # Sekunden zwischen GGA-Nachrichten
+
+            # RTK Rate Limiting
+            self.last_rtcm_time = 0
+            self.rtcm_interval = 0.02  # Max 50 Hz RTCM-Übertragung (sehr schnell)
+            self.rtcm_buffer = b''     # Buffer für RTCM-Daten
+
+            self._init_rtk()
 
     def _init_pwm(self):
         """Initialisiert Hardware-PWM für sichere ESC-Steuerung"""
@@ -415,6 +442,22 @@ class CalibratedESCController:
         except Exception as e:
             print(f"❌ Web-Interface-Initialisierung fehlgeschlagen: {e}")
             sys.exit(1)
+
+    def _init_rtk(self):
+        """Initialisiert RTK-NTRIP-Client"""
+        try:
+            if not self.quiet:
+                print(f"🛰️ RTK-NTRIP initialisiert:")
+                print(f"   Server: {self.ntrip_config['host']}:{self.ntrip_config['port']}")
+                print(f"   Mountpoint: {self.ntrip_config['mountpoint']}")
+
+            # RTK-Thread starten
+            self.rtk_thread = threading.Thread(target=self._rtk_worker, daemon=True)
+            self.rtk_thread.start()
+
+        except Exception as e:
+            print(f"❌ RTK-Initialisierung Fehler: {e}")
+            self.enable_rtk = False
 
     def _setup_web_routes(self):
         """Definiert Web-Routen für das Interface"""
@@ -1282,6 +1325,344 @@ class CalibratedESCController:
                 print(f"    ⚡ GPIO: Links=GPIO{self.pwm_pins['left']} | Rechts=GPIO{self.pwm_pins['right']}")
             print("-" * 70)
 
+    def _gps_fix_handler(self, event):
+        """Handler für GPS Fix-Nachrichten (für RTK-Position)"""
+        try:
+            lat = event.message.latitude_deg_1e7 / 1e7
+            lon = event.message.longitude_deg_1e7 / 1e7
+            self.gps_position = (lat, lon)
+
+            if not self.quiet:
+                print(f"📍 GPS Position: {lat:.6f}, {lon:.6f}")
+
+        except Exception as e:
+            if not self.quiet:
+                print(f"⚠️ GPS-Handler Fehler: {e}")
+
+    def _rtk_worker(self):
+        """RTK-NTRIP Worker Thread"""
+        reconnect_delay = 5
+
+        while True:
+            try:
+                if not self.quiet:
+                    print(f"🌐 Verbinde zu NTRIP: {self.ntrip_config['host']}:{self.ntrip_config['port']}")
+
+                # NTRIP-Verbindung herstellen
+                if self._connect_ntrip():
+                    if not self.quiet:
+                        print("✅ NTRIP-Verbindung erfolgreich")
+
+                    # RTCM-Daten empfangen und weiterleiten
+                    self._rtk_data_loop()
+                else:
+                    if not self.quiet:
+                        print(f"❌ NTRIP-Verbindung fehlgeschlagen")
+
+            except Exception as e:
+                if not self.quiet:
+                    print(f"❌ RTK-Worker Fehler: {e}")
+
+            # Warten vor erneutem Verbindungsversuch
+            if not self.quiet:
+                print(f"⏳ Warte {reconnect_delay}s vor erneutem NTRIP-Versuch...")
+            time.sleep(reconnect_delay)
+
+    def _connect_ntrip(self):
+        """Verbindung zum NTRIP-Server herstellen"""
+        # Socket-Methode für ICY-Streams (funktioniert besser)
+        return self._connect_ntrip_socket()
+
+    def _connect_ntrip_curl(self):
+        """Verbindung über curl (funktioniert nachweislich)"""
+        try:
+            url = f"http://{self.ntrip_config['user']}:{self.ntrip_config['pass']}@{self.ntrip_config['host']}:{self.ntrip_config['port']}/{self.ntrip_config['mountpoint']}"
+
+            # curl-Prozess starten mit kontinuierlichem Stream
+            self.curl_process = subprocess.Popen([
+                'curl',
+                '-s',           # Silent
+                '--no-buffer',  # Kein Buffering für kontinuierlichen Stream
+                '-N',           # Disable buffering of the output stream
+                url
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+
+            # Kurz warten und prüfen ob Prozess läuft
+            time.sleep(0.5)
+            if self.curl_process.poll() is not None:
+                # Prozess ist bereits beendet - Fehler
+                stderr = self.curl_process.stderr.read().decode()
+                if not self.quiet:
+                    print(f"❌ Curl-Prozess beendet: {stderr}")
+                return False
+
+            if not self.quiet:
+                print("✅ NTRIP-Verbindung über curl erfolgreich")
+            return True
+
+        except Exception as e:
+            if not self.quiet:
+                print(f"❌ Curl-NTRIP Fehler: {e}")
+            return False
+
+    def _connect_ntrip_socket(self):
+        """Verbindung zum NTRIP-Server herstellen (Socket-Methode)"""
+        try:
+            # Socket erstellen (exakt wie test_socket.py)
+            self.ntrip_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.ntrip_socket.settimeout(5)
+
+            # Verbinden (exakt wie test_socket.py)
+            if not self.quiet:
+                print(f"🔌 Verbinde zu {self.ntrip_config['host']}:{self.ntrip_config['port']}...")
+                print(f"🔍 Debug: host='{self.ntrip_config['host']}' port={self.ntrip_config['port']} type={type(self.ntrip_config['port'])}")
+            self.ntrip_socket.connect((self.ntrip_config['host'], self.ntrip_config['port']))
+            if not self.quiet:
+                print(f"✅ Socket-Verbindung erfolgreich")
+
+            # NTRIP-Request erstellen (HTTP/1.1 wie curl wirklich sendet)
+            request = f"GET /{self.ntrip_config['mountpoint']} HTTP/1.1\r\n"
+            request += f"Host: {self.ntrip_config['host']}:{self.ntrip_config['port']}\r\n"
+
+            # Basic Authentication
+            credentials = f"{self.ntrip_config['user']}:{self.ntrip_config['pass']}"
+            encoded_credentials = base64.b64encode(credentials.encode()).decode()
+            request += f"Authorization: Basic {encoded_credentials}\r\n"
+
+            request += "User-Agent: curl/7.88.1\r\n"
+            request += "Accept: */*\r\n"
+            request += "\r\n"
+
+            # Request senden
+            if not self.quiet:
+                print(f"🔍 Sende Request: {repr(request)}")
+            self.ntrip_socket.send(request.encode())
+
+            # Response prüfen
+            if not self.quiet:
+                print(f"🔍 Warte auf Response...")
+            self.ntrip_socket.settimeout(10)  # Längerer Timeout für Response
+            response = self.ntrip_socket.recv(1024).decode()
+
+            # Debug: Request und Response ausgeben
+            if not self.quiet:
+                print(f"🔍 NTRIP Request:")
+                print(request.encode())
+                print(f"🔍 NTRIP Response:")
+                print(repr(response))
+
+            if "200 OK" in response or "ICY 200 OK" in response or len(response) < 50:
+                # HTTP/0.9 hat oft keine explizite "200 OK" Response
+                # Wenn Response sehr kurz ist, könnte es direkt RTCM-Daten sein
+                return True
+            else:
+                if not self.quiet:
+                    print(f"❌ NTRIP-Fehler: {response}")
+                return False
+
+        except Exception as e:
+            if not self.quiet:
+                print(f"❌ NTRIP-Verbindung Fehler: {e}")
+            if self.ntrip_socket:
+                self.ntrip_socket.close()
+                self.ntrip_socket = None
+            return False
+
+    def _rtk_data_loop(self):
+        """Hauptschleife für RTCM-Datenempfang"""
+        while True:
+            try:
+                # GGA-Nachricht senden (für VRS) - nur bei Socket-Methode
+                # Curl kann keine bidirektionale Kommunikation - VRS funktioniert trotzdem oft
+                if hasattr(self, 'ntrip_socket') and self.ntrip_socket:
+                    current_time = time.time()
+                    if current_time - self.last_gga_time > self.gga_interval:
+                        self._send_gga_message()
+                        self.last_gga_time = current_time
+
+                # RTCM-Daten empfangen
+                if hasattr(self, 'curl_process') and self.curl_process:
+                    # Curl-Methode - non-blocking read
+                    import select
+                    if select.select([self.curl_process.stdout], [], [], 1):
+                        rtcm_data = self.curl_process.stdout.read(1024)
+                        if not rtcm_data:
+                            if not self.quiet:
+                                print("⚠️ Curl-Prozess beendet")
+                            break
+                    else:
+                        # Kein Data verfügbar - weiter
+                        continue
+                elif hasattr(self, 'ntrip_socket') and self.ntrip_socket:
+                    # Socket-Methode
+                    self.ntrip_socket.settimeout(1)
+                    rtcm_data = self.ntrip_socket.recv(1024)
+                    if not rtcm_data:
+                        if not self.quiet:
+                            print("⚠️ NTRIP-Verbindung unterbrochen")
+                        break
+                else:
+                    break
+
+                if rtcm_data:
+                    # An Orange Cube über DroneCAN weiterleiten
+                    self._send_rtcm_via_dronecan(rtcm_data)
+
+            except socket.timeout:
+                # Timeout ist normal - weiter
+                continue
+            except Exception as e:
+                if not self.quiet:
+                    print(f"❌ RTCM-Empfang Fehler: {e}")
+                break
+
+        # Verbindungen schließen
+        if hasattr(self, 'curl_process') and self.curl_process:
+            self.curl_process.terminate()
+            self.curl_process = None
+        if hasattr(self, 'ntrip_socket') and self.ntrip_socket:
+            self.ntrip_socket.close()
+            self.ntrip_socket = None
+
+    def _send_gga_message(self):
+        """Sendet GGA-Nachricht für VRS"""
+        if not self.gps_position:
+            # Fallback-Position (Schwerin, M-V)
+            lat, lon = 53.5, 12.3
+        else:
+            lat, lon = self.gps_position
+
+        # NMEA GGA-Nachricht erstellen
+        lat_deg = int(abs(lat))
+        lat_min = (abs(lat) - lat_deg) * 60
+        lat_dir = 'N' if lat >= 0 else 'S'
+
+        lon_deg = int(abs(lon))
+        lon_min = (abs(lon) - lon_deg) * 60
+        lon_dir = 'E' if lon >= 0 else 'W'
+
+        gga = f"$GPGGA,{time.strftime('%H%M%S')}.00,"
+        gga += f"{lat_deg:02d}{lat_min:07.4f},{lat_dir},"
+        gga += f"{lon_deg:03d}{lon_min:07.4f},{lon_dir},"
+        gga += "1,08,1.0,50.0,M,0.0,M,,"
+
+        # Checksum
+        checksum = 0
+        for char in gga[1:]:
+            checksum ^= ord(char)
+        gga += f"*{checksum:02X}\r\n"
+
+        try:
+            self.ntrip_socket.send(gga.encode())
+            if not self.quiet:
+                print(f"📍 GGA gesendet: {lat:.6f}, {lon:.6f}")
+        except Exception as e:
+            if not self.quiet:
+                print(f"❌ GGA-Fehler: {e}")
+
+    def _send_rtcm_via_dronecan(self, rtcm_data):
+        """Sendet RTCM-Daten über DroneCAN an Orange Cube mit Rate Limiting"""
+        if not hasattr(self, 'dronecan_node') or not self.dronecan_node:
+            return
+
+        # Debug: Zeige Rohdaten
+        if not self.quiet and len(rtcm_data) > 0:
+            print(f"🔍 Rohdaten ({len(rtcm_data)} bytes): {rtcm_data[:32].hex()}")
+            # Suche nach D3-Bytes in den Rohdaten
+            d3_positions = [i for i, b in enumerate(rtcm_data) if b == 0xD3]
+            if d3_positions:
+                print(f"🎯 D3-Bytes gefunden an Positionen: {d3_positions[:5]}")
+            else:
+                print(f"❌ Keine D3-Bytes in Rohdaten gefunden")
+
+        # Alle Daten ungefiltert weiterleiten (auch ICY-Metadaten)
+        # Orange Cube soll selbst filtern
+        self.rtcm_buffer += rtcm_data
+
+        # # RTCM-Daten filtern und zum Buffer hinzufügen
+        # filtered_rtcm = self._filter_rtcm_data(rtcm_data)
+        # if filtered_rtcm:
+        #     self.rtcm_buffer += filtered_rtcm
+        #     if not self.quiet:
+        #         print(f"✅ RTCM gefiltert: {len(filtered_rtcm)} bytes von {len(rtcm_data)}")
+        # else:
+        #     if not self.quiet:
+        #         print(f"❌ Keine gültigen RTCM-Daten in {len(rtcm_data)} bytes gefunden")
+
+        # Buffer-Limit: Max 10KB, sonst alte Daten verwerfen
+        if len(self.rtcm_buffer) > 10240:
+            self.rtcm_buffer = self.rtcm_buffer[-5120:]  # Nur neueste 5KB behalten
+            if not self.quiet:
+                print("⚠️ RTCM-Buffer überlauf - alte Daten verworfen")
+
+        # Rate Limiting: Nur alle 100ms senden (10 Hz)
+        current_time = time.time()
+        if current_time - self.last_rtcm_time < self.rtcm_interval:
+            return
+
+        # Wenn Buffer leer, nichts zu senden
+        if not self.rtcm_buffer:
+            return
+
+        try:
+            # RTCM-Daten über DroneCAN RTCMStream-Nachricht senden
+            rtcm_msg = dronecan.uavcan.equipment.gnss.RTCMStream()
+
+            # Kleine, sichere Chunks (max 32 bytes pro Nachricht)
+            chunk_size = 32
+            data_to_send = self.rtcm_buffer[:chunk_size]  # Nur ersten Chunk senden
+            self.rtcm_buffer = self.rtcm_buffer[chunk_size:]  # Rest im Buffer lassen
+
+            # RTCMStream-Nachricht füllen
+            rtcm_msg.data = list(data_to_send)  # Bytes zu Liste konvertieren
+
+            # Nachricht senden
+            self.dronecan_node.broadcast(rtcm_msg)
+
+            # Timestamp aktualisieren
+            self.last_rtcm_time = current_time
+
+            if not self.quiet:
+                buffer_size = len(self.rtcm_buffer)
+                print(f"📡 RTCM gesendet: {len(data_to_send)} bytes, Buffer: {buffer_size} bytes")
+                # Debug: Zeige RTCM-Daten-Header
+                if len(data_to_send) > 0:
+                    print(f"🔍 RTCM-Header: {data_to_send[:8].hex()}")
+
+        except Exception as e:
+            if not self.quiet:
+                print(f"❌ RTCM-DroneCAN Fehler: {e}")
+                # Buffer leeren bei Fehlern um Stau zu vermeiden
+                self.rtcm_buffer = b''
+
+    def _filter_rtcm_data(self, data):
+        """Filtert gültige RTCM3-Nachrichten aus ICY-Stream"""
+        rtcm_data = b''
+        i = 0
+
+        while i < len(data):
+            # Suche nach RTCM3-Präambel (0xD3)
+            if data[i] == 0xD3 and i + 2 < len(data):
+                # RTCM3-Header: D3 + 2 bytes Länge
+                length_bytes = data[i+1:i+3]
+                if len(length_bytes) == 2:
+                    # Länge aus Header extrahieren (10 bits)
+                    length = ((length_bytes[0] & 0x03) << 8) | length_bytes[1]
+
+                    # Komplette RTCM-Nachricht extrahieren
+                    if i + 3 + length + 3 <= len(data):  # +3 für CRC
+                        rtcm_msg = data[i:i + 3 + length + 3]
+                        rtcm_data += rtcm_msg
+                        i += 3 + length + 3
+                    else:
+                        break
+                else:
+                    i += 1
+            else:
+                i += 1
+
+        return rtcm_data
+
 def load_calibration_from_file(filename='guided_esc_calibration.json'):
     """Lädt Kalibrierungsdaten aus JSON-Datei (optional)"""
     try:
@@ -1386,6 +1767,20 @@ Beispiele:
     parser.add_argument('--no-mower', action='store_true',
                        help='Mäher-Steuerung deaktivieren')
 
+    # RTK-NTRIP Argumente
+    parser.add_argument('--rtk', action='store_true',
+                       help='RTK-NTRIP-Client aktivieren')
+    parser.add_argument('--ntrip-host', type=str, default='openrtk-mv.de',
+                       help='NTRIP-Server Host (default: openrtk-mv.de)')
+    parser.add_argument('--ntrip-port', type=int, default=2101,
+                       help='NTRIP-Server Port (default: 2101)')
+    parser.add_argument('--ntrip-user', type=str, required=False,
+                       help='NTRIP-Benutzername (erforderlich für --rtk)')
+    parser.add_argument('--ntrip-pass', type=str, required=False,
+                       help='NTRIP-Passwort (erforderlich für --rtk)')
+    parser.add_argument('--ntrip-mountpoint', type=str, default='openrtk_mv',
+                       help='NTRIP-Mountpoint (default: openrtk_mv)')
+
     args = parser.parse_args()
 
     # GPIO-Pins parsen
@@ -1397,6 +1792,12 @@ Beispiele:
     except ValueError as e:
         print(f"❌ Ungültige Pin-Konfiguration: {e}")
         sys.exit(1)
+
+    # RTK-Validierung
+    if args.rtk:
+        if not args.ntrip_user or not args.ntrip_pass:
+            print("❌ Fehler: --rtk benötigt --ntrip-user und --ntrip-pass")
+            sys.exit(1)
 
     # Konfiguration
     enable_monitor = not args.no_monitor
@@ -1435,6 +1836,9 @@ Beispiele:
             print(f"   PWM-Bereich: 16%-84% (0.8V-4.2V), Frequenz: 1000Hz")
         else:
             print("⚠️ Mäher-Steuerung: DEAKTIVIERT")
+        if args.rtk:
+            print(f"🛰️ RTK-NTRIP: {args.ntrip_host}:{args.ntrip_port}/{args.ntrip_mountpoint}")
+            print(f"   Benutzer: {args.ntrip_user}")
         print("="*70)
 
     # Controller erstellen
@@ -1454,7 +1858,13 @@ Beispiele:
         light_pin=args.light_pin,
         mower_enabled=not args.no_mower,
         mower_relay_pin=args.mower_relay_pin,
-        mower_pwm_pin=args.mower_pwm_pin
+        mower_pwm_pin=args.mower_pwm_pin,
+        enable_rtk=args.rtk,
+        ntrip_host=args.ntrip_host,
+        ntrip_port=args.ntrip_port,
+        ntrip_user=args.ntrip_user or "",
+        ntrip_pass=args.ntrip_pass or "",
+        ntrip_mountpoint=args.ntrip_mountpoint
     )
 
     # Sicherheitsschaltleiste deaktivieren falls gewünscht
@@ -1482,6 +1892,11 @@ Beispiele:
 
         # Handler registrieren
         node.add_handler(dronecan.uavcan.equipment.esc.RawCommand, controller.esc_rawcommand_handler)
+
+        # RTK-Support: GPS-Handler für Position registrieren
+        if controller.enable_rtk:
+            node.add_handler(dronecan.uavcan.equipment.gnss.Fix, controller._gps_fix_handler)
+            controller.dronecan_node = node  # Node-Referenz für RTK-Funktionen
 
         if not quiet:
             print(f"\n🤖 DroneCAN Node gestartet ({args.interface}, {args.bitrate//1000} kbps, Node-ID {args.node_id})")
