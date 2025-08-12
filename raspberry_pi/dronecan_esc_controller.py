@@ -697,7 +697,9 @@ class CalibratedESCController:
         print(f"\n🛑 Signal {signum} empfangen - Sicherheits-Shutdown...")
         self._emergency_stop()
         self._cleanup_web()
-        sys.exit(0)
+        # Forciertes Exit für Multi-Threading
+        import os
+        os._exit(0)
 
     def _emergency_stop(self):
         """Notfall-Stop: Alle Motoren auf Neutral + Mäher aus"""
@@ -1561,78 +1563,61 @@ class CalibratedESCController:
                 print(f"❌ GGA-Fehler: {e}")
 
     def _send_rtcm_via_dronecan(self, rtcm_data):
-        """Sendet RTCM-Daten über DroneCAN an Orange Cube mit Rate Limiting"""
+        """
+        Sendet RTCM-Daten über DroneCAN an Orange Cube.
+        FINALE VERSION 3.0: Verwendet node.spin() für intelligentes Throttling,
+        um den CAN-Bus-TX-Buffer (ENOBUFS-Fehler) nicht zu überfluten.
+        """
         if not hasattr(self, 'dronecan_node') or not self.dronecan_node:
             return
 
-        # Debug: Zeige Rohdaten
-        if not self.quiet and len(rtcm_data) > 0:
-            print(f"🔍 Rohdaten ({len(rtcm_data)} bytes): {rtcm_data[:32].hex()}")
-            # Suche nach D3-Bytes in den Rohdaten
-            d3_positions = [i for i, b in enumerate(rtcm_data) if b == 0xD3]
-            if d3_positions:
-                print(f"🎯 D3-Bytes gefunden an Positionen: {d3_positions[:5]}")
-            else:
-                print(f"❌ Keine D3-Bytes in Rohdaten gefunden")
-
-        # Alle Daten ungefiltert weiterleiten (auch ICY-Metadaten)
-        # Orange Cube soll selbst filtern
         self.rtcm_buffer += rtcm_data
 
-        # # RTCM-Daten filtern und zum Buffer hinzufügen
-        # filtered_rtcm = self._filter_rtcm_data(rtcm_data)
-        # if filtered_rtcm:
-        #     self.rtcm_buffer += filtered_rtcm
-        #     if not self.quiet:
-        #         print(f"✅ RTCM gefiltert: {len(filtered_rtcm)} bytes von {len(rtcm_data)}")
-        # else:
-        #     if not self.quiet:
-        #         print(f"❌ Keine gültigen RTCM-Daten in {len(rtcm_data)} bytes gefunden")
-
-        # Buffer-Limit: Max 10KB, sonst alte Daten verwerfen
         if len(self.rtcm_buffer) > 10240:
-            self.rtcm_buffer = self.rtcm_buffer[-5120:]  # Nur neueste 5KB behalten
+            self.rtcm_buffer = self.rtcm_buffer[-5120:]
             if not self.quiet:
                 print("⚠️ RTCM-Buffer überlauf - alte Daten verworfen")
 
-        # Rate Limiting: Nur alle 100ms senden (10 Hz)
         current_time = time.time()
-        if current_time - self.last_rtcm_time < self.rtcm_interval:
+        if current_time - self.last_rtcm_time < 0.2: # 5 Hz Rate
             return
 
-        # Wenn Buffer leer, nichts zu senden
         if not self.rtcm_buffer:
             return
 
         try:
-            # RTCM-Daten über DroneCAN RTCMStream-Nachricht senden
-            rtcm_msg = dronecan.uavcan.equipment.gnss.RTCMStream()
+            data_to_send = self.rtcm_buffer
+            self.rtcm_buffer = b''
+            max_payload = 128
 
-            # Kleine, sichere Chunks (max 32 bytes pro Nachricht)
-            chunk_size = 32
-            data_to_send = self.rtcm_buffer[:chunk_size]  # Nur ersten Chunk senden
-            self.rtcm_buffer = self.rtcm_buffer[chunk_size:]  # Rest im Buffer lassen
+            if not self.quiet:
+                print(f"✅ Beginne RTCM-Übertragung: {len(data_to_send)} bytes in {max_payload}-byte Chunks.")
 
-            # RTCMStream-Nachricht füllen
-            rtcm_msg.data = list(data_to_send)  # Bytes zu Liste konvertieren
+            while len(data_to_send) > 0:
+                chunk = data_to_send[:max_payload]
+                data_to_send = data_to_send[max_payload:]
 
-            # Nachricht senden
-            self.dronecan_node.broadcast(rtcm_msg)
+                rtcm_msg = dronecan.uavcan.equipment.gnss.RTCMStream(data=list(chunk))
+                self.dronecan_node.broadcast(rtcm_msg)
 
-            # Timestamp aktualisieren
+                # --- DIE FINALE ÄNDERUNG ---
+                # Rufe node.spin() auf. Das macht eine kurze Pause UND lässt
+                # die DroneCAN-Bibliothek ihre Sende-Queue verarbeiten.
+                self.dronecan_node.spin(0.01) # 10ms Pause mit Verarbeitung
+
             self.last_rtcm_time = current_time
 
             if not self.quiet:
-                buffer_size = len(self.rtcm_buffer)
-                print(f"📡 RTCM gesendet: {len(data_to_send)} bytes, Buffer: {buffer_size} bytes")
-                # Debug: Zeige RTCM-Daten-Header
-                if len(data_to_send) > 0:
-                    print(f"🔍 RTCM-Header: {data_to_send[:8].hex()}")
+                print(f"📡 RTCM-Übertragung erfolgreich abgeschlossen. Puffer ist leer.")
 
         except Exception as e:
-            if not self.quiet:
-                print(f"❌ RTCM-DroneCAN Fehler: {e}")
-                # Buffer leeren bei Fehlern um Stau zu vermeiden
+            if "TxQueueFull" in str(e.__class__.__name__):
+                if not self.quiet:
+                    print("⚠️ CAN TX Queue war voll, versuche es im nächsten Zyklus erneut.")
+                self.rtcm_buffer = data_to_send + self.rtcm_buffer # Wichtig: Daten nicht verlieren
+            else:
+                if not self.quiet:
+                    print(f"❌ RTCM-DroneCAN Fehler: {e}")
                 self.rtcm_buffer = b''
 
     def _filter_rtcm_data(self, data):
