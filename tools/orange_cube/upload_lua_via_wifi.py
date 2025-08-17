@@ -128,25 +128,33 @@ def upload_script_via_ftp(ftp_client, local_path, remote_path):
 # MAIN UPLOAD FUNCTION
 # ============================================================================
 
-def upload_lua_script(script_name="hello_world.lua", reboot=False):
+def upload_lua_script(script_name="hello_world.lua", reboot=False, wifi_ip=None, wifi_port=None):
     """Hauptfunktion für Lua Script Upload"""
     print_system_diagnostics()
-    
+
     print("=" * 70)
     print("📤 LUA SCRIPT UPLOAD via WiFi Bridge")
     print("=" * 70)
-    
+
     # 1. Skript finden
     local_script_path = find_lua_script(script_name)
     if not local_script_path:
         print(f"❌ Skript nicht gefunden: {script_name}")
         print("💡 Erstellen Sie das Skript zuerst!")
         return False
-    
+
     # 2. WiFi-Verbindung herstellen
     print("\n🔌 Stelle WiFi-Verbindung her...")
     set_connection_type('wifi')
-    set_wifi_config('192.168.178.134', 14550)
+
+    # Verwende übergebene Parameter oder Standardwerte
+    if wifi_ip is None:
+        wifi_ip = os.getenv('ORANGE_CUBE_IP', '192.168.178.20')
+    if wifi_port is None:
+        wifi_port = int(os.getenv('ORANGE_CUBE_PORT', '14550'))
+
+    print(f"   📡 WiFi-Ziel: {wifi_ip}:{wifi_port}")
+    set_wifi_config(wifi_ip, wifi_port)
     
     try:
         connection = get_connection()
@@ -204,14 +212,60 @@ if __name__ == "__main__":
     # Parse command line arguments
     script_name = "hello_world.lua"
     reboot = False
+    wifi_ip = None
+    wifi_port = None
 
-    for arg in sys.argv[1:]:
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i]
         if arg == "--reboot":
             reboot = True
+        elif arg == "--ip":
+            if i + 1 < len(sys.argv):
+                wifi_ip = sys.argv[i + 1]
+                i += 1
+            else:
+                print("❌ --ip benötigt eine IP-Adresse")
+                sys.exit(1)
+        elif arg == "--port":
+            if i + 1 < len(sys.argv):
+                try:
+                    wifi_port = int(sys.argv[i + 1])
+                    i += 1
+                except ValueError:
+                    print("❌ --port benötigt eine gültige Portnummer")
+                    sys.exit(1)
+            else:
+                print("❌ --port benötigt eine Portnummer")
+                sys.exit(1)
+        elif arg == "--help" or arg == "-h":
+            print("Usage: python upload_lua_via_wifi.py [script_name.lua] [options]")
+            print("")
+            print("Options:")
+            print("  --reboot          Orange Cube nach Upload neustarten")
+            print("  --ip IP           WiFi Bridge IP-Adresse (Standard: 192.168.178.20)")
+            print("  --port PORT       WiFi Bridge Port (Standard: 14550)")
+            print("  --help, -h        Diese Hilfe anzeigen")
+            print("")
+            print("Umgebungsvariablen:")
+            print("  ORANGE_CUBE_IP    WiFi Bridge IP-Adresse")
+            print("  ORANGE_CUBE_PORT  WiFi Bridge Port")
+            print("")
+            print("Beispiele:")
+            print("  python upload_lua_via_wifi.py hello_world.lua")
+            print("  python upload_lua_via_wifi.py hello_world.lua --reboot")
+            print("  python upload_lua_via_wifi.py hello_world.lua --ip 192.168.1.100 --port 14550")
+            print("  ORANGE_CUBE_IP=192.168.1.100 python upload_lua_via_wifi.py hello_world.lua")
+            sys.exit(0)
         elif not arg.startswith("--"):
             script_name = arg
+        else:
+            print(f"❌ Unbekannte Option: {arg}")
+            print("Verwende --help für Hilfe")
+            sys.exit(1)
+        i += 1
 
-    success = upload_lua_script(script_name, reboot=reboot)
+    success = upload_lua_script(script_name, reboot=reboot, wifi_ip=wifi_ip, wifi_port=wifi_port)
     
     if success:
         print("\n🚀 Nächste Schritte:")
