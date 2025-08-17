@@ -182,6 +182,7 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
 - **Termination**: 120Ω resistor built into Orange Cube carrier board
 - **Ground**: Common ground connection required
 - **Interface**: can0 on Raspberry Pi (configured via dtoverlay=mcp2515-can1)
+- **TX Queue**: Automatically configured with txqueuelen=1000 for improved buffer performance
 
 ## 🔧 Key Features
 
@@ -371,6 +372,16 @@ Restart=always
 RestartSec=5
 ```
 
+### CAN Interface Configuration (`can-interface.service`)
+The CAN interface is automatically configured at boot with optimized settings:
+```ini
+[Service]
+ExecStart=/bin/bash -c 'ip link set can0 down; ip link set can0 type can bitrate 1000000; ip link set can0 txqueuelen 1000; ip link set can0 up'
+```
+- **Bitrate**: 1 Mbps for DroneCAN communication
+- **TX Queue Length**: 1000 packets for improved buffer performance
+- **Auto-start**: Enabled via systemd for reliable boot configuration
+
 ## 🐛 Troubleshooting
 
 ### Common Issues
@@ -382,6 +393,13 @@ RestartSec=5
 2. Verify dronecan library: `python3 -c "import dronecan"`
 3. Check service logs: `esc-logs-tail`
 4. Restart service: `esc-restart`
+
+#### ❌ "CAN buffer overruns or message loss"
+**Cause**: Default CAN TX queue too small for high-frequency DroneCAN traffic
+**Solution**: The system automatically configures `txqueuelen=1000` via `can-interface.service`
+1. Check current queue length: `ip link show can0` (should show `qlen 1000`)
+2. Verify service status: `sudo systemctl status can-interface.service`
+3. Manual configuration: `sudo ip link set can0 txqueuelen 1000`
 
 #### ❌ "No DroneCAN messages received"
 **Cause**: CAN communication failure
