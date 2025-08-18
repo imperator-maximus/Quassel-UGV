@@ -27,8 +27,7 @@ import queue
 import socket
 import base64
 
-from flask import Flask, render_template, jsonify, request
-from flask_socketio import SocketIO, emit
+# Flask/SocketIO imports werden nur bei Bedarf geladen (siehe _init_web_interface)
 
 class CalibratedESCController:
     def __init__(self, enable_pwm=False, pwm_pins=[18, 19], enable_monitor=True, quiet=False,
@@ -37,6 +36,8 @@ class CalibratedESCController:
                  mower_enabled=True, mower_relay_pin=23, mower_pwm_pin=12, enable_rtk=False,
                  ntrip_host="openrtk-mv.de", ntrip_port=2101, ntrip_user="", ntrip_pass="",
                  ntrip_mountpoint="VRS_3_4G_MV"):
+        # Druck-Entprellung für Not-Aus-Ausgaben
+        self._last_emergency_print = 0.0
         # Kalibrierungswerte AKTUALISIERT mit neuen Orange Cube Parametern
         # Motor 0 = Rechts, Motor 1 = Links
         # Neue Werte: Rückwärts ~-8000, Neutral ~0, Vorwärts ~+8000
@@ -416,18 +417,61 @@ class CalibratedESCController:
     def _init_web_interface(self):
         """Initialisiert Web-Interface für Remote-Steuerung"""
         try:
+            if not self.quiet:
+                print("🔧 Initialisiere Web-Interface...")
+
+            # Flask/SocketIO imports nur bei Bedarf laden mit besserer Fehlerbehandlung
+            if not self.quiet:
+                print("   Teste Flask Import...")
+
+            # Schritt 1: Flask importieren
+            try:
+                from flask import Flask, render_template, jsonify, request
+                if not self.quiet:
+                    print("   ✅ Flask Import erfolgreich")
+            except ImportError as e:
+                raise ImportError(f"Flask nicht verfügbar: {e}")
+            except Exception as e:
+                raise Exception(f"Flask Import Segfault: {e}")
+
+            # Schritt 2: SocketIO ÜBERSPRUNGEN (bekanntes Segfault-Problem)
+            if not self.quiet:
+                print("   ⚠️ SocketIO übersprungen (Segfault-Vermeidung)")
+                print("   → Verwende Flask-only Modus (ohne WebSocket)")
+
+            # Dummy-Funktionen für SocketIO-Kompatibilität
+            def dummy_emit(*args, **kwargs):
+                pass
+
+            self.emit = dummy_emit
+            self.socketio = None
+
+            # Flask-Module als Klassenattribute speichern für andere Methoden
+            self.render_template = render_template
+            self.jsonify = jsonify
+            self.request = request
+            # self.emit bereits oben als dummy_emit gesetzt
+
+            if not self.quiet:
+                print("   Erstelle Flask App...")
             # Flask App erstellen
             self.flask_app = Flask(__name__, template_folder='templates', static_folder='static')
             self.flask_app.config['SECRET_KEY'] = 'ugv_dronecan_secret_2024'
 
-            # SocketIO für Echtzeit-Kommunikation
-            self.socketio = SocketIO(self.flask_app, cors_allowed_origins="*")
+            if not self.quiet:
+                print("   SocketIO übersprungen (Flask-only Modus)")
+            # SocketIO deaktiviert wegen Segfault-Problem
+            # self.socketio bereits oben auf None gesetzt
 
+            if not self.quiet:
+                print("   Definiere Web-Routen...")
             # Web-Routen definieren
             self._setup_web_routes()
 
-            # Web-Server in separatem Thread starten
-            self.web_thread = threading.Thread(target=self._run_web_server, daemon=True)
+            if not self.quiet:
+                print("   Starte Web-Server Thread...")
+            # Web-Server in separatem Thread starten (mit Verzögerung für Stabilität)
+            self.web_thread = threading.Thread(target=self._run_web_server_delayed, daemon=True)
             self.web_thread.start()
 
             if not self.quiet:
@@ -435,13 +479,27 @@ class CalibratedESCController:
                 print(f"   URL: http://raspberrycan:{self.web_port}")
                 print(f"   👑 Quassel UGV Controller bereit!")
 
-        except ImportError:
-            print("❌ FEHLER: Flask/SocketIO nicht installiert!")
-            print("   Installieren mit: pip install flask flask-socketio")
-            sys.exit(1)
+        except ImportError as e:
+            print(f"❌ FEHLER: Flask/SocketIO Installation Problem!")
+            print(f"   Details: {e}")
+            print("   Lösungen:")
+            print("   1. sudo pip3 install flask flask-socketio")
+            print("   2. sudo apt install python3-flask python3-flask-socketio")
+            print("   3. Ohne Web-Interface starten (--web Flag entfernen)")
+            print("\n⚠️  WARNUNG: Fahre ohne Web-Interface fort...")
+            self.enable_web = False
+            return  # Nicht beenden, sondern ohne Web-Interface weitermachen
         except Exception as e:
             print(f"❌ Web-Interface-Initialisierung fehlgeschlagen: {e}")
-            sys.exit(1)
+            print("   Mögliche Ursachen:")
+            print("   - Flask/SocketIO Dependency-Konflikte")
+            print("   - Port 80 bereits belegt")
+            print("   - Template/Static Ordner fehlen")
+            import traceback
+            traceback.print_exc()
+            print("\n⚠️  WARNUNG: Fahre ohne Web-Interface fort...")
+            self.enable_web = False
+            return  # Nicht beenden, sondern ohne Web-Interface weitermachen
 
     def _init_rtk(self):
         """Initialisiert RTK-NTRIP-Client"""
@@ -464,11 +522,11 @@ class CalibratedESCController:
 
         @self.flask_app.route('/')
         def index():
-            return render_template('index.html')
+            return self.render_template('index.html')
 
         @self.flask_app.route('/api/status')
         def api_status():
-            return jsonify({
+            return self.jsonify({
                 'can_enabled': self.can_enabled,
                 'pwm_enabled': self.enable_pwm,
                 'monitor_enabled': self.enable_monitor,
@@ -496,7 +554,7 @@ class CalibratedESCController:
             if not self.can_enabled:
                 # Bei CAN-Deaktivierung sofort auf Neutral setzen
                 self._emergency_stop()
-            return jsonify({'can_enabled': self.can_enabled})
+            return self.jsonify({'can_enabled': self.can_enabled})
 
         @self.flask_app.route('/api/light/toggle', methods=['POST'])
         def api_light_toggle():
@@ -506,7 +564,7 @@ class CalibratedESCController:
             if not self.light_enabled:
                 if not self.quiet:
                     print("⚠️ API: Licht-Steuerung ist deaktiviert")
-                return jsonify({
+                return self.jsonify({
                     'success': False,
                     'error': 'Light control disabled',
                     'light_enabled': False,
@@ -523,7 +581,7 @@ class CalibratedESCController:
             if not self.quiet:
                 print(f"🌐 API: Licht-Toggle Ergebnis: {result}")
 
-            return jsonify(result)
+            return self.jsonify(result)
 
         @self.flask_app.route('/api/mower/toggle', methods=['POST'])
         def api_mower_toggle():
@@ -533,7 +591,7 @@ class CalibratedESCController:
             if not self.mower_enabled:
                 if not self.quiet:
                     print("⚠️ API: Mäher-Steuerung ist deaktiviert")
-                return jsonify({
+                return self.jsonify({
                     'success': False,
                     'error': 'Mower control disabled',
                     'mower_enabled': False,
@@ -552,26 +610,26 @@ class CalibratedESCController:
             if not self.quiet:
                 print(f"🌐 API: Mäher-Toggle Ergebnis: {result}")
 
-            return jsonify(result)
+            return self.jsonify(result)
 
         @self.flask_app.route('/api/mower/speed', methods=['POST'])
         def api_mower_speed():
             try:
-                data = request.get_json()
+                data = self.request.get_json()
                 speed = data.get('speed', 0)
 
                 if not self.quiet:
                     print(f"🌐 API: Mäher-Geschwindigkeit angefordert: {speed}%")
 
                 if not self.mower_enabled:
-                    return jsonify({
+                    return self.jsonify({
                         'success': False,
                         'error': 'Mower control disabled',
                         'mower_speed': 0
                     })
 
                 if not self.mower_state:
-                    return jsonify({
+                    return self.jsonify({
                         'success': False,
                         'error': 'Mower is off',
                         'mower_speed': 0
@@ -587,34 +645,34 @@ class CalibratedESCController:
                 if not self.quiet:
                     print(f"🌐 API: Mäher-Geschwindigkeit Ergebnis: {result}")
 
-                return jsonify(result)
+                return self.jsonify(result)
 
             except Exception as e:
                 print(f"❌ API: Mäher-Geschwindigkeit Fehler: {e}")
-                return jsonify({
+                return self.jsonify({
                     'success': False,
                     'error': str(e),
                     'mower_speed': 0
                 })
 
-        # SocketIO Event-Handler
-        @self.socketio.on('connect')
-        def handle_connect():
-            if not self.quiet:
-                print("🌐 Web-Client verbunden")
-            emit('status_update', {
-                'can_enabled': self.can_enabled,
-                'connected': True,
-                'max_speed_percent': self.max_speed_percent
-            })
+        # SocketIO Event-Handler DEAKTIVIERT (Flask-only Modus)
+        # @self.socketio.on('connect')
+        # def handle_connect():
+        #     if not self.quiet:
+        #         print("🌐 Web-Client verbunden")
+        #     self.emit('status_update', {
+        #         'can_enabled': self.can_enabled,
+        #         'connected': True,
+        #         'max_speed_percent': self.max_speed_percent
+        #     })
 
-        @self.socketio.on('disconnect')
-        def handle_disconnect():
-            if not self.quiet:
-                print("🌐 Web-Client getrennt")
+        # @self.socketio.on('disconnect')
+        # def handle_disconnect():
+        #     if not self.quiet:
+        #         print("🌐 Web-Client getrennt")
 
-        # Joystick Event-Handler (Phase 2)
-        @self.socketio.on('joystick_update')
+        # Joystick Event-Handler DEAKTIVIERT (Flask-only Modus)
+        # @self.socketio.on('joystick_update')
         def handle_joystick_update(data):
             """Verarbeitet Joystick-Input vom Web-Interface"""
             if self.can_enabled:
@@ -650,7 +708,7 @@ class CalibratedESCController:
                     import traceback
                     traceback.print_exc()
 
-        @self.socketio.on('joystick_release')
+        # @self.socketio.on('joystick_release')
         def handle_joystick_release():
             """Behandelt Joystick-Release (zurück zu Neutral)"""
             self.joystick_x = 0.0
@@ -664,7 +722,7 @@ class CalibratedESCController:
                 if not self.quiet:
                     print("🕹️ Joystick-Release: Motoren auf Neutral (DIREKT)")
 
-        @self.socketio.on('max_speed_update')
+        # @self.socketio.on('max_speed_update')
         def handle_max_speed_update(data):
             """Max Speed Slider Update vom Web-Interface"""
             try:
@@ -679,8 +737,29 @@ class CalibratedESCController:
             except Exception as e:
                 print(f"❌ Max Speed Update Fehler: {e}")
 
+    def _run_web_server_delayed(self):
+        """Läuft Web-Server in separatem Thread mit Verzögerung für Stabilität"""
+        try:
+            # Kurze Verzögerung um Initialisierung abzuschließen
+            import time
+            time.sleep(2)
+
+            if not self.quiet:
+                print("🌐 Starte Web-Server...")
+
+            # Flask-only Modus (ohne SocketIO)
+            self.flask_app.run(host='0.0.0.0',
+                              port=self.web_port,
+                              debug=False,
+                              use_reloader=False)
+        except Exception as e:
+            if not self.quiet:
+                print(f"❌ Web-Server Fehler: {e}")
+                import traceback
+                traceback.print_exc()
+
     def _run_web_server(self):
-        """Läuft Web-Server in separatem Thread"""
+        """Läuft Web-Server in separatem Thread (Legacy-Methode)"""
         try:
             self.socketio.run(self.flask_app,
                             host='0.0.0.0',
@@ -703,10 +782,15 @@ class CalibratedESCController:
 
     def _emergency_stop(self):
         """Notfall-Stop: Alle Motoren auf Neutral + Mäher aus"""
+        # Ausgabe höchstens alle 0.5s, um doppelte Logs zu vermeiden
+        now = time.time()
+        should_print = (now - getattr(self, '_last_emergency_print', 0)) > 0.5
         if self.enable_pwm and hasattr(self, 'pi'):
             for side, pin in self.pwm_pins.items():
                 self.pi.hardware_PWM(pin, 50, 75000)  # 1500μs neutral
-            print("🚨 EMERGENCY STOP: Alle Motoren auf Neutral (1500μs)")
+            if should_print:
+                print("🚨 EMERGENCY STOP: Alle Motoren auf Neutral (1500μs)")
+                self._last_emergency_print = now
 
         # Mäher bei Not-Aus ebenfalls ausschalten
         self.emergency_stop_mower()
@@ -1529,8 +1613,8 @@ class CalibratedESCController:
     def _send_rtcm_via_dronecan(self, rtcm_data):
         """
         Sendet RTCM-Daten über DroneCAN an Orange Cube.
-        FINALE VERSION 3.0: Verwendet node.spin() für intelligentes Throttling,
-        um den CAN-Bus-TX-Buffer (ENOBUFS-Fehler) nicht zu überfluten.
+        Version 3.1: Sanftere Übertragung mit kleinerem Payload, Chunk-Limit pro Zyklus
+        und robusteren Exception-Guards gegen Toggle-Bit-Fehler.
         """
         if not hasattr(self, 'dronecan_node') or not self.dronecan_node:
             return
@@ -1552,7 +1636,7 @@ class CalibratedESCController:
                     print("⚠️ RTCM-Buffer komplett geleert - keine gültigen Nachrichten gefunden")
 
         current_time = time.time()
-        if current_time - self.last_rtcm_time < 0.2: # 5 Hz Rate
+        if current_time - self.last_rtcm_time < 0.2:  # 5 Hz Rate
             return
 
         if not self.rtcm_buffer:
@@ -1561,33 +1645,51 @@ class CalibratedESCController:
         try:
             data_to_send = self.rtcm_buffer
             self.rtcm_buffer = b''
-            max_payload = 90  # KRITISCH: UAVCAN-Spezifikation max 90 bytes für RTCMStream
+            max_payload = 60  # Weniger Fragmentierung pro UAVCAN-Transfer
+            max_chunks_per_cycle = 6  # Vermeide lange Bursts
 
             if not self.quiet:
                 print(f"✅ Beginne RTCM-Übertragung: {len(data_to_send)} bytes in {max_payload}-byte Chunks.")
 
             chunk_count = 0
+            sent_this_cycle = 0
             while len(data_to_send) > 0:
+                if sent_this_cycle >= max_chunks_per_cycle:
+                    # Rest in den Buffer für den nächsten Zyklus zurücklegen
+                    self.rtcm_buffer = data_to_send + self.rtcm_buffer
+                    if not self.quiet:
+                        print(f"⏸️ Sende-Pause nach {sent_this_cycle} Chunks – {len(data_to_send)} bytes verbleiben")
+                    break
+
                 chunk = data_to_send[:max_payload]
                 data_to_send = data_to_send[max_payload:]
                 chunk_count += 1
+                sent_this_cycle += 1
 
-                # VERBESSERT: Verwende korrekte DroneCAN-Nachricht für ArduPilot
+                # Sende Chunk
                 try:
                     rtcm_msg = dronecan.uavcan.equipment.gnss.RTCMStream(data=list(chunk))
                     self.dronecan_node.broadcast(rtcm_msg)
-
                     if not self.quiet and chunk_count <= 3:
                         print(f"📡 RTCMStream gesendet: {len(chunk)} bytes, Chunk #{chunk_count}")
-
                 except Exception as e:
                     if not self.quiet:
                         print(f"❌ RTCMStream-Fehler: {e}")
                     # Fallback: Versuche alternative Übertragung
                     self._send_rtcm_alternative(chunk)
 
-                # Intelligentes Throttling mit Verarbeitung
-                self.dronecan_node.spin(0.01)  # 10ms Pause mit Queue-Verarbeitung
+                # Intelligentes Throttling mit Verarbeitung, robust gegen Toggle-Bit-Fehler
+                try:
+                    self.dronecan_node.spin(0.02)  # 20ms Pause mit Queue-Verarbeitung
+                except Exception as e:
+                    msg = str(e)
+                    if "Toggle bit value" in msg:
+                        if not self.quiet:
+                            print(f"⚠️ Toggle-Bit-Warnung während RTCM: {msg}")
+                        # Weiter machen – Empfänger wird sich erholen
+                    else:
+                        if not self.quiet:
+                            print(f"⚠️ Spin-Fehler während RTCM: {e}")
 
                 if not self.quiet and chunk_count % 10 == 0:
                     print(f"📡 RTCM Chunk {chunk_count} gesendet ({len(chunk)} bytes)")
@@ -1595,18 +1697,18 @@ class CalibratedESCController:
             self.last_rtcm_time = current_time
 
             if not self.quiet:
-                print(f"📡 RTCM-Übertragung erfolgreich: {chunk_count} Chunks, {len(data_to_send)} bytes")
-                print(f"🛰️ RTK-Korrekturen an Orange Cube gesendet - prüfen Sie GPS-Status in Mission Planner")
+                print(f"📡 RTCM-Übertragung abgeschlossen: {chunk_count} Chunks gesendet")
 
         except Exception as e:
             if "TxQueueFull" in str(e.__class__.__name__):
                 if not self.quiet:
                     print("⚠️ CAN TX Queue war voll, versuche es im nächsten Zyklus erneut.")
-                self.rtcm_buffer = data_to_send + self.rtcm_buffer # Wichtig: Daten nicht verlieren
+                self.rtcm_buffer = data_to_send + self.rtcm_buffer  # Daten nicht verlieren
             else:
                 if not self.quiet:
                     print(f"❌ RTCM-DroneCAN Fehler: {e}")
-                self.rtcm_buffer = b''
+                # Rest puffern, nicht verwerfen
+                self.rtcm_buffer = data_to_send + self.rtcm_buffer
 
     def _filter_rtcm_data(self, data):
         """
@@ -1981,7 +2083,16 @@ Beispiele:
 
         # Hauptschleife mit Timeout-Überwachung und Ramping-Updates
         while True:
-            node.spin(timeout=0.1)  # Kürzeres Timeout für flüssiges Ramping
+            try:
+                node.spin(timeout=0.1)  # Kürzeres Timeout für flüssiges Ramping
+            except Exception as e:
+                msg = str(e)
+                if "Toggle bit value" in msg:
+                    if not quiet:
+                        print(f"⚠️ Toggle-Bit-Warnung: {msg}")
+                else:
+                    if not quiet:
+                        print(f"⚠️ Spin-Fehler: {e}")
             # Timeout-Prüfung für PWM-Sicherheit
             if enable_pwm:
                 controller._check_command_timeout()
