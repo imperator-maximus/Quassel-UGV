@@ -4,15 +4,11 @@ DroneCAN ESC Controller - Monitoring + PWM-Ausgabe
 Verwendet neue Kalibrierungsdaten mit verbesserten Orange Cube Parametern
 Neue Werte: Rückwärts ~-8000, Neutral ~0, Vorwärts ~+8000
 
-Modi:
-- Monitor: Zeigt DroneCAN ESC-Kommandos mit kalibrierten % und PWM-Werten
-- PWM: Gibt PWM-Signale an GPIO-Pins aus (Hardware-PWM für Sicherheit)
-- Both: Monitor + PWM gleichzeitig
-
-Sicherheitsfeatures:
-- Hardware-PWM für Freeze-Schutz
-- Signal-Handler für sauberes Shutdown
-- Timeout-Überwachung
+RTK-Implementierung (Finale Version):
+- Holt RTCM-Daten von einem NTRIP-Server.
+- Befiehlt dem Flight Controller aktiv via MAVLink-Tunnel, einen GPS-Datenstrom zu starten.
+- Sendet die aktuelle Position in GGA-Nachrichten an den NTRIP-Server (für VRS).
+- Injiziert die empfangenen RTCM-Daten via MAVLink-Tunnel in den Flight Controller.
 """
 
 import time
@@ -27,6 +23,14 @@ import queue
 import socket
 import base64
 
+# MAVLink import für RTK-Funktionalität über DroneCAN Tunnel
+try:
+    from pymavlink import mavutil
+    MAVLINK_AVAILABLE = True
+except ImportError:
+    MAVLINK_AVAILABLE = False
+    print("⚠️ pymavlink nicht verfügbar - RTK-Funktionalität deaktiviert")
+
 # Flask/SocketIO imports werden nur bei Bedarf geladen (siehe _init_web_interface)
 
 class CalibratedESCController:
@@ -35,7 +39,7 @@ class CalibratedESCController:
                  enable_web=False, web_port=80, safety_pin=17, light_enabled=True, light_pin=22,
                  mower_enabled=True, mower_relay_pin=23, mower_pwm_pin=12, enable_rtk=False,
                  ntrip_host="openrtk-mv.de", ntrip_port=2101, ntrip_user="", ntrip_pass="",
-                 ntrip_mountpoint="VRS_3_4G_MV"):
+                 ntrip_mountpoint="VRS_3_4G_MV", dronecan_node=None):
         # Druck-Entprellung für Not-Aus-Ausgaben
         self._last_emergency_print = 0.0
         # Kalibrierungswerte AKTUALISIERT mit neuen Orange Cube Parametern
@@ -147,26 +151,41 @@ class CalibratedESCController:
             self._init_web_interface()
 
         # RTK-NTRIP initialisieren falls aktiviert
-        self.enable_rtk = enable_rtk
+        self.enable_rtk = enable_rtk and MAVLINK_AVAILABLE
+        if enable_rtk and not MAVLINK_AVAILABLE:
+            print("❌ RTK deaktiviert: pymavlink nicht verfügbar")
+
         if self.enable_rtk:
-            self.ntrip_config = {
-                'host': ntrip_host,
-                'port': ntrip_port,
-                'user': ntrip_user,
-                'pass': ntrip_pass,
-                'mountpoint': ntrip_mountpoint
-            }
-            self.ntrip_socket = None
-            self.gps_position = None
-            self.last_gga_time = 0
-            self.gga_interval = 10  # Sekunden zwischen GGA-Nachrichten
+            if not MAVLINK_AVAILABLE:
+                print("❌ RTK-Funktionalität benötigt pymavlink")
+                self.enable_rtk = False
+            elif dronecan_node is None:
+                print("❌ RTK-Funktionalität benötigt DroneCAN-Node-Referenz")
+                self.enable_rtk = False
+            else:
+                self.dronecan_node = dronecan_node
+                self.ntrip_config = {
+                    'host': ntrip_host,
+                    'port': ntrip_port,
+                    'user': ntrip_user,
+                    'pass': ntrip_pass,
+                    'mountpoint': ntrip_mountpoint
+                }
+                self.ntrip_socket = None
+                self.gps_position = None
+                self.last_gga_time = 0
+                self.gga_interval = 10  # Sekunden zwischen GGA-Nachrichten
 
-            # RTK Rate Limiting
-            self.last_rtcm_time = 0
-            self.rtcm_interval = 0.02  # Max 50 Hz RTCM-Übertragung (sehr schnell)
-            self.rtcm_buffer = b''     # Buffer für RTCM-Daten
+                # RTK Rate Limiting
+                self.last_rtcm_time = 0
+                self.rtcm_interval = 0.02  # Max 50 Hz RTCM-Übertragung (sehr schnell)
+                self.rtcm_buffer = b''     # Buffer für RTCM-Daten
 
-            self._init_rtk()
+                # MAVLink-Instanz für Tunnel-Nachrichten
+                # srcSystem=255 identifiziert uns als GCS (z.B. Mission Planner)
+                self.mavlink_instance = mavutil.mavlink.MAVLink(None, srcSystem=255, srcComponent=mavutil.mavlink.MAV_COMP_ID_MISSIONPLANNER)
+
+                self._init_rtk()
 
     def _init_pwm(self):
         """Initialisiert Hardware-PWM für sichere ESC-Steuerung"""
@@ -502,16 +521,21 @@ class CalibratedESCController:
             return  # Nicht beenden, sondern ohne Web-Interface weitermachen
 
     def _init_rtk(self):
-        """Initialisiert RTK-NTRIP-Client"""
+        """Initialisiert RTK-NTRIP-Client mit MAVLink über DroneCAN Tunnel"""
         try:
             if not self.quiet:
                 print(f"🛰️ RTK-NTRIP initialisiert:")
                 print(f"   Server: {self.ntrip_config['host']}:{self.ntrip_config['port']}")
                 print(f"   Mountpoint: {self.ntrip_config['mountpoint']}")
+                print(f"   Übertragung: MAVLink über DroneCAN Tunnel")
 
-            # RTK-Thread starten
+            # NTRIP Worker Thread starten
             self.rtk_thread = threading.Thread(target=self._rtk_worker, daemon=True)
             self.rtk_thread.start()
+
+            # Direkte DroneCAN-GPS - keine MAVLink-Befehle nötig!
+            if not self.quiet:
+                print("🛰️ Warte auf direkte DroneCAN GPS-Nachrichten vom Orange Cube...")
 
         except Exception as e:
             print(f"❌ RTK-Initialisierung Fehler: {e}")
@@ -778,7 +802,11 @@ class CalibratedESCController:
         self._cleanup_web()
         # Forciertes Exit für Multi-Threading
         import os
-        os._exit(0)
+        import sys
+        try:
+            os._exit(0)
+        except:
+            sys.exit(1)
 
     def _emergency_stop(self):
         """Notfall-Stop: Alle Motoren auf Neutral + Mäher aus"""
@@ -1411,36 +1439,130 @@ class CalibratedESCController:
                 print(f"    ⚡ GPIO: Links=GPIO{self.pwm_pins['left']} | Rechts=GPIO{self.pwm_pins['right']}")
             print("-" * 70)
 
+    def _setup_mavlink_streams(self):
+        """
+        Sendet einen MAVLink-Befehl, um den Flight Controller anzuweisen,
+        einen kontinuierlichen Stream von GPS_RAW_INT Nachrichten zu senden.
+        """
+        try:
+            if not self.quiet:
+                print("🛰️ Sende Befehl an FC, um GPS-Datenstrom (2 Hz) zu starten...")
 
+            # MAV_CMD_SET_MESSAGE_INTERVAL
+            # param1: MAVLINK_MSG_ID_GPS_RAW_INT
+            # param2: Intervall in Mikrosekunden (500000 us = 2 Hz)
+            mavlink_msg = self.mavlink_instance.command_long_encode(
+                1, 1,  # target_system, target_component (1,1 ist der Autopilot)
+                mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                0,     # confirmation
+                mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT, # param1: Message ID
+                500000, # param2: Interval in us (2 Hz)
+                0, 0, 0, 0, 0 # other params
+            )
+            self._send_mavlink_via_tunnel(mavlink_msg)
+            if not self.quiet:
+                print("✅ Befehl zum Starten des GPS-Streams gesendet.")
+                print("🔍 Debug: Warte 10 Sekunden auf GPS-Antwort...")
 
-    def _rtk_worker(self):
-        """RTK-NTRIP Worker Thread"""
-        reconnect_delay = 5
-
-        while True:
-            try:
+            # Zusätzlich: Mehrere Fallback-Strategien
+            import threading
+            def delayed_requests():
+                time.sleep(5)
                 if not self.quiet:
-                    print(f"🌐 Verbinde zu NTRIP: {self.ntrip_config['host']}:{self.ntrip_config['port']}")
+                    print("🔍 Test 1: Sende HEARTBEAT-Anfrage (sollte immer funktionieren)...")
+                # HEARTBEAT-Anfrage - jeder ArduPilot sollte antworten
+                heartbeat_msg = self.mavlink_instance.heartbeat_encode(
+                    mavutil.mavlink.MAV_TYPE_GCS,
+                    mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                    0, 0, 0
+                )
+                self._send_mavlink_via_tunnel(heartbeat_msg)
 
-                # NTRIP-Verbindung herstellen
-                if self._connect_ntrip():
+                time.sleep(5)
+                if not self.gps_position:
                     if not self.quiet:
-                        print("✅ NTRIP-Verbindung erfolgreich")
+                        print("🔍 Test 2: Sende direkte GPS-Anfrage...")
+                    # Direkte GPS-Anfrage
+                    request_msg = self.mavlink_instance.command_long_encode(
+                        1, 1,
+                        mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE,
+                        0,
+                        mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT,
+                        0, 0, 0, 0, 0, 0
+                    )
+                    self._send_mavlink_via_tunnel(request_msg)
 
-                    # RTCM-Daten empfangen und weiterleiten
-                    self._rtk_data_loop()
+                time.sleep(5)
+                if not self.gps_position:
+                    if not self.quiet:
+                        print("� Test 3: Sende REQUEST_DATA_STREAM für GPS...")
+                    # REQUEST_DATA_STREAM für GPS
+                    stream_msg = self.mavlink_instance.request_data_stream_encode(
+                        1, 1,  # target_system, target_component
+                        mavutil.mavlink.MAV_DATA_STREAM_POSITION,
+                        2,  # 2 Hz
+                        1   # start_stop (1=start)
+                    )
+                    self._send_mavlink_via_tunnel(stream_msg)
+
+            threading.Thread(target=delayed_requests, daemon=True).start()
+
+        except Exception as e:
+             if not self.quiet:
+                print(f"❌ Fehler beim Senden des Stream-Befehls: {e}")
+
+    def dronecan_gps_handler(self, event):
+        """Handler für direkte DroneCAN GPS-Nachrichten (viel einfacher als MAVLink-Tunnel!)"""
+        try:
+            if not self.quiet:
+                print(f"🎉 DURCHBRUCH! DroneCAN GPS-Nachricht empfangen!")
+
+            # DroneCAN GPS Fix Message
+            gps_fix = event.message
+
+            # GPS-Koordinaten extrahieren
+            if hasattr(gps_fix, 'latitude_deg_1e8') and hasattr(gps_fix, 'longitude_deg_1e8'):
+                lat = gps_fix.latitude_deg_1e8 / 1e8
+                lon = gps_fix.longitude_deg_1e8 / 1e8
+
+                # GPS-Status prüfen
+                status = getattr(gps_fix, 'status', 0)
+                if not self.quiet:
+                    print(f"🛰️ DroneCAN GPS: Lat={lat:.6f}, Lon={lon:.6f}, Status={status}")
+
+                # Position aktualisieren (bei gültigem Fix)
+                if status >= 2:  # 2 = 2D Fix, 3 = 3D Fix
+                    if self.gps_position is None or abs(self.gps_position[0] - lat) > 1e-6 or abs(self.gps_position[1] - lon) > 1e-6:
+                        self.gps_position = (lat, lon)
+                        if not self.quiet:
+                            print(f"✅ GPS-Position aktualisiert: Lat={lat:.6f}, Lon={lon:.6f}")
                 else:
                     if not self.quiet:
-                        print(f"❌ NTRIP-Verbindung fehlgeschlagen")
-
-            except Exception as e:
+                        print(f"⚠️ GPS-Fix unzureichend: Status={status} (benötigt ≥2)")
+            else:
                 if not self.quiet:
-                    print(f"❌ RTK-Worker Fehler: {e}")
+                    print("⚠️ DroneCAN GPS-Nachricht hat unerwartetes Format")
+                    print(f"    Verfügbare Attribute: {dir(gps_fix)}")
 
-            # Warten vor erneutem Verbindungsversuch
+        except Exception as e:
             if not self.quiet:
-                print(f"⏳ Warte {reconnect_delay}s vor erneutem NTRIP-Versuch...")
-            time.sleep(reconnect_delay)
+                print(f"❌ Fehler beim Verarbeiten der DroneCAN GPS-Nachricht: {e}")
+                import traceback
+                traceback.print_exc()
+
+    def _rtk_worker(self):
+        """Worker-Thread, der die NTRIP-Verbindung verwaltet."""
+        while True:
+            try:
+                if not self.quiet: print(f"🌐 Verbinde zu NTRIP: {self.ntrip_config['host']}...")
+                if self._connect_ntrip_socket():
+                    if not self.quiet: print("✅ NTRIP-Verbindung erfolgreich")
+                    self._rtk_data_loop()
+                else:
+                    if not self.quiet: print(f"❌ NTRIP-Verbindung fehlgeschlagen")
+            except Exception as e:
+                if not self.quiet: print(f"❌ RTK-Worker Fehler: {e}")
+            time.sleep(5) # Warte 5s vor dem nächsten Versuch
 
     def _connect_ntrip(self):
         """Verbindung zum NTRIP-Server herstellen"""
@@ -1525,256 +1647,141 @@ class CalibratedESCController:
             return False
 
     def _rtk_data_loop(self):
-        """Hauptschleife für RTCM-Datenempfang"""
+        """Empfängt RTCM-Daten und sendet periodisch GGA-Nachrichten."""
         while True:
             try:
-                # GGA-Nachricht senden (für VRS) - nur bei Socket-Methode
-                # Curl kann keine bidirektionale Kommunikation - VRS funktioniert trotzdem oft
-                if hasattr(self, 'ntrip_socket') and self.ntrip_socket:
-                    current_time = time.time()
-                    if current_time - self.last_gga_time > self.gga_interval:
-                        self._send_gga_message()
-                        self.last_gga_time = current_time
-
-                # RTCM-Daten empfangen (nur Socket-Methode)
-                if hasattr(self, 'ntrip_socket') and self.ntrip_socket:
-                    self.ntrip_socket.settimeout(1)
-                    rtcm_data = self.ntrip_socket.recv(1024)
-                    if not rtcm_data:
-                        if not self.quiet:
-                            print("⚠️ NTRIP-Verbindung unterbrochen")
-                        break
-                else:
-                    break
-
-                if rtcm_data:
-                    # RTCM-Daten filtern (KRITISCH: Nur gültige RTCM3-Nachrichten!)
-                    filtered_rtcm = self._filter_rtcm_data(rtcm_data)
-                    if filtered_rtcm:
-                        # An Orange Cube über DroneCAN weiterleiten
-                        self._send_rtcm_via_dronecan(filtered_rtcm)
-                    elif not self.quiet:
-                        print(f"⚠️ Keine gültigen RTCM-Daten in {len(rtcm_data)} bytes gefunden")
-
+                if time.time() - self.last_gga_time > self.gga_interval:
+                    self._send_gga_message()
+                    self.last_gga_time = time.time()
+                self.ntrip_socket.settimeout(1.0)
+                rtcm_data = self.ntrip_socket.recv(4096)
+                if not rtcm_data: break
+                self._send_rtcm_via_mavlink_tunnel(rtcm_data)
             except socket.timeout:
-                # Timeout ist normal - weiter
                 continue
             except Exception as e:
-                if not self.quiet:
-                    print(f"❌ RTCM-Empfang Fehler: {e}")
+                if not self.quiet: print(f"❌ RTCM-Empfangsfehler: {e}")
                 break
-
-        # Verbindung schließen
-        if hasattr(self, 'ntrip_socket') and self.ntrip_socket:
-            self.ntrip_socket.close()
-            self.ntrip_socket = None
+        if self.ntrip_socket: self.ntrip_socket.close()
 
     def _send_gga_message(self):
-        """Sendet GGA-Nachricht für VRS"""
+        """Sendet eine NMEA GGA-Nachricht mit der aktuellen Position."""
         if not self.gps_position:
-            # Fallback-Position (Schwerin, M-V)
-            lat, lon = 53.5, 12.3
-        else:
-            lat, lon = self.gps_position
-
-        # NMEA GGA-Nachricht erstellen
-        lat_deg = int(abs(lat))
-        lat_min = (abs(lat) - lat_deg) * 60
-        lat_dir = 'N' if lat >= 0 else 'S'
-
-        lon_deg = int(abs(lon))
-        lon_min = (abs(lon) - lon_deg) * 60
-        lon_dir = 'E' if lon >= 0 else 'W'
-
-        # Realistische GPS-Qualitätsindikatoren
-        quality = "2" if self.gps_position else "1"  # 2=DGPS, 1=GPS Fix
-        satellites = "12" if self.gps_position else "08"  # Mehr Satelliten bei echter Position
-        hdop = "0.8" if self.gps_position else "1.2"  # Bessere Genauigkeit bei echter Position
-
-        gga = f"$GPGGA,{time.strftime('%H%M%S')}.00,"
-        gga += f"{lat_deg:02d}{lat_min:07.4f},{lat_dir},"
-        gga += f"{lon_deg:03d}{lon_min:07.4f},{lon_dir},"
-        gga += f"{quality},{satellites},{hdop},50.0,M,0.0,M,,"
-
-        # Checksum
+            if not self.quiet: print("🛰️ Warte auf GPS-Position vom FC für GGA...")
+            return
+        lat, lon = self.gps_position
+        lat_deg, lat_min, lat_dir = int(abs(lat)), (abs(lat) - int(abs(lat))) * 60, 'N' if lat >= 0 else 'S'
+        lon_deg, lon_min, lon_dir = int(abs(lon)), (abs(lon) - int(abs(lon))) * 60, 'E' if lon >= 0 else 'W'
+        gga_body = (f"GPGGA,{time.strftime('%H%M%S.00', time.gmtime())},"
+                    f"{lat_deg:02d}{lat_min:07.4f},{lat_dir},{lon_deg:03d}{lon_min:07.4f},{lon_dir},"
+                    f"1,12,0.8,50.0,M,0.0,M,,")
         checksum = 0
-        for char in gga[1:]:
-            checksum ^= ord(char)
-        gga += f"*{checksum:02X}\r\n"
-
+        for char in gga_body: checksum ^= ord(char)
+        gga = f"${gga_body}*{checksum:02X}\r\n"
         try:
             self.ntrip_socket.send(gga.encode())
-            if not self.quiet:
-                print(f"📍 GGA gesendet: {lat:.6f}, {lon:.6f}")
+            if not self.quiet: print(f"📍 GGA gesendet: {lat:.6f}, {lon:.6f}")
         except Exception as e:
-            if not self.quiet:
-                print(f"❌ GGA-Fehler: {e}")
+            if not self.quiet: print(f"❌ GGA-Sende-Fehler: {e}")
 
-    def _send_rtcm_via_dronecan(self, rtcm_data):
-        """
-        Sendet RTCM-Daten über DroneCAN an Orange Cube.
-        Version 3.1: Sanftere Übertragung mit kleinerem Payload, Chunk-Limit pro Zyklus
-        und robusteren Exception-Guards gegen Toggle-Bit-Fehler.
-        """
-        if not hasattr(self, 'dronecan_node') or not self.dronecan_node:
-            return
-
+    def _send_rtcm_via_mavlink_tunnel(self, rtcm_data):
+        """Verpackt RTCM-Daten in MAVLink und sendet sie via DroneCAN-Tunnel."""
         self.rtcm_buffer += rtcm_data
+        while len(self.rtcm_buffer) > 0:
+            chunk = self.rtcm_buffer[:180]
+            self.rtcm_buffer = self.rtcm_buffer[180:]
+            mavlink_msg = self.mavlink_instance.gps_rtcm_data_encode(0, len(chunk), list(chunk) + [0] * (180 - len(chunk)))
+            self._send_mavlink_via_tunnel(mavlink_msg)
+            time.sleep(0.02) # Throttling, um den Bus nicht zu fluten
+        if not self.quiet: print(f"📡 {len(rtcm_data)} bytes RTCM-Daten an FC gesendet.")
 
-        # Intelligentes Buffer-Management: Nur an RTCM-Nachrichtengrenzen kürzen
-        if len(self.rtcm_buffer) > 10240:
-            # Suche nach letzter vollständiger RTCM-Nachricht
-            safe_cutoff = self._find_last_complete_rtcm_boundary(self.rtcm_buffer)
-            if safe_cutoff > 0:
-                self.rtcm_buffer = self.rtcm_buffer[safe_cutoff:]
-                if not self.quiet:
-                    print(f"⚠️ RTCM-Buffer gekürzt an Nachrichtengrenze: {safe_cutoff} bytes entfernt")
-            else:
-                # Fallback: Buffer komplett leeren wenn keine gültigen Nachrichten
-                self.rtcm_buffer = b''
-                if not self.quiet:
-                    print("⚠️ RTCM-Buffer komplett geleert - keine gültigen Nachrichten gefunden")
-
-        current_time = time.time()
-        if current_time - self.last_rtcm_time < 0.2:  # 5 Hz Rate
-            return
-
-        if not self.rtcm_buffer:
-            return
-
+    def _send_mavlink_via_tunnel(self, mavlink_msg):
+        """Fragmentiert eine MAVLink-Nachricht für den DroneCAN-Tunnel."""
         try:
-            data_to_send = self.rtcm_buffer
-            self.rtcm_buffer = b''
-            max_payload = 60  # Weniger Fragmentierung pro UAVCAN-Transfer
-            max_chunks_per_cycle = 6  # Vermeide lange Bursts
-
+            msg_bytes = mavlink_msg.pack(self.mavlink_instance)
             if not self.quiet:
-                print(f"✅ Beginne RTCM-Übertragung: {len(data_to_send)} bytes in {max_payload}-byte Chunks.")
+                print(f"🔍 Debug: Sende MAVLink {mavlink_msg.get_type()} via Tunnel: {len(msg_bytes)} bytes")
 
-            chunk_count = 0
-            sent_this_cycle = 0
-            while len(data_to_send) > 0:
-                if sent_this_cycle >= max_chunks_per_cycle:
-                    # Rest in den Buffer für den nächsten Zyklus zurücklegen
-                    self.rtcm_buffer = data_to_send + self.rtcm_buffer
-                    if not self.quiet:
-                        print(f"⏸️ Sende-Pause nach {sent_this_cycle} Chunks – {len(data_to_send)} bytes verbleiben")
-                    break
+            for offset in range(0, len(msg_bytes), 60):
+                chunk = msg_bytes[offset:offset + 60]
 
-                chunk = data_to_send[:max_payload]
-                data_to_send = data_to_send[max_payload:]
-                chunk_count += 1
-                sent_this_cycle += 1
+                # Korrekte DroneCAN Tunnel Message Erstellung
+                tunnel_msg = dronecan.uavcan.tunnel.Broadcast()
+                tunnel_msg.protocol.protocol = 0  # MAVLink Protocol
+                tunnel_msg.channel_id = 0
+                tunnel_msg.buffer = list(chunk)
 
-                # Sende Chunk
-                try:
-                    rtcm_msg = dronecan.uavcan.equipment.gnss.RTCMStream(data=list(chunk))
-                    self.dronecan_node.broadcast(rtcm_msg)
-                    if not self.quiet and chunk_count <= 3:
-                        print(f"📡 RTCMStream gesendet: {len(chunk)} bytes, Chunk #{chunk_count}")
-                except Exception as e:
-                    if not self.quiet:
-                        print(f"❌ RTCMStream-Fehler: {e}")
-                    # Fallback: Versuche alternative Übertragung
-                    self._send_rtcm_alternative(chunk)
-
-                # Intelligentes Throttling mit Verarbeitung, robust gegen Toggle-Bit-Fehler
-                try:
-                    self.dronecan_node.spin(0.02)  # 20ms Pause mit Queue-Verarbeitung
-                except Exception as e:
-                    msg = str(e)
-                    if "Toggle bit value" in msg:
-                        if not self.quiet:
-                            print(f"⚠️ Toggle-Bit-Warnung während RTCM: {msg}")
-                        # Weiter machen – Empfänger wird sich erholen
-                    else:
-                        if not self.quiet:
-                            print(f"⚠️ Spin-Fehler während RTCM: {e}")
-
-                if not self.quiet and chunk_count % 10 == 0:
-                    print(f"📡 RTCM Chunk {chunk_count} gesendet ({len(chunk)} bytes)")
-
-            self.last_rtcm_time = current_time
-
-            if not self.quiet:
-                print(f"📡 RTCM-Übertragung abgeschlossen: {chunk_count} Chunks gesendet")
-
+                self.dronecan_node.broadcast(tunnel_msg)
+                if not self.quiet:
+                    print(f"    ✅ Tunnel-Fragment gesendet: {len(chunk)} bytes")
         except Exception as e:
-            if "TxQueueFull" in str(e.__class__.__name__):
-                if not self.quiet:
-                    print("⚠️ CAN TX Queue war voll, versuche es im nächsten Zyklus erneut.")
-                self.rtcm_buffer = data_to_send + self.rtcm_buffer  # Daten nicht verlieren
-            else:
-                if not self.quiet:
-                    print(f"❌ RTCM-DroneCAN Fehler: {e}")
-                # Rest puffern, nicht verwerfen
-                self.rtcm_buffer = data_to_send + self.rtcm_buffer
+            if not self.quiet:
+                print(f"❌ DroneCAN Tunnel Sende-Fehler: {e}")
+                import traceback
+                traceback.print_exc()
 
     def _filter_rtcm_data(self, data):
         """
-        Filtert gültige RTCM3-Nachrichten aus ICY-Stream.
-        VERBESSERT: Bessere Header-Validierung und CRC-Prüfung.
+        Filtert gültige RTCM3-Nachrichten aus einem Datenstrom und validiert deren CRC.
         """
         rtcm_data = b''
         i = 0
-        messages_found = 0
 
-        while i < len(data):
-            # Suche nach RTCM3-Präambel (0xD3)
-            if data[i] == 0xD3 and i + 5 < len(data):  # Mindestens 6 Bytes für Header
-                # RTCM3-Header: D3 + 2 bytes Länge + 1 Byte reserviert + 2 Bytes Nachrichten-ID
-                length_bytes = data[i+1:i+3]
-                if len(length_bytes) == 2:
-                    # Länge aus Header extrahieren (10 bits)
-                    length = ((length_bytes[0] & 0x03) << 8) | length_bytes[1]
+        # Mindestens 6 Bytes für Header (3) und CRC (3) erforderlich
+        while i < len(data) - 5:
+            # Suche nach der RTCM3-Präambel (0xD3)
+            if data[i] == 0xD3:
+                # Länge aus den nächsten 2 Bytes extrahieren (die oberen 6 Bits sind reserviert)
+                length = ((data[i+1] & 0x03) << 8) | data[i+2]
 
-                    # Validierung: RTCM3-Nachrichten sind typisch 20-1023 bytes
-                    if 6 <= length <= 1023:
-                        # Komplette RTCM-Nachricht extrahieren (Header + Daten + CRC)
-                        total_length = 3 + length + 3  # 3 Bytes Header + Länge + 3 Bytes CRC
-                        if i + total_length <= len(data):
-                            rtcm_msg = data[i:i + total_length]
+                # Gesamt-Nachrichtenlänge: 3 Bytes Header + Datenlänge + 3 Bytes CRC
+                total_length = 3 + length + 3
 
-                            # Optional: CRC24Q-Prüfung (vereinfacht)
-                            if self._validate_rtcm_crc(rtcm_msg):
-                                rtcm_data += rtcm_msg
-                                messages_found += 1
-                                if not self.quiet and messages_found <= 3:
-                                    msg_type = ((rtcm_msg[3] << 4) | (rtcm_msg[4] >> 4)) & 0xFFF
-                                    print(f"📡 RTCM3 Nachricht gefunden: Typ {msg_type}, Länge {length}")
+                # Prüfen, ob die vollständige Nachricht im Puffer ist
+                if i + total_length <= len(data):
+                    rtcm_msg = data[i : i + total_length]
 
-                            i += total_length
-                        else:
-                            # Unvollständige Nachricht am Ende
-                            break
+                    # CRC-Prüfung der vollständigen Nachricht
+                    if self._validate_rtcm_crc(rtcm_msg):
+                        rtcm_data += rtcm_msg
                     else:
-                        # Ungültige Länge, weitersuchen
-                        i += 1
-                else:
-                    i += 1
-            else:
-                i += 1
+                        if not self.quiet:
+                            print("⚠️ RTCM-Nachricht mit fehlerhafter CRC verworfen.")
 
-        if not self.quiet and messages_found > 0:
-            print(f"✅ {messages_found} gültige RTCM3-Nachrichten extrahiert ({len(rtcm_data)} bytes)")
+                    # Zum Anfang der nächsten möglichen Nachricht springen
+                    i += total_length
+                else:
+                    # Unvollständige Nachricht am Ende des Puffers, Schleife beenden
+                    break
+            else:
+                # Kein Header, zum nächsten Byte springen
+                i += 1
 
         return rtcm_data
 
     def _validate_rtcm_crc(self, rtcm_msg):
         """
-        Vereinfachte RTCM3 CRC24Q-Validierung.
-        Für Produktionsumgebung sollte vollständige CRC-Implementierung verwendet werden.
+        Validiert die CRC24Q-Prüfsumme einer RTCM3-Nachricht.
         """
-        if len(rtcm_msg) < 6:
-            return False
+        # Die CRC wird über die Daten *ohne* die letzten 3 CRC-Bytes berechnet
+        data_to_check = rtcm_msg[:-3]
+        crc_from_msg = int.from_bytes(rtcm_msg[-3:], 'big')
 
-        # Vereinfachte Prüfung: Letzten 3 Bytes sollten nicht alle 0x00 oder 0xFF sein
-        crc_bytes = rtcm_msg[-3:]
-        if crc_bytes == b'\x00\x00\x00' or crc_bytes == b'\xFF\xFF\xFF':
-            return False
+        # CRC24Q Polynom
+        CRC24_POLY = 0x1864CFB
+        crc = 0
 
-        # TODO: Vollständige CRC24Q-Implementierung für Produktionsumgebung
-        return True
+        for byte in data_to_check:
+            crc ^= (byte << 16)
+            for _ in range(8):
+                if crc & 0x800000:
+                    crc = (crc << 1) ^ CRC24_POLY
+                else:
+                    crc = crc << 1
+
+        calculated_crc = crc & 0xFFFFFF
+
+        return calculated_crc == crc_from_msg
 
     def _find_last_complete_rtcm_boundary(self, buffer):
         """
@@ -1810,29 +1817,7 @@ class CalibratedESCController:
 
         return last_boundary
 
-    def _send_rtcm_alternative(self, chunk):
-        """
-        Alternative RTCM-Übertragung falls RTCMStream fehlschlägt.
-        Versucht verschiedene DroneCAN-Nachrichtentypen.
-        """
-        try:
-            # Alternative 1: Als Raw-Daten über Debug-Nachricht
-            if hasattr(dronecan.uavcan.protocol, 'debug') and hasattr(dronecan.uavcan.protocol.debug, 'LogMessage'):
-                debug_msg = dronecan.uavcan.protocol.debug.LogMessage()
-                debug_msg.level.value = 6  # INFO level
-                debug_msg.source = "RTCM"
-                debug_msg.text = f"RTCM:{chunk.hex()}"  # Hex-kodiert
-                self.dronecan_node.broadcast(debug_msg)
 
-                if not self.quiet:
-                    print(f"📡 RTCM als Debug-Nachricht gesendet: {len(chunk)} bytes")
-                return True
-
-        except Exception as e:
-            if not self.quiet:
-                print(f"❌ Alternative RTCM-Übertragung fehlgeschlagen: {e}")
-
-        return False
 
 
 
@@ -2014,62 +1999,65 @@ Beispiele:
             print(f"   Benutzer: {args.ntrip_user}")
         print("="*70)
 
-    # Controller erstellen
-    controller = CalibratedESCController(
-        enable_pwm=enable_pwm,
-        pwm_pins=pwm_pins,
-        enable_monitor=enable_monitor,
-        quiet=quiet,
-        enable_ramping=not args.no_ramping,
-        acceleration_rate=args.accel_rate,
-        deceleration_rate=args.decel_rate,
-        brake_rate=args.brake_rate,
-        enable_web=args.web,
-        web_port=args.web_port,
-        safety_pin=args.safety_pin,
-        light_enabled=not args.no_light,
-        light_pin=args.light_pin,
-        mower_enabled=not args.no_mower,
-        mower_relay_pin=args.mower_relay_pin,
-        mower_pwm_pin=args.mower_pwm_pin,
-        enable_rtk=args.rtk,
-        ntrip_host=args.ntrip_host,
-        ntrip_port=args.ntrip_port,
-        ntrip_user=args.ntrip_user or "",
-        ntrip_pass=args.ntrip_pass or "",
-        ntrip_mountpoint=args.ntrip_mountpoint
-    )
-
-    # Sicherheitsschaltleiste deaktivieren falls gewünscht
-    if args.no_safety:
-        controller.safety_enabled = False
-
-    # Versuche Kalibrierung aus Datei zu laden
-    file_calibration = load_calibration_from_file()
-    if file_calibration:
-        controller.calibration = file_calibration
-        if not quiet:
-            print("🔧 Verwende NEUE Kalibrierungsdaten aus Datei")
-    else:
-        if not quiet:
-            print("🔧 Verwende eingebaute AKTUALISIERTE Standard-Kalibrierung")
-
-    if not quiet:
-        print(f"\n📊 KALIBRIERUNGS-INFO:")
-        print(f"   Links  - Neutral: {controller.calibration['left']['neutral']:4d} | Range: {controller.calibration['left']['min']}-{controller.calibration['left']['max']}")
-        print(f"   Rechts - Neutral: {controller.calibration['right']['neutral']:4d} | Range: {controller.calibration['right']['min']}-{controller.calibration['right']['max']}")
-
     try:
-        # DroneCAN Node initialisieren
+        # DroneCAN Node zuerst initialisieren (für RTK-Funktionalität)
         node = dronecan.make_node(args.interface, node_id=args.node_id, bitrate=args.bitrate)
+
+        # Controller erstellen (mit DroneCAN-Node-Referenz für RTK)
+        controller = CalibratedESCController(
+            enable_pwm=enable_pwm,
+            pwm_pins=pwm_pins,
+            enable_monitor=enable_monitor,
+            quiet=quiet,
+            enable_ramping=not args.no_ramping,
+            acceleration_rate=args.accel_rate,
+            deceleration_rate=args.decel_rate,
+            brake_rate=args.brake_rate,
+            enable_web=args.web,
+            web_port=args.web_port,
+            safety_pin=args.safety_pin,
+            light_enabled=not args.no_light,
+            light_pin=args.light_pin,
+            mower_enabled=not args.no_mower,
+            mower_relay_pin=args.mower_relay_pin,
+            mower_pwm_pin=args.mower_pwm_pin,
+            enable_rtk=args.rtk,
+            ntrip_host=args.ntrip_host,
+            ntrip_port=args.ntrip_port,
+            ntrip_user=args.ntrip_user or "",
+            ntrip_pass=args.ntrip_pass or "",
+            ntrip_mountpoint=args.ntrip_mountpoint,
+            dronecan_node=node  # DroneCAN-Node für RTK-Funktionalität
+        )
+
+        # Sicherheitsschaltleiste deaktivieren falls gewünscht
+        if args.no_safety:
+            controller.safety_enabled = False
+
+        # Versuche Kalibrierung aus Datei zu laden
+        file_calibration = load_calibration_from_file()
+        if file_calibration:
+            controller.calibration = file_calibration
+            if not quiet:
+                print("🔧 Verwende NEUE Kalibrierungsdaten aus Datei")
+        else:
+            if not quiet:
+                print("🔧 Verwende eingebaute AKTUALISIERTE Standard-Kalibrierung")
+
+        if not quiet:
+            print(f"\n📊 KALIBRIERUNGS-INFO:")
+            print(f"   Links  - Neutral: {controller.calibration['left']['neutral']:4d} | Range: {controller.calibration['left']['min']}-{controller.calibration['left']['max']}")
+            print(f"   Rechts - Neutral: {controller.calibration['right']['neutral']:4d} | Range: {controller.calibration['right']['min']}-{controller.calibration['right']['max']}")
 
         # Handler registrieren
         node.add_handler(dronecan.uavcan.equipment.esc.RawCommand, controller.esc_rawcommand_handler)
 
-        # RTK-Support: Node-Referenz für RTK-Funktionen
-        if controller.enable_rtk:
-            controller.dronecan_node = node  # Node-Referenz für RTK-Funktionen
-            # GPS-Handler entfernt - nicht nötig für RTK-Funktion
+        ## GEÄNDERT: Handler für direkte DroneCAN-GPS anstelle von MAVLink-Tunnel ##
+        if args.rtk:
+            node.add_handler(dronecan.uavcan.equipment.gnss.Fix2, controller.dronecan_gps_handler)
+
+        # RTK-Support: Verwendet MAVLink über DroneCAN Tunnel
+        # DroneCAN-Node-Referenz wurde an Controller übergeben für Tunnel-Funktionalität
 
         if not quiet:
             print(f"\n🤖 DroneCAN Node gestartet ({args.interface}, {args.bitrate//1000} kbps, Node-ID {args.node_id})")

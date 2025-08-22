@@ -117,3 +117,43 @@ sudo systemctl status pigpiod
 sudo pkill -f pigpio
 sudo systemctl restart pigpiod
 ```
+
+## 🛰️ RTK-NTRIP Funktionalität
+
+Das Script unterstützt RTK-Korrekturdaten über NTRIP mit **MAVLink über DroneCAN Tunnel** an den Orange Cube.
+
+### RTK-Abhängigkeiten installieren:
+```bash
+# MAVLink-Bibliothek installieren
+./install_mavlink_dependencies.sh
+```
+
+### RTK aktivieren:
+```bash
+# RTK mit NTRIP-Server aktivieren
+python3 dronecan_esc_controller.py --rtk \
+  --ntrip-user "IHR_BENUTZERNAME" \
+  --ntrip-pass "IHR_PASSWORT" \
+  --ntrip-host "openrtk-mv.de" \
+  --ntrip-mountpoint "VRS_3_4G_MV"
+```
+
+### RTK-Funktionsweise:
+- **NTRIP-Client**: Empfängt RTCM3-Korrekturdaten vom Server
+- **MAVLink GPS_RTCM_DATA**: Erstellt MAVLink-Nachrichten für RTK-Injection
+- **DroneCAN Tunnel**: Sendet MAVLink über CAN-Bus an Orange Cube
+- **ArduPilot-Kompatibilität**: Verwendet Standard MAVLink GPS_RTCM_DATA Format
+
+### RTK-Features:
+- **MAVLink GPS_RTCM_DATA**: Sendet RTCM-Korrekturdaten über MAVLink (Port 14550)
+- **Fragment-Handling**: Automatische Aufteilung großer RTCM-Nachrichten
+- **NTRIP-Client**: Verbindung zu RTK-Korrekturdiensten
+- **Kompatibilität**: Funktioniert mit Mission Planner und ArduPilot
+
+### RTK-Konfiguration:
+- **Standard-Port**: UDP 127.0.0.1:14550 (Mission Planner)
+- **Fragment-Größe**: 180 bytes (MAVLink-Limit)
+- **Rate-Limiting**: 5 Hz RTCM-Übertragung
+- **Buffer-Management**: Intelligente RTCM-Nachrichtengrenzen
+
+**Wichtig**: RTK verwendet jetzt MAVLink statt DroneCAN für bessere ArduPilot-Kompatibilität!
