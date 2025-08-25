@@ -1647,22 +1647,46 @@ class CalibratedESCController:
             return False
 
     def _rtk_data_loop(self):
-        """Empfängt RTCM-Daten und sendet periodisch GGA-Nachrichten."""
+        """Empfängt RTCM-Daten, filtert sie und sendet periodisch GGA-Nachrichten."""
+        self.rtcm_buffer = b''  # Stelle sicher, dass der Buffer leer ist
+
         while True:
             try:
+                # Sende periodisch eine GGA-Nachricht, falls eine Position vorhanden ist
                 if time.time() - self.last_gga_time > self.gga_interval:
                     self._send_gga_message()
                     self.last_gga_time = time.time()
+
+                # Lese neue Daten vom NTRIP-Server
                 self.ntrip_socket.settimeout(1.0)
-                rtcm_data = self.ntrip_socket.recv(4096)
-                if not rtcm_data: break
-                self._send_rtcm_via_mavlink_tunnel(rtcm_data)
+                new_data = self.ntrip_socket.recv(4096)
+                if not new_data:
+                    if not self.quiet: print("🔌 NTRIP-Verbindung getrennt.")
+                    break
+
+                # Füge neue Daten zum Puffer hinzu
+                self.rtcm_buffer += new_data
+
+                # Filtere und validiere den Puffer, um vollständige RTCM-Nachrichten zu finden
+                valid_rtcm_messages = self._filter_rtcm_data(self.rtcm_buffer)
+
+                if valid_rtcm_messages:
+                    # Sende die validierten Nachrichten an den Flight Controller
+                    self._send_rtcm_via_mavlink_tunnel(valid_rtcm_messages)
+
+                    # Entferne die gesendeten Nachrichten aus dem Puffer
+                    self.rtcm_buffer = self.rtcm_buffer[len(valid_rtcm_messages):]
+
             except socket.timeout:
+                # Kein Problem, es kamen nur keine neuen Daten in 1s
                 continue
             except Exception as e:
                 if not self.quiet: print(f"❌ RTCM-Empfangsfehler: {e}")
                 break
-        if self.ntrip_socket: self.ntrip_socket.close()
+
+        if self.ntrip_socket:
+            self.ntrip_socket.close()
+            self.ntrip_socket = None
 
     def _send_gga_message(self):
         """Sendet eine NMEA GGA-Nachricht mit der aktuellen Position."""
@@ -1686,14 +1710,32 @@ class CalibratedESCController:
 
     def _send_rtcm_via_mavlink_tunnel(self, rtcm_data):
         """Verpackt RTCM-Daten in MAVLink und sendet sie via DroneCAN-Tunnel."""
-        self.rtcm_buffer += rtcm_data
-        while len(self.rtcm_buffer) > 0:
-            chunk = self.rtcm_buffer[:180]
-            self.rtcm_buffer = self.rtcm_buffer[180:]
-            mavlink_msg = self.mavlink_instance.gps_rtcm_data_encode(0, len(chunk), list(chunk) + [0] * (180 - len(chunk)))
-            self._send_mavlink_via_tunnel(mavlink_msg)
-            time.sleep(0.02) # Throttling, um den Bus nicht zu fluten
-        if not self.quiet: print(f"📡 {len(rtcm_data)} bytes RTCM-Daten an FC gesendet.")
+        # Diese Funktion erwartet jetzt vollständige RTCM-Nachrichten
+        # und teilt sie in 180-Byte-Chunks für MAVLink auf.
+
+        total_sent = 0
+        try:
+            # Sende die Daten in Chunks von maximal 180 Bytes
+            for i in range(0, len(rtcm_data), 180):
+                chunk = rtcm_data[i:i+180]
+                # Fülle den Rest des Chunks mit Nullen auf, falls nötig
+                padded_chunk = list(chunk) + [0] * (180 - len(chunk))
+
+                mavlink_msg = self.mavlink_instance.gps_rtcm_data_encode(
+                    0,              # flags
+                    len(chunk),     # len
+                    padded_chunk    # data
+                )
+                self._send_mavlink_via_tunnel(mavlink_msg)
+                total_sent += len(chunk)
+                time.sleep(0.02) # Throttling, um den Bus nicht zu fluten
+
+            if not self.quiet:
+                print(f"📡 {total_sent} bytes RTCM-Daten (validiert) an FC gesendet.")
+
+        except Exception as e:
+            if not self.quiet:
+                print(f"❌ Fehler beim Senden von RTCM-Daten: {e}")
 
     def _send_mavlink_via_tunnel(self, mavlink_msg):
         """Fragmentiert eine MAVLink-Nachricht für den DroneCAN-Tunnel."""
