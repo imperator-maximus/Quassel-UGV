@@ -181,6 +181,9 @@ class CalibratedESCController:
                 self.rtcm_interval = 0.02  # Max 50 Hz RTCM-Übertragung (sehr schnell)
                 self.rtcm_buffer = b''     # Buffer für RTCM-Daten
 
+                # RTCM Sequenz-Nummer (wie Mission Planner)
+                self.inject_seq_no = 0
+
                 # MAVLink-Instanz für Tunnel-Nachrichten
                 # srcSystem=255 identifiziert uns als GCS (z.B. Mission Planner)
                 self.mavlink_instance = mavutil.mavlink.MAVLink(None, srcSystem=255, srcComponent=mavutil.mavlink.MAV_COMP_ID_MISSIONPLANNER)
@@ -1709,33 +1712,98 @@ class CalibratedESCController:
             if not self.quiet: print(f"❌ GGA-Sende-Fehler: {e}")
 
     def _send_rtcm_via_mavlink_tunnel(self, rtcm_data):
-        """Verpackt RTCM-Daten in MAVLink und sendet sie via DroneCAN-Tunnel."""
-        # Diese Funktion erwartet jetzt vollständige RTCM-Nachrichten
-        # und teilt sie in 180-Byte-Chunks für MAVLink auf.
+        """
+        Verpackt RTCM-Daten in MAVLink GPS_RTCM_DATA nach Mission Planner Vorbild.
+        Implementiert korrekte Fragmentierung mit Flags und Sequenz-Nummern.
+        """
+        if not rtcm_data:
+            return
 
         total_sent = 0
         try:
-            # Sende die Daten in Chunks von maximal 180 Bytes
-            for i in range(0, len(rtcm_data), 180):
-                chunk = rtcm_data[i:i+180]
-                # Fülle den Rest des Chunks mit Nullen auf, falls nötig
-                padded_chunk = list(chunk) + [0] * (180 - len(chunk))
+            msglen = 180  # Standard MAVLink GPS_RTCM_DATA Payload-Größe
+            length = len(rtcm_data)
 
-                mavlink_msg = self.mavlink_instance.gps_rtcm_data_encode(
-                    0,              # flags
-                    len(chunk),     # len
-                    padded_chunk    # data
-                )
-                self._send_mavlink_via_tunnel(mavlink_msg)
-                total_sent += len(chunk)
-                time.sleep(0.02) # Throttling, um den Bus nicht zu fluten
+            # Mission Planner erlaubt bis zu 4 Fragmente, aber wir teilen große Nachrichten auf
+            max_single_message = msglen * 4  # 720 bytes
+
+            if length > max_single_message:
+                if not self.quiet:
+                    print(f"⚠️ Große RTCM-Nachricht ({length} bytes) wird aufgeteilt...")
+
+                # Teile große Nachricht in kleinere Chunks auf
+                for chunk_start in range(0, length, max_single_message):
+                    chunk_end = min(chunk_start + max_single_message, length)
+                    chunk_data = rtcm_data[chunk_start:chunk_end]
+
+                    if not self.quiet:
+                        print(f"    📦 Sende Chunk {chunk_start//max_single_message + 1}: {len(chunk_data)} bytes")
+
+                    # Rekursiver Aufruf für jeden Chunk
+                    self._send_rtcm_via_mavlink_tunnel(chunk_data)
+
+                return
+
+            # Anzahl Pakete berechnen (inkl. Termination-Paket wenn nötig)
+            # Mission Planner Logik: immer +1 für Termination
+            nopackets = (length // msglen) + 1 if (length % msglen) == 0 else (length // msglen) + 1
+            if nopackets >= 4:
+                nopackets = 4
 
             if not self.quiet:
-                print(f"📡 {total_sent} bytes RTCM-Daten (validiert) an FC gesendet.")
+                print(f"📡 Sende {length} bytes RTCM in {nopackets} Paketen (Seq: {self.inject_seq_no})")
+
+            # Sende Fragmente
+            for a in range(nopackets):
+                # Flags berechnen (Mission Planner Logik)
+                flags = 0
+
+                # Fragment-Flag setzen wenn mehr als 1 Paket
+                if nopackets > 1:
+                    flags = 1
+
+                # Fragment-Nummer hinzufügen (2 bits)
+                flags += (a & 0x3) << 1
+
+                # Sequenz-Nummer hinzufügen (5 bits)
+                flags += (self.inject_seq_no & 0x1f) << 3
+
+                # Leeres Array erstellen (Mission Planner macht das so)
+                data_array = [0] * msglen
+
+                # Tatsächliche Daten kopieren
+                copy_len = min(length - a * msglen, msglen)
+                if copy_len > 0:
+                    chunk = rtcm_data[a * msglen:a * msglen + copy_len]
+                    for i, byte in enumerate(chunk):
+                        data_array[i] = byte
+
+                # MAVLink GPS_RTCM_DATA Nachricht erstellen
+                mavlink_msg = self.mavlink_instance.gps_rtcm_data_encode(
+                    flags,      # flags (Fragment + Sequenz Info)
+                    copy_len,   # len (tatsächliche Datenlänge)
+                    data_array  # data (180 bytes, mit Nullen aufgefüllt)
+                )
+
+                self._send_mavlink_via_tunnel(mavlink_msg)
+                total_sent += copy_len
+
+                if not self.quiet:
+                    print(f"    📦 Fragment {a+1}/{nopackets}: flags=0x{flags:02X}, len={copy_len}")
+
+                time.sleep(0.01)  # Kurze Pause zwischen Fragmenten
+
+            # Sequenz-Nummer erhöhen (Mission Planner macht das)
+            self.inject_seq_no = (self.inject_seq_no + 1) & 0xFF
+
+            if not self.quiet:
+                print(f"✅ {total_sent} bytes RTCM-Daten erfolgreich fragmentiert gesendet")
 
         except Exception as e:
             if not self.quiet:
                 print(f"❌ Fehler beim Senden von RTCM-Daten: {e}")
+                import traceback
+                traceback.print_exc()
 
     def _send_mavlink_via_tunnel(self, mavlink_msg):
         """Fragmentiert eine MAVLink-Nachricht für den DroneCAN-Tunnel."""
