@@ -82,8 +82,9 @@ This project implements a complete autonomous UGV system featuring:
 
 Testing and configuration utilities for CAN communication:
 
-### DroneCAN Tools (`tools/dronecan/`)
-- **`send_dronecan_actuator_commands.py`** - DroneCAN command testing
+### CAN Testing Tools
+- **`candump`** - Monitor CAN traffic on Raspberry Pi
+- **`cansend`** - Send test CAN messages
 
 ## 🚀 Quick Start
 

@@ -1,24 +1,15 @@
-# 🛠️ Quassel UGV - CAN Testing Tools
+# 🛠️ Quassel UGV - CAN Communication Tools
 
-Essential tools for testing and configuring the CAN bus communication system.
+Essential tools for testing and configuring the new CAN bus architecture.
 
 ## 📁 Directory Structure
 
 ```
 tools/
-├── dronecan/                      # CAN testing tools
-│   ├── send_dronecan_actuator_commands.py  # Send test commands
-│   └── README.md                  # CAN tools guide
 └── README.md                      # This file
 ```
 
 ## 🚀 Quick Start
-
-### CAN Testing
-```bash
-cd tools/dronecan
-python send_dronecan_actuator_commands.py --port COM5
-```
 
 ### Monitor CAN Traffic
 ```bash
@@ -32,11 +23,17 @@ candump can0
 cansend can0 123#DEADBEEF
 ```
 
+### View CAN Interface Status
+```bash
+# On Raspberry Pi
+ip link show can0
+```
+
 ## 📋 Prerequisites
 
 ### Python Dependencies
 ```bash
-pip install dronecan python-can
+pip install python-can
 ```
 
 ### Hardware Requirements
@@ -44,26 +41,19 @@ pip install dronecan python-can
 - CAN bus connection between Sensor Hub and Controller
 - Proper CAN termination (120Ω resistors)
 
-## 🔧 Tool Overview
+## 🔧 CAN Architecture Overview
 
-### DroneCAN Tools (`dronecan/`)
+### Sensor Hub (Pi Zero 2W)
+- **Holybro UM982 RTK-GPS**: Dual-antenna for position and heading
+- **ICM-42688-P IMU**: 6-DoF accelerometer and gyroscope
+- **PiCAN FD**: CAN interface (500 kbit/s)
+- **Sends**: GPS position, heading, RTK status, IMU orientation
 
-#### `send_dronecan_actuator_commands.py`
-**Purpose**: Send test actuator commands via CAN bus
-**Features**:
-- Oscillating motor commands (0-100%)
-- Configurable CAN port and bitrate
-- Real-time command feedback
-- Support for multiple CAN interfaces
-
-**Usage**:
-```bash
-python send_dronecan_actuator_commands.py --port COM5 --bitrate 1000000
-```
-
-**Options**:
-- `--port, -p`: CAN interface (default: COM5)
-- `--bitrate, -b`: CAN bitrate (default: 1000000)
+### Controller (Pi 3)
+- **Motor Controller**: Receives CAN messages from sensor hub
+- **Web Interface**: Real-time Bing Maps display
+- **PiCAN FD**: CAN interface (1 Mbps for motor control)
+- **Receives**: Sensor data from hub
 
 ## 🔗 Integration Workflow
 
@@ -74,47 +64,25 @@ ip link show can0
 candump can0
 ```
 
-### 2. Send Test Commands
+### 2. Monitor Sensor Data
 ```bash
-cd tools/dronecan
-python send_dronecan_actuator_commands.py --port COM5
+# On Raspberry Pi - watch CAN messages
+candump can0 -c
 ```
 
-### 3. Monitor Responses
-```bash
-# On Raspberry Pi
-candump can0
-```
-
-### 4. Verify Communication
+### 3. Verify Communication
 - Check CAN messages are received
 - Verify message format and content
-- Confirm bidirectional communication
+- Confirm bidirectional communication between hub and controller
 
 ## 🐛 Troubleshooting
 
 ### Common Issues
 
-#### "No module named 'dronecan'"
-```bash
-pip install dronecan
-```
-
 #### "No module named 'python-can'"
 ```bash
 pip install python-can
 ```
-
-#### "Could not open port COM5"
-- Check USB-CAN adapter connection
-- Verify correct COM port in Device Manager
-- Try different USB cable/port
-
-#### "No CAN messages received"
-- Verify CAN wiring (CANH, CANL, GND)
-- Check 120Ω termination resistors
-- Confirm CAN bitrate (500 kbit/s for sensor hub, 1 Mbps for motor control)
-- Ensure both devices have same bitrate
 
 #### "CAN interface not found"
 ```bash
@@ -123,6 +91,18 @@ ip link show can0
 
 # If not found, check boot config
 cat /boot/firmware/config.txt | grep mcp2515
+```
+
+#### "No CAN messages received"
+- Verify CAN wiring (CANH, CANL, GND)
+- Check 120Ω termination resistors
+- Confirm CAN bitrate (500 kbit/s for sensor hub, 1 Mbps for motor control)
+- Ensure both devices have same bitrate
+
+#### "CAN interface down"
+```bash
+# On Raspberry Pi - bring interface up
+sudo ip link set can0 up type can bitrate 500000
 ```
 
 ## 📊 Expected Output
@@ -134,7 +114,7 @@ Sensor Hub:
 🧭 Heading: 45.2° (Dual-Antenna)
 📊 RTK Status: FIXED
 📐 Roll: +2.3°, Pitch: -1.8°
-🚀 CAN Message sent (ID: 0x123)
+🚀 CAN Message sent
 
 Controller:
 ✅ Received sensor data from hub
@@ -152,7 +132,7 @@ Controller:
 
 ## 📞 Support
 
-For issues with these tools:
+For issues with CAN communication:
 
 1. **Check hardware connections** - CAN bus, power, USB
 2. **Verify software dependencies** - Python packages installed
@@ -161,10 +141,10 @@ For issues with these tools:
 
 ## 🔄 Development
 
-These tools are designed for:
-- ✅ **System validation** - Verify complete communication chain
-- ✅ **Development testing** - Rapid iteration and debugging
-- ✅ **Configuration management** - Easy parameter adjustment
-- ✅ **Troubleshooting** - Isolate and identify issues
+The new CAN architecture is designed for:
+- ✅ **Modular design** - Separate sensor hub and controller
+- ✅ **Real-time communication** - 50 Hz sensor fusion updates
+- ✅ **Scalability** - Easy to add new sensors or controllers
+- ✅ **Reliability** - Redundant communication paths
 
-All tools maintain compatibility with the Quassel UGV RTK-GPS + IMU system.
+All components maintain compatibility with the Quassel UGV RTK-GPS + IMU system.
