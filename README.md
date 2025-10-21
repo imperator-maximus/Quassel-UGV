@@ -519,18 +519,7 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 - CAN bus communication challenges
 - Multiple timeout and reset issues
 
-### Phase 2: Beyond Robotics Migration
-- Switched to STM32L431-based Beyond Robotics Dev Board
-- Integrated official Arduino DroneCAN library
-- Resolved CAN communication stability issues
-
-### Phase 3: Orange Cube Integration
-- Migrated to Orange Cube flight controller
-- Implemented DroneCAN ESC control
-- **⚠️ Abandoned due to CAN bug**: https://github.com/ArduPilot/ardupilot/issues/31212
-- **Note**: Bug report filed but no response from ArduPilot team
-
-### Phase 4: RTK-GPS + IMU System (Current)
+### Phase 2: RTK-GPS + IMU System (Current)
 - Switched to Holybro UM982 dual-antenna RTK-GPS
 - Added ICM-42688-P 6-DoF IMU
 - Implemented sensor fusion on Pi Zero 2W
@@ -584,11 +573,6 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 - ✅ CAN bus communication
 - ✅ Web interface framework
 - 🔄 Real-time sensor fusion and mapping
-
-**Why Orange Cube Was Abandoned:**
-- ⚠️ **CAN Bug**: https://github.com/ArduPilot/ardupilot/issues/31212
-- **Status**: Bug report filed but no response from ArduPilot team
-- **Decision**: Switched to dedicated RTK-GPS + IMU system for superior positioning
 
 **Current Focus:**
 - 🗺️ Bing Maps satellite view integration
