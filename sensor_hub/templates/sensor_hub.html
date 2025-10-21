@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>👑 Quassel UGV - Sensor Hub 👑</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Georgia', 'Times New Roman', serif;
+            background: linear-gradient(135deg, #2d5016 0%, #4a7c59 50%, #1a3d0f 100%);
+            color: #f5f5dc;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: linear-gradient(135deg, rgba(212, 175, 55, 0.15) 0%, rgba(45, 80, 22, 0.25) 100%);
+            padding: 30px;
+            text-align: center;
+            border-bottom: 3px solid rgba(212, 175, 55, 0.4);
+            border-radius: 10px;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            color: #ffd700;
+            font-weight: bold;
+            letter-spacing: 2px;
+            text-shadow: 3px 3px 8px rgba(0, 0, 0, 0.8);
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 1.1em;
+            color: #d4af37;
+            opacity: 0.9;
+        }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .status-card {
+            background: rgba(45, 80, 22, 0.4);
+            border: 2px solid rgba(212, 175, 55, 0.3);
+            border-radius: 10px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .status-card h2 {
+            color: #d4af37;
+            font-size: 1.3em;
+            margin-bottom: 15px;
+            border-bottom: 2px solid rgba(212, 175, 55, 0.3);
+            padding-bottom: 10px;
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(212, 175, 55, 0.1);
+        }
+
+        .status-item:last-child {
+            border-bottom: none;
+        }
+
+        .status-label {
+            color: #d4af37;
+            font-weight: bold;
+        }
+
+        .status-value {
+            color: #f5f5dc;
+            font-family: 'Courier New', monospace;
+            font-size: 1.1em;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .badge-no-gps {
+            background: #8b0000;
+            color: #fff;
+        }
+
+        .badge-gps-fix {
+            background: #ff8c00;
+            color: #fff;
+        }
+
+        .badge-rtk-float {
+            background: #ffd700;
+            color: #000;
+        }
+
+        .badge-rtk-fixed {
+            background: #00aa00;
+            color: #fff;
+        }
+
+        .coordinates-section {
+            background: rgba(45, 80, 22, 0.4);
+            border: 2px solid rgba(212, 175, 55, 0.3);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 30px;
+            backdrop-filter: blur(10px);
+        }
+
+        .coordinates-section h2 {
+            color: #d4af37;
+            font-size: 1.3em;
+            margin-bottom: 15px;
+        }
+
+        .coordinate-display {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 1.1em;
+        }
+
+        .coordinate-label {
+            color: #d4af37;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .coordinate-value {
+            color: #f5f5dc;
+            word-break: break-all;
+        }
+
+        .bing-maps-link {
+            display: inline-block;
+            background: linear-gradient(135deg, #d4af37 0%, #ffd700 100%);
+            color: #000;
+            padding: 12px 24px;
+            border-radius: 5px;
+            text-decoration: none;
+            font-weight: bold;
+            transition: transform 0.2s;
+            border: none;
+            cursor: pointer;
+            font-size: 1em;
+        }
+
+        .bing-maps-link:hover {
+            transform: scale(1.05);
+        }
+
+        .update-info {
+            text-align: center;
+            color: #d4af37;
+            font-size: 0.9em;
+            margin-top: 20px;
+            opacity: 0.8;
+        }
+
+        .loading {
+            text-align: center;
+            color: #d4af37;
+            font-size: 1.2em;
+            padding: 20px;
+        }
+
+        .error {
+            background: rgba(139, 0, 0, 0.3);
+            border: 2px solid #8b0000;
+            color: #ff6b6b;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>👑 Quassel UGV - Sensor Hub 👑</h1>
+            <p>RTK-GPS + IMU Sensor Fusion</p>
+        </div>
+
+        <div id="error-container"></div>
+
+        <div class="status-grid">
+            <div class="status-card">
+                <h2>📡 GPS Status</h2>
+                <div class="status-item">
+                    <span class="status-label">RTK Status:</span>
+                    <span class="status-value">
+                        <span id="rtk-status" class="status-badge badge-no-gps">NO GPS</span>
+                    </span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Satelliten:</span>
+                    <span class="status-value" id="satellites">0</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Höhe:</span>
+                    <span class="status-value" id="altitude">0.0 m</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Heading:</span>
+                    <span class="status-value" id="heading">0.0°</span>
+                </div>
+            </div>
+
+            <div class="status-card">
+                <h2>🔗 Verbindung</h2>
+                <div class="status-item">
+                    <span class="status-label">GPS verbunden:</span>
+                    <span class="status-value" id="gps-connected">
+                        <span class="status-badge badge-no-gps">OFFLINE</span>
+                    </span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">NTRIP/RTK:</span>
+                    <span class="status-value" id="ntrip-connected">
+                        <span class="status-badge badge-no-gps">OFFLINE</span>
+                    </span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Letzte Aktualisierung:</span>
+                    <span class="status-value" id="last-update">-</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">RTK Uptime:</span>
+                    <span class="status-value" id="rtk-uptime">0s</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="coordinates-section">
+            <h2>📍 Koordinaten</h2>
+            <div class="coordinate-display">
+                <div class="coordinate-label">Latitude:</div>
+                <div class="coordinate-value" id="latitude">0.0000°</div>
+            </div>
+            <div class="coordinate-display">
+                <div class="coordinate-label">Longitude:</div>
+                <div class="coordinate-value" id="longitude">0.0000°</div>
+            </div>
+            <div class="coordinate-display">
+                <div class="coordinate-label">Bing Maps Link:</div>
+                <div class="coordinate-value">
+                    <a id="bing-maps-link" href="#" class="bing-maps-link" target="_blank">
+                        🗺️ Auf Bing Maps öffnen
+                    </a>
+                </div>
+            </div>
+            <div class="update-info">
+                Auto-Update alle 2 Sekunden
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '/api';
+        const UPDATE_INTERVAL = 2000; // 2 Sekunden
+
+        function updateStatus() {
+            fetch(`${API_BASE}/status`)
+                .then(response => response.json())
+                .then(data => {
+                    const gps = data.gps;
+                    
+                    // RTK Status Badge
+                    const statusBadge = document.getElementById('rtk-status');
+                    statusBadge.textContent = gps.rtk_status;
+                    statusBadge.className = 'status-badge';
+                    
+                    if (gps.rtk_status === 'NO GPS') {
+                        statusBadge.classList.add('badge-no-gps');
+                    } else if (gps.rtk_status === 'GPS FIX') {
+                        statusBadge.classList.add('badge-gps-fix');
+                    } else if (gps.rtk_status === 'RTK FLOAT') {
+                        statusBadge.classList.add('badge-rtk-float');
+                    } else if (gps.rtk_status === 'RTK FIXED') {
+                        statusBadge.classList.add('badge-rtk-fixed');
+                    }
+                    
+                    // Andere Werte
+                    document.getElementById('satellites').textContent = gps.satellites;
+                    document.getElementById('altitude').textContent = gps.altitude.toFixed(1) + ' m';
+                    document.getElementById('heading').textContent = gps.heading.toFixed(1) + '°';
+                    
+                    // GPS verbunden
+                    const connectedBadge = document.getElementById('gps-connected');
+                    if (gps.is_connected) {
+                        connectedBadge.innerHTML = '<span class="status-badge" style="background: #00aa00; color: #fff;">ONLINE</span>';
+                    } else {
+                        connectedBadge.innerHTML = '<span class="status-badge badge-no-gps">OFFLINE</span>';
+                    }
+
+                    // Letzte Aktualisierung
+                    if (gps.last_update_time) {
+                        const date = new Date(gps.last_update_time);
+                        document.getElementById('last-update').textContent = date.toLocaleTimeString('de-DE');
+                    }
+                })
+                .catch(error => {
+                    console.error('Status Update Fehler:', error);
+                    showError('Fehler beim Abrufen des Status');
+                });
+
+            // Bridge Status aktualisieren
+            fetch(`${API_BASE}/bridge/status`)
+                .then(response => response.json())
+                .then(data => {
+                    // NTRIP verbunden
+                    const nrtipBadge = document.getElementById('ntrip-connected');
+                    if (data.ntrip.connected) {
+                        nrtipBadge.innerHTML = '<span class="status-badge" style="background: #00aa00; color: #fff;">ONLINE</span>';
+                    } else {
+                        nrtipBadge.innerHTML = '<span class="status-badge badge-no-gps">OFFLINE</span>';
+                    }
+
+                    // RTK Uptime
+                    const uptime = Math.floor(data.rtk_uptime);
+                    if (uptime > 0) {
+                        const hours = Math.floor(uptime / 3600);
+                        const minutes = Math.floor((uptime % 3600) / 60);
+                        const seconds = uptime % 60;
+                        let uptimeStr = '';
+                        if (hours > 0) uptimeStr += hours + 'h ';
+                        if (minutes > 0) uptimeStr += minutes + 'm ';
+                        uptimeStr += seconds + 's';
+                        document.getElementById('rtk-uptime').textContent = uptimeStr;
+                    } else {
+                        document.getElementById('rtk-uptime').textContent = '0s';
+                    }
+                })
+                .catch(error => {
+                    console.error('Bridge Status Update Fehler:', error);
+                });
+            
+            // Koordinaten aktualisieren
+            fetch(`${API_BASE}/coordinates`)
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('latitude').textContent = data.latitude.toFixed(6) + '°';
+                    document.getElementById('longitude').textContent = data.longitude.toFixed(6) + '°';
+                    
+                    const link = document.getElementById('bing-maps-link');
+                    link.href = data.bing_maps_url;
+                })
+                .catch(error => {
+                    console.error('Koordinaten Update Fehler:', error);
+                });
+        }
+
+        function showError(message) {
+            const container = document.getElementById('error-container');
+            container.innerHTML = `<div class="error">⚠️ ${message}</div>`;
+            setTimeout(() => {
+                container.innerHTML = '';
+            }, 5000);
+        }
+
+        // Initial update
+        updateStatus();
+
+        // Periodisches Update
+        setInterval(updateStatus, UPDATE_INTERVAL);
+    </script>
+</body>
+</html>
+

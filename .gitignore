@@ -95,6 +95,11 @@ logs/*.log
 *.bak
 *.backup
 
+# Environment Variables - NIEMALS committen!
+.env
+.env.local
+.env.*.local
+
 # STM32 specific
 *.bin
 *.hex
