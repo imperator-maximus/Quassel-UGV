@@ -209,6 +209,36 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
 - **Interface**: can0 on both Pi Zero 2W and Pi 3
 - **TX Queue**: Configured with txqueuelen=1000 for improved buffer performance
 
+### JSON CAN Protocol
+**Sensor Hub → Controller (Continuous, 50Hz):**
+```json
+{
+  "gps": {"lat": 53.8234, "lon": 10.4567, "altitude": 45.2},
+  "heading": 45.2,
+  "rtk_status": "FIXED",
+  "imu": {"roll": 2.3, "pitch": -1.8},
+  "timestamp": 1234567890.123
+}
+```
+
+**Controller → Sensor Hub (On-Demand):**
+```json
+// Status request
+{"request": "sensor_status"}
+
+// Restart sensor hub
+{"cmd": "restart"}
+```
+
+**Sensor Hub Response to Status Request:**
+```json
+{
+  "gps": {"status": "OK", "satellites": 12, "last_update": 0.02},
+  "imu": {"status": "OK", "temperature": 28.5},
+  "can": {"status": "OK", "messages_sent": 1250}
+}
+```
+
 ## 🔧 Key Features
 
 ### Sensor Integration
@@ -515,7 +545,7 @@ tail -f /var/log/ugv_app.log
 This project evolved from an Orange Cube-based implementation to the current RTK-GPS + IMU system:
 
 ### Phase 1: ESP32 Prototype (`archive/esp32_files/`)
-- Initial DroneCAN implementation
+- Initial CAN implementation attempts
 - CAN bus communication challenges
 - Multiple timeout and reset issues
 
@@ -524,6 +554,7 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 - Added ICM-42688-P 6-DoF IMU
 - Implemented sensor fusion on Pi Zero 2W
 - Created web interface with Bing Maps
+- Implemented JSON-based CAN protocol for robust communication
 - Achieved superior positioning and orientation capabilities
 
 ## 🤝 Contributing
@@ -570,9 +601,15 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 **Key Achievements:**
 - ✅ Sensor hub architecture (Pi Zero 2W + PiCAN FD)
 - ✅ RTK-GPS + IMU integration
-- ✅ CAN bus communication
-- ✅ Web interface framework
+- ✅ JSON-based CAN communication (robust, human-readable)
+- ✅ Web interface framework with motor control
 - 🔄 Real-time sensor fusion and mapping
+
+**Communication Architecture:**
+- **Sensor Hub → Controller**: JSON CAN messages (50Hz sensor data)
+- **Controller → Sensor Hub**: JSON CAN commands (status requests, restart)
+- **Web Interface**: WebSocket for real-time updates and joystick control
+- **Fallback**: CAN bus remains operational even if WiFi fails
 
 **Current Focus:**
 - 🗺️ Bing Maps satellite view integration
@@ -581,5 +618,6 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 - 📊 RTK status monitoring
 - 🛤️ Trail visualization
 - 📐 IMU-based orientation display
+- 🎮 Web-based joystick control with CAN enable/disable
 
-The project is actively being developed with focus on autonomous navigation capabilities.
+The project is actively being developed with focus on autonomous navigation capabilities and robust communication.
