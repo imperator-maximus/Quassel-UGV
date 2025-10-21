@@ -176,7 +176,10 @@ class GPSHandler:
     
     def get_bing_maps_url(self) -> str:
         """Generiert Bing Maps URL für aktuelle Position"""
-        if self.latitude and self.longitude:
-            return f"https://www.bing.com/maps?cp={self.latitude}~{self.longitude}&lvl=18"
+        with self.lock:
+            # Prüfe auf einen validen Status, nicht nur auf Koordinaten != 0
+            # (0.0, 0.0) wäre Äquator vor Afrikas Küste - nicht sinnvoll)
+            if self.rtk_status not in ["NO GPS", ""]:
+                return f"https://www.bing.com/maps?cp={self.latitude}~{self.longitude}&lvl=18"
         return "https://www.bing.com/maps"
 

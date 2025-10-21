@@ -116,6 +116,10 @@ class GPSNTRIPBridge:
                     if raw_gga:
                         self.ntrip.send_gga_data(raw_gga)
                         self.last_gga_send_time = now
+                    else:
+                        # Warnung: Kein gültiger GGA-Satz verfügbar
+                        # Dies deutet auf schlechten GPS-Empfang hin
+                        logger.warning("⚠️  Wollte GPGGA an NTRIP senden, aber kein gültiger Satz vom GPS verfügbar. Prüfe GPS-Antenne und Himmelssicht!")
 
                 time.sleep(1.0)
 
