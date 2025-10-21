@@ -176,6 +176,22 @@ class NTRIPClient:
             'connection_attempts': self.connection_attempts
         }
     
+    def send_gga_data(self, gga_sentence: str):
+        """
+        Sendet einen GPGGA-Satz an den NTRIP-Server
+        Wichtig: Der Server braucht die Position für VRS (Virtuelle Referenzstation)
+
+        Args:
+            gga_sentence: Roher GGA-Satz (z.B. "$GNGGA,...")
+        """
+        if self.is_connected():
+            try:
+                # GGA-Satz mit CRLF senden
+                self.socket.sendall(gga_sentence.encode('ascii') + b'\r\n')
+                logger.debug(f"📤 GPGGA an NTRIP gesendet: {gga_sentence[:50]}...")
+            except Exception as e:
+                logger.warning(f"⚠️ Fehler beim Senden von GPGGA: {e}")
+
     def reconnect_if_needed(self):
         """Versucht zu reconnecten wenn nötig"""
         if not self.connected and self.running:

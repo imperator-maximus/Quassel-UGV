@@ -19,7 +19,7 @@ class GPSNTRIPBridge:
     def __init__(self, gps: GPSHandler, ntrip: NTRIPClient):
         """
         Initialisiert GPS-NTRIP Bridge
-        
+
         Args:
             gps: GPSHandler Instanz
             ntrip: NTRIPClient Instanz
@@ -28,7 +28,7 @@ class GPSNTRIPBridge:
         self.ntrip = ntrip
         self.running = False
         self.monitor_thread = None
-        
+
         # Statistiken
         self.rtk_fix_count = 0
         self.rtk_float_count = 0
@@ -36,6 +36,10 @@ class GPSNTRIPBridge:
         self.last_rtk_status = "NO GPS"
         self.rtk_fix_time = None
         self.rtk_uptime = 0
+
+        # GPGGA Versand (für NTRIP VRS)
+        self.last_gga_send_time = 0
+        self.gga_send_interval = 10.0  # Alle 10 Sekunden
     
     def start(self) -> bool:
         """Startet die Bridge"""
@@ -74,10 +78,9 @@ class GPSNTRIPBridge:
     def _on_ntrip_data(self, data: bytes):
         """Callback wenn NTRIP-Daten empfangen werden"""
         try:
-            # NTRIP-Daten an GPS-Gerät senden
-            if self.gps.serial_port and self.gps.serial_port.is_open:
-                self.gps.serial_port.write(data)
-                logger.debug(f"📤 {len(data)} Bytes NTRIP-Daten an GPS gesendet")
+            # NTRIP-Daten an GPS-Gerät senden (über öffentliche Methode für Kapselung)
+            self.gps.write_data(data)
+            logger.debug(f"📤 {len(data)} Bytes NTRIP-Daten an GPS gesendet")
         except Exception as e:
             logger.warning(f"⚠️  Fehler beim Senden von NTRIP-Daten: {e}")
     
@@ -87,16 +90,16 @@ class GPSNTRIPBridge:
             try:
                 # NTRIP Reconnect wenn nötig
                 self.ntrip.reconnect_if_needed()
-                
+
                 # RTK-Status überwachen
                 gps_status = self.gps.get_status()
                 current_rtk_status = gps_status['rtk_status']
-                
+
                 # Status-Änderungen tracken
                 if current_rtk_status != self.last_rtk_status:
                     self._on_rtk_status_changed(self.last_rtk_status, current_rtk_status)
                     self.last_rtk_status = current_rtk_status
-                
+
                 # RTK-Uptime berechnen
                 if current_rtk_status == "RTK FIXED":
                     if self.rtk_fix_time is None:
@@ -105,9 +108,17 @@ class GPSNTRIPBridge:
                 else:
                     self.rtk_fix_time = None
                     self.rtk_uptime = 0
-                
+
+                # GPGGA periodisch an NTRIP senden (für VRS - Virtuelle Referenzstation)
+                now = time.time()
+                if self.ntrip.is_connected() and now - self.last_gga_send_time > self.gga_send_interval:
+                    raw_gga = self.gps.get_last_raw_gga()
+                    if raw_gga:
+                        self.ntrip.send_gga_data(raw_gga)
+                        self.last_gga_send_time = now
+
                 time.sleep(1.0)
-            
+
             except Exception as e:
                 logger.warning(f"⚠️  Monitor-Fehler: {e}")
                 time.sleep(1.0)
