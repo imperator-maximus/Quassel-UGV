@@ -1,219 +1,154 @@
-# 🛠️ Beyond Robotics DroneCAN Tools
+# 🛠️ Quassel UGV - CAN Testing Tools
 
-Essential tools for testing and configuring the Beyond Robotics DroneCAN Motor Controller system.
+Essential tools for testing and configuring the CAN bus communication system.
 
 ## 📁 Directory Structure
 
 ```
 tools/
-├── orange_cube/                    # Orange Cube MAVLink tools
-│   ├── monitor_orange_cube.py     # Complete monitoring & control
-│   ├── set_can_parameters.py      # CAN configuration
-│   └── README.md                  # Orange Cube tools guide
-├── dronecan/                      # DroneCAN testing tools
+├── dronecan/                      # CAN testing tools
 │   ├── send_dronecan_actuator_commands.py  # Send test commands
-│   └── README.md                  # DroneCAN tools guide
-├── wifi_tester.py                 # WiFi Bridge connectivity test
+│   └── README.md                  # CAN tools guide
 └── README.md                      # This file
 ```
 
 ## 🚀 Quick Start
 
-### Orange Cube Monitoring
+### CAN Testing
 ```bash
-cd tools/orange_cube
-python monitor_orange_cube.py
-```
-
-### DroneCAN Testing
-```bash
-cd tools/dronecan  
+cd tools/dronecan
 python send_dronecan_actuator_commands.py --port COM5
 ```
 
-### CAN Configuration
+### Monitor CAN Traffic
 ```bash
-cd tools/orange_cube
-python set_can_parameters.py
+# On Raspberry Pi
+candump can0
 ```
 
-### WiFi Bridge Testing
+### Send Test Messages
 ```bash
-cd tools
-python wifi_tester.py
+# On Raspberry Pi
+cansend can0 123#DEADBEEF
 ```
 
 ## 📋 Prerequisites
 
 ### Python Dependencies
 ```bash
-pip install pymavlink dronecan
+pip install dronecan python-can
 ```
 
 ### Hardware Requirements
-- Orange Cube connected via USB (typically COM4)
-- CAN bus connection between Orange Cube and Beyond Robotics board
+- Raspberry Pi with PiCAN FD
+- CAN bus connection between Sensor Hub and Controller
 - Proper CAN termination (120Ω resistors)
 
 ## 🔧 Tool Overview
 
-### Orange Cube Tools (`orange_cube/`)
-
-#### `monitor_orange_cube.py`
-**Purpose**: Complete MAVLink monitoring and control interface
-**Features**:
-- Real-time parameter monitoring
-- Servo output testing (RC override)
-- Vehicle arming/disarming
-- DroneCAN parameter display
-- System reboot capability
-
-**Usage**:
-```bash
-python monitor_orange_cube.py
-```
-
-#### `set_can_parameters.py`
-**Purpose**: Configure Orange Cube CAN settings for DroneCAN
-**Features**:
-- Set CAN bitrate (1Mbps)
-- Configure DroneCAN protocol
-- Set node IDs and ESC bitmasks
-- Enable BLHeli servo outputs
-
-**Usage**:
-```bash
-python set_can_parameters.py
-```
-
 ### DroneCAN Tools (`dronecan/`)
 
 #### `send_dronecan_actuator_commands.py`
-**Purpose**: Send test actuator commands via DroneCAN
+**Purpose**: Send test actuator commands via CAN bus
 **Features**:
 - Oscillating motor commands (0-100%)
 - Configurable CAN port and bitrate
 - Real-time command feedback
+- Support for multiple CAN interfaces
 
 **Usage**:
 ```bash
 python send_dronecan_actuator_commands.py --port COM5 --bitrate 1000000
 ```
 
-### WiFi Bridge Tools
-
-#### `wifi_tester.py`
-**Purpose**: Test WiFi Bridge connectivity to Orange Cube before Lua script upload
-**Features**:
-- UDP connection test (CRITICAL: Must use UDP, not TCP!)
-- Heartbeat verification
-- Parameter access test with proper Component ID handling
-- System status monitoring
-- Automatic fallback port testing
-
-**Usage**:
-```bash
-python wifi_tester.py
-```
-
-**Key Learning**: After 54 test scripts, the critical fix was:
-- ✅ **UDP Connection**: Use `udpin:0.0.0.0:14550` instead of TCP
-- ✅ **Component ID**: Use `MAV_COMP_ID_AUTOPILOT1` for parameter requests
-- ✅ **Firmware Bug**: Orange Cube WiFi Bridge had parameter storage issues
+**Options**:
+- `--port, -p`: CAN interface (default: COM5)
+- `--bitrate, -b`: CAN bitrate (default: 1000000)
 
 ## 🔗 Integration Workflow
 
-### 1. Configure Orange Cube
+### 1. Test CAN Interface
 ```bash
-cd tools/orange_cube
-python set_can_parameters.py
+# On Raspberry Pi
+ip link show can0
+candump can0
 ```
 
-### 2. Monitor System
+### 2. Send Test Commands
 ```bash
-python monitor_orange_cube.py
-# Select option 2: Monitor messages
+cd tools/dronecan
+python send_dronecan_actuator_commands.py --port COM5
 ```
 
-### 3. Test DroneCAN Communication
+### 3. Monitor Responses
 ```bash
-cd ../dronecan
-python send_dronecan_actuator_commands.py
+# On Raspberry Pi
+candump can0
 ```
 
-### 4. Verify Motor Controller
-- Check Beyond Robotics board serial output
-- Verify PWM signals on motor pins
-- Confirm safety timeout behavior
+### 4. Verify Communication
+- Check CAN messages are received
+- Verify message format and content
+- Confirm bidirectional communication
 
 ## 🐛 Troubleshooting
 
 ### Common Issues
-
-#### "No module named 'pymavlink'"
-```bash
-pip install pymavlink
-```
 
 #### "No module named 'dronecan'"
 ```bash
 pip install dronecan
 ```
 
-#### "Could not open port COM4"
-- Check Orange Cube USB connection
+#### "No module named 'python-can'"
+```bash
+pip install python-can
+```
+
+#### "Could not open port COM5"
+- Check USB-CAN adapter connection
 - Verify correct COM port in Device Manager
 - Try different USB cable/port
 
 #### "No CAN messages received"
 - Verify CAN wiring (CANH, CANL, GND)
 - Check 120Ω termination resistors
-- Confirm CAN bitrate (1Mbps)
+- Confirm CAN bitrate (500 kbit/s for sensor hub, 1 Mbps for motor control)
 - Ensure both devices have same bitrate
 
-#### "Orange Cube not responding"
-- Check power supply (5V, adequate current)
-- Verify firmware compatibility
-- Try system reboot via monitor tool
+#### "CAN interface not found"
+```bash
+# On Raspberry Pi
+ip link show can0
 
-#### WiFi Bridge Connection Issues
+# If not found, check boot config
+cat /boot/firmware/config.txt | grep mcp2515
 ```
-❌ WiFi Verbindung fehlgeschlagen: strip arg must be None or str
-```
-**Solutions:**
-- ✅ **Use UDP**: Connection string must be `udpin:0.0.0.0:14550` (not TCP!)
-- ✅ **Component ID**: Use `MAV_COMP_ID_AUTOPILOT1` for parameter requests
-- ✅ **Parameter Decoding**: Handle both bytes and string param_id types
-- ✅ **Network**: Verify Orange Cube IP is reachable (ping 192.168.178.101)
-- ✅ **Port**: Test alternative ports 14551, 5760, 5761 if 14550 fails
-
-#### WiFi Bridge Parameter Storage Bug
-```
-Parameters not saved permanently
-```
-**Background**: Orange Cube WiFi Bridge firmware had a bug preventing permanent parameter storage, leading to 54 test scripts before finding the UDP solution.
 
 ## 📊 Expected Output
 
 ### Successful CAN Communication
 ```
-Orange Cube Monitor:
-Parameter: CAN_D1_PROTOCOL = 1.0
-Parameter: CAN_P1_BITRATE = 1000000.0
-Parameter: CAN_D1_UC_NODE = 10.0
+Sensor Hub:
+📡 GPS Position: 53.8234°N, 10.4567°E
+🧭 Heading: 45.2° (Dual-Antenna)
+📊 RTK Status: FIXED
+📐 Roll: +2.3°, Pitch: -1.8°
+🚀 CAN Message sent (ID: 0x123)
 
-Beyond Robotics Board:
-🚀 ESC Command: [1500, 1500, 1500, 1500]
-🔓 Motors ARMED by ESC command
-⚙️ Motors: ARMED PWM:[1500,1500,1500,1500]
+Controller:
+✅ Received sensor data from hub
+📍 Position: 53.8234°N, 10.4567°E
+🧭 Heading: 45.2°
+📊 RTK: FIXED
 ```
 
 ### System Status Indicators
-- 🚀 ESC commands received
-- 🔓 Motor arming events  
-- ⚙️ Motor status updates
-- 🔋 Battery information
-- ⚠️ Safety warnings
+- 📡 GPS data received
+- 🧭 Heading calculated
+- 📊 RTK status displayed
+- 📐 IMU orientation available
+- 🚀 CAN messages transmitted
 
 ## 📞 Support
 
@@ -221,15 +156,15 @@ For issues with these tools:
 
 1. **Check hardware connections** - CAN bus, power, USB
 2. **Verify software dependencies** - Python packages installed
-3. **Review serial output** - Both Orange Cube and Beyond Robotics board
+3. **Review CAN traffic** - Use candump to monitor messages
 4. **Test individual components** - Use tools separately to isolate issues
 
 ## 🔄 Development
 
 These tools are designed for:
 - ✅ **System validation** - Verify complete communication chain
-- ✅ **Development testing** - Rapid iteration and debugging  
+- ✅ **Development testing** - Rapid iteration and debugging
 - ✅ **Configuration management** - Easy parameter adjustment
 - ✅ **Troubleshooting** - Isolate and identify issues
 
-All tools maintain compatibility with the refactored Beyond Robotics DroneCAN Motor Controller.
+All tools maintain compatibility with the Quassel UGV RTK-GPS + IMU system.

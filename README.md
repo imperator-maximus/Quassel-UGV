@@ -1,137 +1,181 @@
-# 🚁 UGV DroneCAN ESC Controller
+# 🚁 Quassel UGV - RTK-GPS + IMU + WebApp
 
-A professional DroneCAN 1.0 ESC controller implementation for Raspberry Pi 3 designed to communicate with Orange Cube flight controllers for UGV (Unmanned Ground Vehicle) applications.
+A professional autonomous UGV system with RTK-GPS positioning, IMU-based orientation, and real-time web interface for Raspberry Pi-based control.
 
 ## 🎯 Project Overview
 
-This project implements a complete DroneCAN ESC controller system that enables seamless communication between an Orange Cube autopilot and a Raspberry Pi for 2-channel PWM motor control in skid steering configuration. The system has been successfully migrated from Beyond Robotics hardware to Raspberry Pi for improved reliability and flexibility.
+This project implements a complete autonomous UGV system featuring:
+- **Dual-antenna RTK-GPS** (Holybro UM982) for precise positioning and heading
+- **6-DoF IMU** (ICM-42688-P) for roll/pitch orientation
+- **CAN Bus Integration** for sensor fusion and motor control
+- **Real-time Web Interface** with Bing Maps satellite view
+- **Modular Architecture** with Pi Zero 2W sensor hub and Pi 3 controller
 
-### ✅ Project Status: **PRODUCTION READY**
-- ✅ DroneCAN communication established with Orange Cube (1 Mbps)
-- ✅ Hardware-PWM motor control with freeze protection
-- ✅ Calibrated ESC command processing with real-world values
-- ✅ Safety timeout system and emergency stop functionality
-- ✅ Automatic service startup with systemd integration
-- ✅ Professional Python architecture with comprehensive testing
+### ✅ Project Status: **ACTIVE DEVELOPMENT**
+- ✅ Sensor hub architecture (Pi Zero 2W + PiCAN FD)
+- ✅ RTK-GPS + IMU integration
+- ✅ CAN bus communication
+- ✅ Web interface framework
+- 🔄 Real-time sensor fusion and mapping
 
-## 🏗️ Architecture Overview
+## 🏗️ System Architecture
 
-### Raspberry Pi ESC Controller (`raspberry_pi/`)
-The core application consists of a unified Python implementation:
+### Hardware Architecture
 
-- **`dronecan_esc_controller.py`** - Main ESC controller with multiple modes
-  - DroneCAN message reception and processing
-  - Calibrated ESC command conversion (raw → % → PWM)
-  - Hardware-PWM output with safety features
-  - Monitoring and logging capabilities
-- **`dronecan-esc.service`** - systemd service for automatic startup
-- **`setup_service.sh`** - Automated service installation script
-- **`README_ESC_Controller.md`** - Detailed usage documentation
+```
+┌─────────────────────────────────────────┐
+│  MAST (Pi Zero 2W + PiCAN FD)           │
+│  ├─ Holybro UM982 (Dual-Antenna RTK)    │
+│  │  └─ UART (GPIO 14/15, 230400 baud)   │
+│  ├─ ICM-42688-P IMU                      │
+│  │  └─ I2C (GPIO 2/3, Adresse 0x68)     │
+│  └─ CAN Transceiver (500 kbit/s)        │
+└─────────────────────────────────────────┘
+            │
+            │ CAN Bus
+            ▼
+┌─────────────────────────────────────────┐
+│  CHASSIS (Pi 3 + Motor Control)         │
+│  ├─ WebApp (Python-based)               │
+│  ├─ Motor CAN Interface                 │
+│  └─ WLAN Access Point                   │
+└─────────────────────────────────────────┘
+            │
+            │ WLAN
+            ▼
+    [ Browser-Client ]
+```
 
-### Key Features
-- **Multi-Mode Operation**: Monitor-only, PWM-only, or combined modes
-- **Hardware-PWM**: Uses pigpio for precise, freeze-resistant PWM generation
-- **Calibrated Processing**: Real-world Orange Cube parameter integration
-- **Safety Systems**: Timeout monitoring, emergency stop, signal handlers
-- **Service Integration**: Automatic startup, restart on failure, easy management
+### Software Stack
 
-### Orange Cube Integration
-- **Skid Steering Configuration**: 2-motor differential drive
-- **DroneCAN Protocol**: Native ESC RawCommand message handling
-- **Calibration Support**: Automatic loading of calibration data
-- **Real-time Monitoring**: Live display of commands, percentages, and PWM values
+**Pi Zero 2W (Sensor Hub):**
+| Component | Function | Interface |
+|-----------|----------|-----------|
+| UM982 GPS | RTK Position + Dual-Antenna Heading | UART /dev/serial0 |
+| ICM-42688-P | 6-DoF IMU (Accel + Gyro) | I2C Bus 1 |
+| PiCAN FD | CAN Bus Gateway | SocketCAN can0 |
+| Python Script | Sensor-Fusion & CAN-Broadcast | Systemd Service |
+
+**Data Flow:**
+- GPS-NMEA reading (pyserial)
+- IMU data reading (smbus2 / i2c)
+- Sensor fusion (Position + Heading + Roll/Pitch)
+- CAN message transmission (python-can)
+
+**Pi 3 (Controller + WebApp):**
+| Component | Function |
+|-----------|----------|
+| Python WebApp | Flask/FastAPI |
+| CAN Listener | Receives sensor data |
+| WebSocket/SSE | Real-time push to browser |
+| Bing Maps API | Map display |
+
+**WebApp Features:**
+- 🗺️ Bing Maps Satellite View (Lübtheen-optimized)
+- 📍 GPS Position (Live marker)
+- 🧭 Heading Display (Dual-antenna)
+- 📊 RTK Status (No Fix / Float / Fixed)
+- 🛤️ Trail/Path (last N positions)
+- 📐 Roll/Pitch from IMU
 
 ## 🛠️ Development Tools (`tools/`)
 
-Professional testing and configuration utilities:
-
-### Orange Cube Tools (`tools/orange_cube/`)
-- **`monitor_orange_cube.py`** - Complete MAVLink monitoring and control
-- **`set_can_parameters.py`** - Automated CAN parameter configuration
+Testing and configuration utilities for CAN communication:
 
 ### DroneCAN Tools (`tools/dronecan/`)
 - **`send_dronecan_actuator_commands.py`** - DroneCAN command testing
 
 ## 🚀 Quick Start
 
-### 1. Install Dependencies on Raspberry Pi
+### 1. Install Dependencies on Raspberry Pi Zero 2W (Sensor Hub)
 ```bash
-# Install pigpio for Hardware-PWM
-sudo apt install pigpio python3-pigpio
+# Install required packages
+sudo apt install python3-pip python3-smbus2 python3-can
 
-# Install DroneCAN library
-sudo pip3 install dronecan --break-system-packages
+# Install Python libraries
+pip3 install pyserial python-can
 
-# Start pigpio daemon
-sudo systemctl enable pigpiod
-sudo systemctl start pigpiod
+# Enable I2C and UART
+sudo raspi-config nonint do_i2c 0
+sudo raspi-config nonint do_serial 0
 ```
 
-### 2. Setup ESC Controller Service
+### 2. Install Dependencies on Raspberry Pi 3 (Controller)
 ```bash
-# Upload files to Raspberry Pi
-scp dronecan_esc_controller.py setup_service.sh nicolay@raspberrycan:/home/nicolay/
+# Install web framework
+pip3 install flask python-socketio
 
-# Run automated setup
+# Install CAN tools
+sudo apt install can-utils
+pip3 install python-can
+```
+
+### 3. Setup Sensor Hub (Pi Zero 2W)
+```bash
+# Upload sensor fusion script
+scp sensor_hub.py nicolay@raspberrycan:/home/nicolay/
+
+# Start sensor hub service
 ssh nicolay@raspberrycan
-chmod +x setup_service.sh
-./setup_service.sh
-source ~/.bashrc
+chmod +x sensor_hub.py
+sudo systemctl start sensor-hub
 ```
 
-### 3. Configure Orange Cube
+### 4. Setup Controller (Pi 3)
 ```bash
-cd tools/orange_cube
-python set_can_parameters.py
-```
+# Upload web app
+scp web_app.py nicolay@raspberrycan:/home/nicolay/
 
-### 4. Test the System
-```bash
-# Check service status
-esc-status
-
-# View live logs
-esc-logs
-
-# Test manually (stop service first)
-esc-stop
-sudo python3 dronecan_esc_controller.py --pwm
-esc-start
+# Start web interface
+python3 web_app.py
+# Access at http://raspberrycan:80
 ```
 
 ## 📋 Hardware Configuration
 
-### Raspberry Pi 3 Setup
+### Sensor Hub (Pi Zero 2W)
+- **MCU**: Broadcom BCM2837 (ARM Cortex-A53 Dual-Core)
+- **CAN Interface**: PiCAN FD (MCP2515 + 16MHz oscillator)
+- **GPS**: Holybro UM982 (Dual-antenna RTK)
+  - UART: GPIO 14/15 (230400 baud)
+- **IMU**: ICM-42688-P (6-DoF)
+  - I2C: GPIO 2/3 (Address 0x68)
+- **Operating System**: Raspberry Pi OS (Debian-based)
+- **Network**: CAN Bus to Controller
+
+### Controller (Pi 3)
 - **MCU**: Broadcom BCM2837 (ARM Cortex-A53 Quad-Core)
-- **CAN Interface**: Innomaker RS485 CAN HAT (MCP2515 + 16MHz oscillator)
-- **PWM Output**: Hardware-PWM on GPIO 18 (Right) and GPIO 19 (Left)
+- **CAN Interface**: PiCAN FD (MCP2515 + 16MHz oscillator)
+- **Motor Control**: GPIO 18/19 (Hardware-PWM)
 - **Operating System**: Raspberry Pi OS (Debian-based)
 - **Network**: WiFi + SSH access (nicolay@raspberrycan)
 
-### GPIO Pin Configuration
-**Innomaker RS485 CAN HAT Pin Usage:**
+### GPIO Pin Configuration (Pi Zero 2W - Sensor Hub)
+**PiCAN FD Pin Usage:**
 - **GPIO 7 (CS1)**: CAN-Chip SPI Chip Select (spi0.1)
-- **GPIO 8 (CS0)**: RS485-Chip SPI Chip Select (spi0.0)
-- **GPIO 24**: RS485-Interrupt (SC16IS752-Chip)
 - **GPIO 25**: CAN-Interrupt (MCP2515 CAN-Chip)
-- **SPI Interface**: Shared SPI bus for both chips
+- **SPI Interface**: Shared SPI bus
   - MOSI, MISO, SCLK pins used by HAT
 
-**ESC Controller Pin Usage:**
+**Sensor Pin Usage:**
+- **GPIO 14/15**: UART (GPS UM982)
+- **GPIO 2/3**: I2C (IMU ICM-42688-P)
+
+**Reserved/System Pins:**
+- **GPIO 9-11**: SPI (used by HAT)
+
+### GPIO Pin Configuration (Pi 3 - Controller)
+**Motor Control:**
 - **GPIO 18**: Right Motor PWM Output (Hardware-PWM)
 - **GPIO 19**: Left Motor PWM Output (Hardware-PWM)
-- **GPIO 12**: Mower Speed PWM Output (24-100% Duty Cycle, 1000Hz, 3.3V GPIO)
-- **GPIO 17**: Emergency Stop/Safety Switch Input (pulled high, active low)
+
+**Relay Control:**
 - **GPIO 22**: Light Control Relay Output (HIGH = On, LOW = Off)
 - **GPIO 23**: Mower Control Relay Output (HIGH = On, LOW = Off)
 
-**Reserved/System Pins:**
-- **GPIO 2/3**: I2C (reserved for system use)
-- **GPIO 14/15**: UART (console/debugging)
-- **GPIO 9-11**: SPI (used by HAT)
-
-**Available GPIO Pins:**
-- GPIO 4, 5, 6, 13, 16, 20, 21, 26, 27 (free for expansion)
+**Safety:**
+- **GPIO 17**: Emergency Stop/Safety Switch Input (pulled high, active low)
+- **GPIO 12**: Mower Speed PWM Output (24-100% Duty Cycle, 1000Hz, 3.3V GPIO)
 
 ### Mower Speed Control (PWM-to-Analog Conversion)
 
@@ -157,51 +201,45 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
 - **Smoothing Factor**: 15x PWM period (excellent filtering)
 - **Ripple**: <1% of output voltage
 
-### ESP32-S3 DroneBridge Setup
-- **Hardware**: ESP32-S3 WiFi Bridge for MAVLink communication
-- **UART Configuration**:
-  - `GPIO13 (TX)` - Serial Transmit to Orange Cube
-  - `GPIO12 (RX)` - Serial Receive from Orange Cube
-  - `Baudrate: 57600`
-- **Network Configuration**:
-  - `IP Address: 192.168.178.134`
-  - `MAVLink Port: 14550` (Ground Station)
-  - `MAVLink Port: 14555` (Companion Computer)
-
-### Orange Cube Setup
-- **Firmware**: ArduPilot Rover with Skid Steering (2-motor configuration)
-- **CAN Configuration**:
-  - `CAN_P1_BITRATE = 1000000` (1 Mbps)
-  - `CAN_D1_PROTOCOL = 1` (DroneCAN)
-  - `CAN_D1_UC_NODE = 10` (Orange Cube Node ID)
-  - `CAN_D1_UC_ESC_BM = 3` (ESC bitmask for 2 motors)
-  - `SERVO_BLH_MASK = 3` (BLHeli outputs for ESC1/ESC2)
-
-### CAN Bus Wiring
-- **CANH/CANL**: Connect between Orange Cube CAN port and Raspberry Pi CAN HAT
-- **Termination**: 120Ω resistor built into Orange Cube carrier board
+### CAN Bus Configuration
+- **Bitrate**: 500 kbit/s (Sensor Hub) / 1 Mbps (Motor Control)
+- **Termination**: 120Ω resistor on both ends
 - **Ground**: Common ground connection required
-- **Interface**: can0 on Raspberry Pi (configured via dtoverlay=mcp2515-can1)
-- **TX Queue**: Automatically configured with txqueuelen=1000 for improved buffer performance
+- **Interface**: can0 on both Pi Zero 2W and Pi 3
+- **TX Queue**: Configured with txqueuelen=1000 for improved buffer performance
 
 ## 🔧 Key Features
+
+### Sensor Integration
+- **Dual-Antenna RTK-GPS** (Holybro UM982)
+  - Precise positioning (cm-level accuracy)
+  - Dual-antenna heading (no compass needed)
+  - NMEA output via UART
+- **6-DoF IMU** (ICM-42688-P)
+  - Accelerometer + Gyroscope
+  - Roll/Pitch orientation
+  - I2C interface
+
+### Sensor Fusion
+- **Real-time position tracking** with RTK-GPS
+- **Heading calculation** from dual-antenna GPS
+- **Orientation estimation** from IMU data
+- **CAN bus broadcasting** to controller
+
+### Web Interface
+- **Bing Maps satellite view** (Lübtheen-optimized)
+- **Live GPS marker** with real-time updates
+- **Heading indicator** (dual-antenna)
+- **RTK status display** (No Fix / Float / Fixed)
+- **Trail visualization** (last N positions)
+- **Roll/Pitch display** from IMU
+- **WebSocket real-time updates** (50Hz)
 
 ### Motor Control
 - **2-channel Hardware-PWM output** (1000-2000μs pulse width)
 - **Freeze-resistant PWM generation** using pigpio hardware timers
-- **Calibrated ESC command processing** with real Orange Cube parameters
 - **Real-time monitoring** with live percentage and PWM display
 - **Intelligent Ramping System** for smooth acceleration and quick braking
-  - Slow acceleration (25 μs/s default) for gentle starts
-  - Fast deceleration (800 μs/s default) for responsive control
-  - Very fast braking (1500 μs/s default) for emergency stops
-
-### DroneCAN Integration
-- **Node ID 100** (configurable)
-- **ESC RawCommand reception** from Orange Cube
-- **Calibrated value conversion** (Raw → % → PWM)
-- **Skid steering support** for 2-motor differential drive
-- **ArduPilot compatibility** with Rover firmware
 
 ### Safety Features
 - **Hardware-PWM independence** (continues running if Python crashes)
@@ -209,69 +247,52 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
 - **Emergency stop functionality** with signal handlers
 - **Service integration** with automatic restart on failure
 
-## 🎮 ESC Controller Commands
+## 🎮 System Commands
 
-The system includes convenient aliases for easy management:
-
-### Service Management
+### Sensor Hub (Pi Zero 2W)
 ```bash
-# Check service status
-esc-status
+# Start sensor fusion service
+sudo systemctl start sensor-hub
 
-# Start/stop service
-esc-start
-esc-stop
-esc-restart
+# View sensor data
+sudo systemctl status sensor-hub
+
+# Monitor CAN messages
+candump can0
 
 # View logs
-esc-logs          # Live log stream
-esc-logs-tail     # Last 50 lines
+journalctl -u sensor-hub -f
 ```
 
-### Development Workflow
+### Controller (Pi 3)
 ```bash
-# Stop service for testing
-esc-stop
+# Start web interface
+python3 web_app.py
 
-# Test new version manually
-sudo python3 dronecan_esc_controller.py --pwm
+# Access web interface
+# http://raspberrycan:80
 
-# Restart service after testing
-esc-start
+# Monitor CAN messages
+candump can0
 
-# Check if everything is working
-esc-status
-```
-
-### Available Modes
-```bash
-# Monitor only (no PWM output)
-python3 dronecan_esc_controller.py
-
-# Monitor + PWM output with ramping (default)
-python3 dronecan_esc_controller.py --pwm
-
-# PWM only (silent operation)
-python3 dronecan_esc_controller.py --pwm --quiet
-
-# Custom GPIO pins
-python3 dronecan_esc_controller.py --pwm --pins 12,13
-
-# PWM without ramping (immediate response)
-python3 dronecan_esc_controller.py --pwm --no-ramping
-
-# Custom ramping rates
-python3 dronecan_esc_controller.py --pwm --accel-rate 100 --brake-rate 2000
+# View application logs
+tail -f /var/log/ugv_app.log
 ```
 
 ## 📊 System Communication Flow
 
 ```
-Orange Cube (Node 10) → CAN Bus → Raspberry Pi 3 (Node 100)
-     ↓                                        ↓
-ESC RawCommands                       Hardware-PWM Output
-Skid Steering Control                GPIO 18/19 (1000-2000μs)
-Parameter Access                     Calibrated Processing
+Sensor Hub (Pi Zero 2W)          Controller (Pi 3)
+├─ GPS (UM982)                   ├─ Web Interface
+├─ IMU (ICM-42688-P)             ├─ Motor Control
+└─ CAN Transceiver               └─ CAN Transceiver
+        │                                │
+        └────────── CAN Bus ────────────┘
+                    (500 kbit/s)
+                        │
+                        ▼
+                  [ Browser Client ]
+                  (Bing Maps + RTK)
 ```
 
 ## 🗂️ Project Structure
@@ -280,105 +301,115 @@ Parameter Access                     Calibrated Processing
 UGV ESP32CAN/
 ├── 📄 README.md                    # This documentation
 ├── 📁 raspberry_pi/               # Main project (PRODUCTION)
-│   ├── dronecan_esc_controller.py # Main ESC controller
-│   ├── dronecan-esc.service      # systemd service file
-│   ├── setup_service.sh          # Automated setup script
-│   └── README_ESC_Controller.md  # Detailed usage guide
+│   ├── sensor_hub.py              # Sensor fusion (Pi Zero 2W)
+│   ├── web_app.py                 # Web interface (Pi 3)
+│   ├── sensor-hub.service         # systemd service file
+│   ├── setup_sensor_hub.sh        # Automated setup script
+│   ├── templates/index.html       # Web interface template
+│   └── README.md                  # Detailed usage guide
 ├── 📁 tools/                      # Testing and configuration
-│   ├── 📁 orange_cube/           # Orange Cube tools
-│   └── 📁 dronecan/              # DroneCAN testing
+│   └── 📁 dronecan/               # CAN testing tools
 └── 📁 archive/                    # Development history
-    ├── 📁 esp32_files/           # Legacy ESP32 implementation
+    ├── 📁 esp32_files/            # Legacy ESP32 implementation
     ├── 📁 beyond_robotics_working/ # Legacy Beyond Robotics code
-    ├── 📁 development_scripts/   # Development utilities
-    └── 📁 old_documentation/     # Historical documentation
+    ├── 📁 development_scripts/    # Development utilities
+    └── 📁 old_documentation/      # Historical documentation
 ```
 
 ## 🧪 Testing and Validation
 
 ### System Integration Test
 ```bash
-# 1. Setup ESC Controller service
+# 1. Setup Sensor Hub (Pi Zero 2W)
 ssh nicolay@raspberrycan
-./setup_service.sh
+./setup_sensor_hub.sh
 source ~/.bashrc
 
-# 2. Check service status
-esc-status
+# 2. Check sensor hub status
+sudo systemctl status sensor-hub
 
-# 3. Configure Orange Cube
-cd tools/orange_cube
-python set_can_parameters.py
+# 3. Monitor CAN messages
+candump can0
 
-# 4. Monitor ESC Controller
-esc-logs
+# 4. Start web interface (Pi 3)
+python3 web_app.py
+
+# 5. Access web interface
+# http://raspberrycan:80
 ```
 
 ### Expected Output
-**ESC Controller Service:**
+**Sensor Hub Service:**
 ```
-[15:33:41] 🚗 ESC RawCommand von Node ID 10:
-    ⬆️ L/R: Links=+85.2% | Rechts=+85.2% | FORWARD
-    🔧 Raw: Links=7000 | Rechts=7000 | Neutral: L=-114 R=0
-    📡 PWM: Links=1927μs | Rechts=1927μs | Neutral=1500μs
-    ⚡ GPIO: Links=GPIO19 | Rechts=GPIO18
+[15:33:41] 📡 GPS Position: 53.8234°N, 10.4567°E
+[15:33:41] 🧭 Heading: 45.2° (Dual-Antenna)
+[15:33:41] 📊 RTK Status: FIXED
+[15:33:41] 📐 Roll: +2.3°, Pitch: -1.8°
+[15:33:41] 🚀 CAN Message sent (ID: 0x123)
 ```
 
-**Orange Cube Monitor:**
+**Web Interface:**
 ```
-Parameter: CAN_D1_PROTOCOL = 1.0
-Parameter: CAN_P1_BITRATE = 1000000.0
-Parameter: CAN_D1_UC_NODE = 10.0
-✅ DroneCAN communication active
+✅ Connected to Sensor Hub
+📍 Position: 53.8234°N, 10.4567°E
+🧭 Heading: 45.2°
+📊 RTK: FIXED
+🛤️ Trail: 42 points
 ```
 
 ## 🔧 Configuration Options
 
-### ESC Controller Settings (`dronecan_esc_controller.py`)
+### Sensor Hub Settings (`sensor_hub.py`)
 ```python
-# Node Configuration
-DEFAULT_NODE_ID = 100             # DroneCAN Node ID
-DEFAULT_INTERFACE = 'can0'        # CAN Interface
-DEFAULT_BITRATE = 1000000         # 1 Mbps CAN bitrate
+# GPS Configuration
+GPS_PORT = '/dev/serial0'         # UART port for UM982
+GPS_BAUDRATE = 230400            # UM982 baud rate
 
-# PWM Configuration
-DEFAULT_PWM_PINS = [18, 19]       # GPIO pins [right, left]
-PWM_FREQUENCY = 50                # 50Hz for ESC/Servo
-PWM_RANGE = (1000, 2000)         # μs range
-PWM_NEUTRAL = 1500               # Neutral position
+# IMU Configuration
+IMU_ADDRESS = 0x68               # I2C address for ICM-42688-P
+IMU_BUS = 1                      # I2C bus number
 
-# Safety Configuration
-COMMAND_TIMEOUT = 2.0            # Seconds before neutral
-OUTPUT_INTERVAL = 0.5            # Monitor output throttling
+# CAN Configuration
+CAN_INTERFACE = 'can0'           # CAN interface
+CAN_BITRATE = 500000             # 500 kbit/s for sensor hub
+
+# Sensor Fusion
+FUSION_RATE = 50                 # Hz (20ms updates)
+TRAIL_LENGTH = 100               # Number of positions to keep
 ```
 
-### Ramping Configuration
-```bash
-# Default ramping settings (optimized for UGV safety)
---accel-rate 25      # Very slow acceleration (25 μs/s, ~20 seconds to full speed)
---decel-rate 800     # Fast deceleration (800 μs/s, ~0.6 seconds to stop)
---brake-rate 1500    # Very fast braking (1500 μs/s, ~0.3 seconds to neutral)
+### Web App Settings (`web_app.py`)
+```python
+# Flask Configuration
+FLASK_HOST = '0.0.0.0'           # Listen on all interfaces
+FLASK_PORT = 80                  # HTTP port
+DEBUG = False                    # Production mode
 
-# Custom ramping examples
-python3 dronecan_esc_controller.py --pwm --accel-rate 50 --brake-rate 2000
-python3 dronecan_esc_controller.py --pwm --no-ramping  # Disable ramping completely
+# CAN Configuration
+CAN_INTERFACE = 'can0'           # CAN interface
+CAN_BITRATE = 1000000            # 1 Mbps for motor control
+
+# WebSocket Configuration
+UPDATE_RATE = 50                 # Hz (20ms updates)
+WEBSOCKET_TIMEOUT = 30           # Seconds
 ```
 
-### Service Configuration (`dronecan-esc.service`)
+### Service Configuration (`sensor-hub.service`)
 ```ini
 [Service]
-ExecStart=/usr/bin/python3 /home/nicolay/dronecan_esc_controller.py --pwm --quiet
+ExecStart=/usr/bin/python3 /home/nicolay/sensor_hub.py
 Restart=always
 RestartSec=5
+User=root
 ```
 
 ### CAN Interface Configuration (`can-interface.service`)
-The CAN interface is automatically configured at boot with optimized settings:
+The CAN interface is automatically configured at boot:
 ```ini
 [Service]
-ExecStart=/bin/bash -c 'ip link set can0 down; ip link set can0 type can bitrate 1000000; ip link set can0 txqueuelen 1000; ip link set can0 up'
+ExecStart=/bin/bash -c 'ip link set can0 down; ip link set can0 type can bitrate 500000; ip link set can0 txqueuelen 1000; ip link set can0 up'
 ```
-- **Bitrate**: 1 Mbps for DroneCAN communication
+- **Bitrate**: 500 kbit/s for sensor hub communication
 - **TX Queue Length**: 1000 packets for improved buffer performance
 - **Auto-start**: Enabled via systemd for reliable boot configuration
 
@@ -386,65 +417,65 @@ ExecStart=/bin/bash -c 'ip link set can0 down; ip link set can0 type can bitrate
 
 ### Common Issues
 
-#### ❌ "Service not starting"
+#### ❌ "Sensor Hub service not starting"
 **Cause**: Dependencies or permissions issue
 **Solution**:
-1. Check pigpio daemon: `sudo systemctl status pigpiod`
-2. Verify dronecan library: `python3 -c "import dronecan"`
-3. Check service logs: `esc-logs-tail`
-4. Restart service: `esc-restart`
+1. Check I2C: `i2cdetect -y 1` (should show IMU at 0x68)
+2. Check UART: `ls -la /dev/serial0`
+3. Verify python-can: `python3 -c "import can"`
+4. Check service logs: `journalctl -u sensor-hub -f`
+5. Restart service: `sudo systemctl restart sensor-hub`
 
-#### ❌ "CAN buffer overruns or message loss"
-**Cause**: Default CAN TX queue too small for high-frequency DroneCAN traffic
-**Solution**: The system automatically configures `txqueuelen=1000` via `can-interface.service`
-1. Check current queue length: `ip link show can0` (should show `qlen 1000`)
-2. Verify service status: `sudo systemctl status can-interface.service`
-3. Manual configuration: `sudo ip link set can0 txqueuelen 1000`
-
-#### ❌ "No DroneCAN messages received"
-**Cause**: CAN communication failure
+#### ❌ "GPS not receiving data"
+**Cause**: UART configuration or GPS hardware issue
 **Solution**:
-1. Verify Orange Cube CAN parameters:
-   ```bash
-   cd tools/orange_cube
-   python set_can_parameters.py
-   ```
-2. Check CAN interface: `ip link show can0`
-3. Verify node IDs don't conflict (Orange Cube=10, Raspberry Pi=100)
-4. Test CAN bus: `cansend can0 123#DEADBEEF`
+1. Check UART connection: `cat /dev/serial0` (should show NMEA data)
+2. Verify baud rate: 230400 for UM982
+3. Check GPS power supply
+4. Test with: `python3 -c "import serial; s=serial.Serial('/dev/serial0', 230400); print(s.readline())"`
 
-#### ❌ "Motors not responding"
-**Cause**: PWM or ESC configuration issue
+#### ❌ "IMU not responding"
+**Cause**: I2C communication failure
 **Solution**:
-1. Check PWM pin connections (GPIO 18/19)
-2. Verify ESC power supply and calibration
-3. Test PWM output with oscilloscope
-4. Check service logs: `esc-logs`
+1. Check I2C address: `i2cdetect -y 1` (should show 0x68)
+2. Verify I2C pins (GPIO 2/3)
+3. Check pull-up resistors (4.7kΩ typical)
+4. Test with: `python3 -c "import smbus2; bus=smbus2.SMBus(1); print(bus.read_byte_data(0x68, 0x75))"`
 
-#### ❌ "Orange Cube not arming"
-**Cause**: PreArm check failures
+#### ❌ "CAN messages not received"
+**Cause**: CAN interface or hardware issue
 **Solution**:
-1. Disable hardware safety switch: `BRD_SAFETYENABLE = 0`
-2. Skip GPS checks: `ARMING_CHECK = 0` (testing only)
-3. Check servo output configuration
-4. Verify battery voltage and current sensors
+1. Check CAN interface: `ip link show can0`
+2. Monitor CAN traffic: `candump can0`
+3. Verify bitrate: 500 kbit/s for sensor hub
+4. Check CAN termination (120Ω resistors)
+5. Test CAN: `cansend can0 123#DEADBEEF`
+
+#### ❌ "Web interface not accessible"
+**Cause**: Flask or network issue
+**Solution**:
+1. Check Flask is running: `ps aux | grep web_app.py`
+2. Verify port 80: `sudo netstat -tlnp | grep :80`
+3. Check firewall: `sudo ufw status`
+4. Test locally: `curl http://localhost:80`
+5. Check logs: `tail -f /var/log/ugv_app.log`
 
 ### Debug Tools
 
 #### Service Management
 ```bash
-# Check service status
-esc-status
+# Check sensor hub status
+sudo systemctl status sensor-hub
 
 # View live logs
-esc-logs
+journalctl -u sensor-hub -f
 
 # Stop for manual testing
-esc-stop
-sudo python3 dronecan_esc_controller.py --pwm
+sudo systemctl stop sensor-hub
+python3 sensor_hub.py
 
 # Restart service
-esc-start
+sudo systemctl restart sensor-hub
 ```
 
 #### Hardware Testing
@@ -452,30 +483,35 @@ esc-start
 # Test CAN interface
 candump can0
 
-# Test PWM output (oscilloscope on GPIO 18/19)
-sudo python3 dronecan_esc_controller.py --pwm
+# Test GPS
+cat /dev/serial0
 
-# Monitor Orange Cube
-python tools/orange_cube/monitor_orange_cube.py
+# Test IMU
+i2cdetect -y 1
+
+# Monitor web app
+tail -f /var/log/ugv_app.log
 ```
 
 ## 📈 Performance Characteristics
 
 ### System Specifications
-- **Update Rate**: Real-time (no artificial throttling)
-- **CAN Bitrate**: 1 Mbps
-- **PWM Resolution**: Hardware-PWM precision
-- **Safety Timeout**: 2 seconds
-- **Memory Usage**: Python runtime (~50MB RAM)
+- **Sensor Update Rate**: 50 Hz (20ms)
+- **GPS Accuracy**: RTK Fixed (cm-level)
+- **Heading Accuracy**: Dual-antenna (±1°)
+- **IMU Sampling**: 200 Hz (5ms)
+- **CAN Bitrate**: 500 kbit/s (Sensor Hub) / 1 Mbps (Motor Control)
+- **Memory Usage**: Python runtime (~80MB RAM)
 
 ### Communication Latency
-- **Orange Cube → Raspberry Pi**: <5ms
-- **ESC Command → PWM Output**: <1ms (Hardware-PWM)
-- **Service Restart**: <3 seconds
+- **GPS → CAN Bus**: <50ms
+- **IMU → CAN Bus**: <10ms
+- **CAN Bus → Web Interface**: <100ms (WebSocket)
+- **Web Interface Update**: 20ms (50Hz)
 
 ## 🔄 Development History
 
-This project evolved from an ESP32-based implementation through Beyond Robotics to the current Raspberry Pi solution:
+This project evolved from an Orange Cube-based implementation to the current RTK-GPS + IMU system:
 
 ### Phase 1: ESP32 Prototype (`archive/esp32_files/`)
 - Initial DroneCAN implementation
@@ -487,29 +523,29 @@ This project evolved from an ESP32-based implementation through Beyond Robotics 
 - Integrated official Arduino DroneCAN library
 - Resolved CAN communication stability issues
 
-### Phase 3: Professional Refactoring (`beyond_robotics_working/`)
-- Modular architecture implementation
-- Comprehensive safety features
-- Production-ready code quality
-- Complete testing framework
+### Phase 3: Orange Cube Integration
+- Migrated to Orange Cube flight controller
+- Implemented DroneCAN ESC control
+- **⚠️ Abandoned due to CAN bug**: https://github.com/ArduPilot/ardupilot/issues/31212
+- **Note**: Bug report filed but no response from ArduPilot team
 
-### Phase 4: Raspberry Pi Migration (Current)
-- Migrated from Beyond Robotics to Raspberry Pi 3
-- Implemented Hardware-PWM with freeze protection
-- Added calibrated ESC command processing
-- Created systemd service integration
-- Achieved superior reliability and flexibility
+### Phase 4: RTK-GPS + IMU System (Current)
+- Switched to Holybro UM982 dual-antenna RTK-GPS
+- Added ICM-42688-P 6-DoF IMU
+- Implemented sensor fusion on Pi Zero 2W
+- Created web interface with Bing Maps
+- Achieved superior positioning and orientation capabilities
 
 ## 🤝 Contributing
 
 ### Code Standards
-- **C++**: Follow Arduino/PlatformIO conventions
-- **Python**: PEP 8 compliance for tools
+- **Python**: PEP 8 compliance
 - **Documentation**: Comprehensive inline comments
 - **Testing**: Validate all changes with hardware
+- **Git**: Clear commit messages with feature descriptions
 
 ### Development Workflow
-1. **Test on hardware** - Always validate with real Orange Cube and Raspberry Pi
+1. **Test on hardware** - Always validate with real Raspberry Pi and sensors
 2. **Use service management** - Stop service before testing new versions
 3. **Document changes** - Update README and inline comments
 4. **Archive old code** - Move obsolete files to archive/
@@ -518,41 +554,47 @@ This project evolved from an ESP32-based implementation through Beyond Robotics 
 
 ### Official Documentation
 - **Raspberry Pi Foundation**: https://www.raspberrypi.org/documentation/
-- **DroneCAN Protocol**: https://dronecan.github.io/
-- **ArduPilot**: https://ardupilot.org/rover/
+- **Holybro UM982**: https://holybro.com/products/um982-rtk-gnss-receiver
+- **ICM-42688-P**: https://invensense.tdk.com/products/motion-tracking/6-axis/icm-42688-p/
+- **PiCAN FD**: https://www.skpang.co.uk/products/pican-fd-can-bus-board-for-raspberry-pi
 - **pigpio Library**: http://abyz.me.uk/rpi/pigpio/
 
 ### Hardware Support
-- **Raspberry Pi 3**: ARM Cortex-A53 with GPIO Hardware-PWM
-- **Innomaker CAN HAT**: MCP2515-based CAN interface
-- **Orange Cube**: ArduPilot-compatible autopilot
-- **CAN Tools**: USB CAN adapters, Cangaroo software
+- **Raspberry Pi Zero 2W**: ARM Cortex-A53 Dual-Core
+- **Raspberry Pi 3**: ARM Cortex-A53 Quad-Core
+- **PiCAN FD**: MCP2515-based CAN interface
+- **Holybro UM982**: Dual-antenna RTK-GPS receiver
+- **ICM-42688-P**: 6-DoF IMU sensor
 
 ### Community
-- **ArduPilot Forum**: https://discuss.ardupilot.org/
-- **DroneCAN Community**: GitHub discussions and issues
-- **Raspberry Pi Community**: Official forums and documentation
+- **Raspberry Pi Community**: https://www.raspberrypi.org/forums/
+- **CAN Bus Community**: GitHub discussions and issues
+- **RTK-GPS Community**: Holybro and u-blox forums
 
 ---
 
 ## 🎯 Project Status Summary
 
-**✅ PRODUCTION READY** - This DroneCAN ESC controller implementation is fully functional and tested with real hardware. The system successfully enables 2-channel Hardware-PWM motor control via DroneCAN commands from an Orange Cube autopilot for UGV applications, with comprehensive safety features and professional Python architecture.
+**🔄 ACTIVE DEVELOPMENT** - This RTK-GPS + IMU autonomous UGV system is under active development with a modular architecture featuring dual-antenna positioning, 6-DoF orientation, and real-time web interface.
 
 **Key Achievements:**
-- ✅ Stable DroneCAN communication at 1 Mbps with Raspberry Pi 3
-- ✅ Hardware-PWM motor control with freeze protection
-- ✅ Calibrated ESC command processing with real Orange Cube parameters
-- ✅ Intelligent ramping system for smooth acceleration and quick braking
-- ✅ Automatic service startup with systemd integration
-- ✅ Professional Python architecture with comprehensive safety features
+- ✅ Sensor hub architecture (Pi Zero 2W + PiCAN FD)
+- ✅ RTK-GPS + IMU integration
+- ✅ CAN bus communication
+- ✅ Web interface framework
+- 🔄 Real-time sensor fusion and mapping
 
-**Migration Success:**
-- 🔄 Successfully migrated from Beyond Robotics to Raspberry Pi
-- 🛡️ Improved reliability with Hardware-PWM freeze protection
-- ⚙️ Enhanced usability with service management commands
-- 📊 Better monitoring with calibrated value display
-- ✅ Comprehensive testing and configuration tools
-- ✅ Complete documentation and troubleshooting guides
+**Why Orange Cube Was Abandoned:**
+- ⚠️ **CAN Bug**: https://github.com/ArduPilot/ardupilot/issues/31212
+- **Status**: Bug report filed but no response from ArduPilot team
+- **Decision**: Switched to dedicated RTK-GPS + IMU system for superior positioning
 
-The project is ready for production use and further development.
+**Current Focus:**
+- 🗺️ Bing Maps satellite view integration
+- 📍 Real-time GPS position tracking
+- 🧭 Dual-antenna heading calculation
+- 📊 RTK status monitoring
+- 🛤️ Trail visualization
+- 📐 IMU-based orientation display
+
+The project is actively being developed with focus on autonomous navigation capabilities.
