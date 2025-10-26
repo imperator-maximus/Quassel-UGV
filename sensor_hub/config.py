@@ -34,8 +34,8 @@ NTRIP_RECONNECT_INTERVAL = 30.0     # Reconnect-Versuch nach X Sekunden
 # ============================================================================
 # IMU KONFIGURATION (ICM-42688-P)
 # ============================================================================
-IMU_ENABLED = False                 # IMU aktivieren (noch nicht verbunden)
-IMU_ADDRESS = 0x68                  # I2C Adresse
+IMU_ENABLED = True                  # IMU aktivieren
+IMU_ADDRESS = 0x69                  # I2C Adresse (0x68 wenn AD0=GND, 0x69 wenn AD0=VCC)
 IMU_BUS = 1                         # I2C Bus Nummer
 IMU_SAMPLE_RATE = 200               # Hz
 

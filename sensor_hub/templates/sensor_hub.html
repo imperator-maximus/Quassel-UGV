@@ -258,6 +258,44 @@
                     <span class="status-value" id="rtk-uptime">0s</span>
                 </div>
             </div>
+
+            <div class="status-card">
+                <h2>📊 IMU Sensor</h2>
+                <div class="status-item">
+                    <span class="status-label">Status:</span>
+                    <span class="status-value" id="imu-connected">
+                        <span class="status-badge badge-no-gps">OFFLINE</span>
+                    </span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Beschleunigung X:</span>
+                    <span class="status-value" id="imu-accel-x">0.00 m/s²</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Beschleunigung Y:</span>
+                    <span class="status-value" id="imu-accel-y">0.00 m/s²</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Beschleunigung Z:</span>
+                    <span class="status-value" id="imu-accel-z">0.00 m/s²</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Drehrate X:</span>
+                    <span class="status-value" id="imu-gyro-x">0.00 °/s</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Drehrate Y:</span>
+                    <span class="status-value" id="imu-gyro-y">0.00 °/s</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Drehrate Z:</span>
+                    <span class="status-value" id="imu-gyro-z">0.00 °/s</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Temperatur:</span>
+                    <span class="status-value" id="imu-temp">0.0°C</span>
+                </div>
+            </div>
         </div>
 
         <div class="coordinates-section">
@@ -366,16 +404,50 @@
             
             // Koordinaten aktualisieren
             fetch(`${API_BASE}/coordinates`)
-                .then(response => response.json())
+                .then(response => {
+                    if (!response.ok) throw new Error('Koordinaten API Fehler');
+                    return response.json();
+                })
                 .then(data => {
                     document.getElementById('latitude').textContent = data.latitude.toFixed(6) + '°';
                     document.getElementById('longitude').textContent = data.longitude.toFixed(6) + '°';
-                    
+
                     const link = document.getElementById('bing-maps-link');
                     link.href = data.bing_maps_url;
                 })
                 .catch(error => {
-                    console.error('Koordinaten Update Fehler:', error);
+                    console.warn('Koordinaten Update Fehler (nicht kritisch):', error);
+                });
+
+            // IMU Daten aktualisieren
+            fetch(`${API_BASE}/imu/data`)
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('imu-accel-x').textContent = data.accel.x.toFixed(2) + ' m/s²';
+                    document.getElementById('imu-accel-y').textContent = data.accel.y.toFixed(2) + ' m/s²';
+                    document.getElementById('imu-accel-z').textContent = data.accel.z.toFixed(2) + ' m/s²';
+                    document.getElementById('imu-gyro-x').textContent = data.gyro.x.toFixed(2) + ' °/s';
+                    document.getElementById('imu-gyro-y').textContent = data.gyro.y.toFixed(2) + ' °/s';
+                    document.getElementById('imu-gyro-z').textContent = data.gyro.z.toFixed(2) + ' °/s';
+                    document.getElementById('imu-temp').textContent = data.temperature.toFixed(1) + '°C';
+                })
+                .catch(error => {
+                    console.error('IMU Update Fehler:', error);
+                });
+
+            // IMU Status aktualisieren
+            fetch(`${API_BASE}/imu/status`)
+                .then(response => response.json())
+                .then(data => {
+                    const imuBadge = document.getElementById('imu-connected');
+                    if (data.connected) {
+                        imuBadge.innerHTML = '<span class="status-badge" style="background: #00aa00; color: #fff;">ONLINE</span>';
+                    } else {
+                        imuBadge.innerHTML = '<span class="status-badge badge-no-gps">OFFLINE</span>';
+                    }
+                })
+                .catch(error => {
+                    console.error('IMU Status Update Fehler:', error);
                 });
         }
 

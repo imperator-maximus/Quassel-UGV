@@ -17,6 +17,7 @@ import config
 from gps_handler import GPSHandler
 from ntrip_client import NTRIPClient
 from gps_ntrip_bridge import GPSNTRIPBridge
+from imu_handler import ICM42688P
 
 # Logging konfigurieren
 logging.basicConfig(
@@ -39,6 +40,7 @@ class SensorHubApp:
         self.gps = None
         self.ntrip = None
         self.bridge = None
+        self.imu = None
         self.app = Flask(__name__, template_folder='templates')
         self._setup_routes()
         self._init_sensors()
@@ -80,6 +82,22 @@ class SensorHubApp:
                 logger.warning("⚠️  NTRIP konnte nicht verbunden werden")
         else:
             logger.info("ℹ️  NTRIP deaktiviert")
+
+        # IMU initialisieren wenn aktiviert
+        if config.IMU_ENABLED:
+            self.imu = ICM42688P(
+                bus=config.IMU_BUS,
+                address=config.IMU_ADDRESS,
+                sample_rate=config.IMU_SAMPLE_RATE
+            )
+
+            if self.imu.connect():
+                logger.info("✅ IMU (ICM-42688-P) aktiviert")
+            else:
+                logger.warning("⚠️  IMU konnte nicht verbunden werden")
+                self.imu = None
+        else:
+            logger.info("ℹ️  IMU deaktiviert")
     
     def _setup_routes(self):
         """Konfiguriert Flask Routes"""
@@ -106,11 +124,11 @@ class SensorHubApp:
             """API: Koordinaten"""
             if not self.gps:
                 return jsonify({'error': 'GPS nicht initialisiert'}), 500
-            
-            lat, lon = self.gps.get_coordinates()
+
+            status = self.gps.get_status()
             return jsonify({
-                'latitude': lat,
-                'longitude': lon,
+                'latitude': status['latitude'],
+                'longitude': status['longitude'],
                 'bing_maps_url': self.gps.get_bing_maps_url()
             })
         
@@ -139,6 +157,34 @@ class SensorHubApp:
                 return jsonify({'error': 'Bridge nicht aktiviert'}), 503
 
             return jsonify(self.bridge.get_status())
+
+        @self.app.route('/api/imu/data')
+        def api_imu_data():
+            """API: IMU Sensor-Daten"""
+            if not self.imu or not self.imu.connected:
+                return jsonify({'error': 'IMU nicht verbunden'}), 503
+
+            data = self.imu.get_data()
+            return jsonify({
+                'accel': data['accel'],
+                'gyro': data['gyro'],
+                'temperature': data['temperature'],
+                'timestamp': data['timestamp']
+            })
+
+        @self.app.route('/api/imu/status')
+        def api_imu_status():
+            """API: IMU Status"""
+            if not self.imu:
+                return jsonify({'error': 'IMU nicht aktiviert'}), 503
+
+            return jsonify({
+                'connected': self.imu.connected,
+                'running': self.imu.running,
+                'address': f'0x{self.imu.address:02x}',
+                'bus': self.imu.bus_num,
+                'sample_rate': self.imu.sample_rate
+            })
     
     def run(self, host: str = None, port: int = None, debug: bool = None):
         """Startet die Anwendung"""
@@ -161,6 +207,8 @@ class SensorHubApp:
             self.bridge.stop()
         if self.ntrip:
             self.ntrip.disconnect()
+        if self.imu:
+            self.imu.disconnect()
         if self.gps:
             self.gps.disconnect()
         logger.info("✅ Sensor Hub beendet")
