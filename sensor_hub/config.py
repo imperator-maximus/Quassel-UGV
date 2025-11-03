@@ -56,9 +56,9 @@ TRAIL_LENGTH = 100                  # Anzahl der Positionen im Trail
 # ============================================================================
 # CAN-BUS KONFIGURATION
 # ============================================================================
-CAN_ENABLED = False                 # CAN aktivieren (später)
+CAN_ENABLED = True                  # CAN aktivieren
 CAN_INTERFACE = 'can0'              # CAN Interface
-CAN_BITRATE = 500000                # 500 kbit/s für Sensor Hub
+CAN_BITRATE = 1000000               # 1 Mbps (einheitlich mit Motor Controller)
 
 # ============================================================================
 # LOGGING KONFIGURATION
