@@ -9,6 +9,7 @@ import os
 import logging
 import signal
 import time
+import json
 from pathlib import Path
 
 # Konfiguration laden
@@ -30,10 +31,18 @@ logger = logging.getLogger(__name__)
 from flask import Flask, render_template, jsonify
 import threading
 
+# CAN imports
+try:
+    import can
+    CAN_AVAILABLE = True
+except ImportError:
+    CAN_AVAILABLE = False
+    logger.warning("⚠️  python-can nicht installiert, CAN deaktiviert")
+
 
 class SensorHubApp:
     """Hauptanwendung für Sensor Hub"""
-    
+
     def __init__(self):
         """Initialisiert Sensor Hub"""
         self.running = True
@@ -41,9 +50,13 @@ class SensorHubApp:
         self.ntrip = None
         self.bridge = None
         self.imu = None
+        self.can_bus = None
+        self.can_sender_thread = None
+        self.can_receiver_thread = None
         self.app = Flask(__name__, template_folder='templates')
         self._setup_routes()
         self._init_sensors()
+        self._init_can_bus()
     
     def _init_sensors(self):
         """Initialisiert Sensoren"""
@@ -98,7 +111,166 @@ class SensorHubApp:
                 self.imu = None
         else:
             logger.info("ℹ️  IMU deaktiviert")
-    
+
+    def _init_can_bus(self):
+        """Initialisiert CAN-Bus für JSON-Kommunikation"""
+        if not config.CAN_ENABLED:
+            logger.info("ℹ️  CAN deaktiviert")
+            return
+
+        if not CAN_AVAILABLE:
+            logger.error("❌ python-can nicht verfügbar, CAN deaktiviert")
+            return
+
+        try:
+            self.can_bus = can.interface.Bus(
+                channel=config.CAN_INTERFACE,
+                interface='socketcan'
+                # bitrate nicht angeben, da CAN bereits via ip link konfiguriert ist
+            )
+
+            # CAN Sender Thread starten (50Hz)
+            self.can_sender_thread = threading.Thread(target=self._can_sender_loop, daemon=True)
+            self.can_sender_thread.start()
+
+            # CAN Receiver Thread starten
+            self.can_receiver_thread = threading.Thread(target=self._can_receiver_loop, daemon=True)
+            self.can_receiver_thread.start()
+
+            logger.info(f"✅ CAN-Bus initialisiert ({config.CAN_INTERFACE}, {config.CAN_BITRATE} bps)")
+
+        except Exception as e:
+            logger.error(f"❌ CAN-Bus Initialisierung fehlgeschlagen: {e}")
+            self.can_bus = None
+
+    def _can_sender_loop(self):
+        """Sendet Sensor-Daten über CAN (50Hz)"""
+        interval = 1.0 / config.FUSION_RATE  # 50Hz = 20ms
+
+        while self.running:
+            try:
+                if not self.can_bus:
+                    time.sleep(0.1)
+                    continue
+
+                # Sensor-Daten sammeln
+                sensor_data = self._get_sensor_data()
+
+                # JSON-String erstellen
+                json_str = json.dumps(sensor_data)
+
+                # CAN-Nachricht senden (max 8 Bytes pro Frame)
+                # Bei längeren Nachrichten müssen wir fragmentieren
+                self._send_can_json(json_str)
+
+                time.sleep(interval)
+
+            except Exception as e:
+                logger.error(f"❌ CAN-Sender Fehler: {e}")
+                time.sleep(0.1)
+
+    def _can_receiver_loop(self):
+        """Empfängt CAN-Befehle vom Controller"""
+        while self.running:
+            try:
+                if not self.can_bus:
+                    time.sleep(0.1)
+                    continue
+
+                msg = self.can_bus.recv(timeout=1.0)
+                if msg is None:
+                    continue
+
+                # JSON aus CAN-Daten dekodieren
+                try:
+                    data = json.loads(msg.data.decode('utf-8'))
+                    self._process_can_command(data)
+                except:
+                    pass  # Nicht-JSON Nachrichten ignorieren
+
+            except Exception as e:
+                logger.error(f"❌ CAN-Receiver Fehler: {e}")
+                time.sleep(0.1)
+
+    def _get_sensor_data(self):
+        """Sammelt aktuelle Sensor-Daten"""
+        data = {
+            'timestamp': time.time()
+        }
+
+        # GPS-Daten
+        if self.gps:
+            gps_status = self.gps.get_status()
+            data['gps'] = {
+                'lat': gps_status.get('latitude', 0.0),
+                'lon': gps_status.get('longitude', 0.0),
+                'altitude': gps_status.get('altitude', 0.0)
+            }
+            data['rtk_status'] = gps_status.get('quality_indicator', 'NONE')
+
+        # IMU-Daten
+        if self.imu and self.imu.connected:
+            imu_data = self.imu.get_data()
+            # Vereinfachte IMU-Daten (Roll/Pitch aus Accelerometer)
+            accel = imu_data.get('accel', {})
+            data['imu'] = {
+                'roll': accel.get('x', 0.0),
+                'pitch': accel.get('y', 0.0)
+            }
+            # Heading aus Gyro (vereinfacht)
+            gyro = imu_data.get('gyro', {})
+            data['heading'] = gyro.get('z', 0.0)
+
+        return data
+
+    def _send_can_json(self, json_str):
+        """Sendet JSON-String über CAN (Multi-Frame für längere Nachrichten)"""
+        data_bytes = json_str.encode('utf-8')
+
+        # Multi-Frame Übertragung (6 Bytes Nutzdaten pro Frame, 2 Bytes Header)
+        chunk_size = 6
+        total_frames = (len(data_bytes) + chunk_size - 1) // chunk_size
+
+        for frame_idx in range(total_frames):
+            start = frame_idx * chunk_size
+            end = min(start + chunk_size, len(data_bytes))
+            chunk = data_bytes[start:end]
+
+            # Frame-Header: [frame_idx, total_frames, ...data (max 6 bytes)]
+            frame_data = bytes([frame_idx, total_frames]) + chunk
+
+            # Auf 8 Bytes auffüllen
+            frame_data = frame_data + b'\x00' * (8 - len(frame_data))
+
+            msg = can.Message(
+                arbitration_id=0x100,  # Sensor Hub ID
+                data=frame_data,
+                is_extended_id=False
+            )
+
+            try:
+                self.can_bus.send(msg)
+                # Kleine Pause zwischen Frames
+                time.sleep(0.001)  # 1ms
+            except Exception as e:
+                logger.error(f"❌ CAN-Send Fehler (Frame {frame_idx}/{total_frames}): {e}")
+                break
+
+    def _process_can_command(self, data):
+        """Verarbeitet CAN-Befehle vom Controller"""
+        cmd = data.get('cmd') or data.get('request')
+
+        if cmd == 'status_request' or cmd == 'sensor_status':
+            logger.info("📡 Status-Anfrage empfangen")
+            # TODO: Status-Antwort senden
+
+        elif cmd == 'restart':
+            logger.warning("🔄 Restart-Befehl empfangen")
+            # TODO: Restart implementieren
+
+        else:
+            logger.debug(f"📡 Unbekannter CAN-Befehl: {cmd}")
+
     def _setup_routes(self):
         """Konfiguriert Flask Routes"""
         
@@ -211,6 +383,8 @@ class SensorHubApp:
             self.imu.disconnect()
         if self.gps:
             self.gps.disconnect()
+        if self.can_bus:
+            self.can_bus.shutdown()
         logger.info("✅ Sensor Hub beendet")
 
 

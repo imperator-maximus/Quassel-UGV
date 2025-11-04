@@ -1,0 +1,17 @@
+[Unit]
+Description=Quassel UGV Motor Controller (CAN + Web Interface)
+After=network.target
+
+[Service]
+Type=simple
+User=nicolay
+WorkingDirectory=/home/nicolay
+ExecStart=/usr/bin/python3 /home/nicolay/motor_controller.py --can can0 --bitrate 1000000 --web --web-port 80
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+

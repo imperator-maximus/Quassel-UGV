@@ -116,6 +116,7 @@ class MotorController:
         self.can_bus = None
         self.can_reader_thread = None
         self.sensor_data = {}  # Letzte Sensor-Daten vom Sensor Hub
+        self.can_frame_buffer = {}  # Buffer für Multi-Frame Nachrichten
         
         # Initialisierungen
         if self.enable_pwm:
@@ -212,9 +213,9 @@ class MotorController:
     def _init_can_bus(self):
         """Initialisiert CAN-Bus für JSON-Kommunikation"""
         try:
-            self.can_bus = can.interface.Bus(channel=self.can_interface, 
-                                             bustype='socketcan',
-                                             bitrate=self.can_bitrate)
+            self.can_bus = can.interface.Bus(channel=self.can_interface,
+                                             interface='socketcan')
+                                             # bitrate nicht angeben, da CAN bereits via ip link konfiguriert ist
             
             self.can_reader_thread = threading.Thread(target=self._can_reader_loop, daemon=True)
             self.can_reader_thread.start()
@@ -227,28 +228,68 @@ class MotorController:
             self.can_bus = None
     
     def _can_reader_loop(self):
-        """Liest CAN-Nachrichten und verarbeitet JSON"""
+        """Liest CAN-Nachrichten und verarbeitet JSON (Multi-Frame Support)"""
         while True:
             try:
                 if not self.can_bus:
                     time.sleep(0.1)
                     continue
-                
+
                 msg = self.can_bus.recv(timeout=1.0)
                 if msg is None:
                     continue
-                
-                # JSON aus CAN-Daten dekodieren
-                try:
-                    data = json.loads(msg.data.decode('utf-8'))
-                    self._process_sensor_data(data)
-                except:
-                    pass  # Nicht-JSON Nachrichten ignorieren
-            
+
+                # Multi-Frame Nachricht verarbeiten
+                if msg.arbitration_id == 0x100:  # Sensor Hub ID
+                    json_str = self._process_can_multiframe(msg)
+                    if json_str:
+                        try:
+                            data = json.loads(json_str)
+                            self._process_sensor_data(data)
+                        except Exception as e:
+                            if not self.quiet:
+                                print(f"⚠️ JSON-Decode Fehler: {e}")
+                else:
+                    # Andere CAN-IDs ignorieren oder anders verarbeiten
+                    pass
+
             except Exception as e:
                 if not self.quiet:
                     print(f"⚠️ CAN-Reader Fehler: {e}")
                 time.sleep(0.1)
+
+    def _process_can_multiframe(self, msg):
+        """Verarbeitet Multi-Frame CAN-Nachrichten (6 Bytes Nutzdaten pro Frame)"""
+        if len(msg.data) < 2:
+            return None
+
+        frame_idx = msg.data[0]
+        total_frames = msg.data[1]
+        chunk = msg.data[2:8]  # Max 6 Bytes Nutzdaten
+
+        # Ersten Frame: Buffer initialisieren
+        if frame_idx == 0:
+            self.can_frame_buffer = {
+                'total': total_frames,
+                'frames': [None] * total_frames,
+                'timestamp': time.time()
+            }
+
+        # Frame im Buffer speichern
+        if 'frames' in self.can_frame_buffer and frame_idx < len(self.can_frame_buffer['frames']):
+            self.can_frame_buffer['frames'][frame_idx] = chunk
+
+        # Prüfen ob alle Frames empfangen
+        if all(f is not None for f in self.can_frame_buffer.get('frames', [])):
+            # Alle Frames zusammensetzen
+            full_data = b''.join(self.can_frame_buffer['frames'])
+            # Null-Bytes entfernen
+            full_data = full_data.rstrip(b'\x00')
+            # Buffer leeren
+            self.can_frame_buffer = {}
+            return full_data.decode('utf-8')
+
+        return None
     
     def _process_sensor_data(self, data):
         """Verarbeitet Sensor-Daten vom Sensor Hub"""

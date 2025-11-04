@@ -1,0 +1,17 @@
+[Unit]
+Description=Quassel UGV Sensor Hub (RTK-GPS + IMU + CAN)
+After=network.target
+
+[Service]
+Type=simple
+User=nicolay
+WorkingDirectory=/home/nicolay/sensor_hub
+ExecStart=/usr/bin/python3 /home/nicolay/sensor_hub/sensor_hub_app.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
