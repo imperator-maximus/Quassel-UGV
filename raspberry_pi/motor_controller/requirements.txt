@@ -1,0 +1,18 @@
+# Quassel UGV Motor Controller v2.0 - Python Dependencies
+
+# Configuration
+pyyaml>=6.0
+
+# CAN Bus
+python-can>=4.0.0
+
+# GPIO & PWM
+RPi.GPIO>=0.7.1
+pigpio>=1.78
+
+# Web Interface
+Flask>=2.3.0
+
+# Optional: Logging
+# python-json-logger>=2.0.0
+

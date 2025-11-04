@@ -1,0 +1,78 @@
+# Quassel UGV Motor Controller - Konfiguration
+# Version 2.0
+
+# PWM-Konfiguration (Motor-Steuerung)
+pwm:
+  enabled: true
+  pins:
+    left: 19    # GPIO19 für linken Motor
+    right: 18   # GPIO18 für rechten Motor
+  frequency: 50  # Hz
+  neutral_value: 1500  # μs (Neutral-Position)
+  min_value: 1000      # μs (Minimum)
+  max_value: 2000      # μs (Maximum)
+  forward_factor: 500.0   # Vorwärts/Rückwärts-Faktor
+  turn_factor: 300.0      # Dreh-Faktor
+
+# Ramping-Konfiguration (Sanfte Beschleunigung/Bremsung)
+ramping:
+  enabled: true
+  acceleration_rate: 25    # μs/s (Beschleunigung)
+  deceleration_rate: 800   # μs/s (Verzögerung)
+  brake_rate: 1500         # μs/s (Bremsen zu Neutral)
+  update_interval: 0.02    # Sekunden (50Hz)
+
+# Sicherheits-Konfiguration
+safety:
+  pin: 17                  # GPIO17 für Sicherheitsschalter
+  enabled: true
+  debounce_time: 0.2       # Sekunden
+  command_timeout: 2.0     # Sekunden (CAN-Command-Timeout)
+  joystick_timeout: 1.0    # Sekunden (Joystick-Timeout)
+
+# Licht-Konfiguration
+light:
+  enabled: true
+  pin: 22                  # GPIO22 für Licht-Relais
+
+# Mäher-Konfiguration
+mower:
+  enabled: true
+  relay_pin: 23            # GPIO23 für Mäher-Relais
+  pwm_pin: 12              # GPIO12 für Mäher-PWM
+  pwm_frequency: 1000      # Hz
+  duty_min: 16             # % (Minimale Geschwindigkeit)
+  duty_max: 84             # % (Maximale Geschwindigkeit)
+  duty_off: 0              # % (Aus)
+
+# CAN-Bus-Konfiguration
+can:
+  interface: can0
+  bitrate: 1000000
+  motor_controller_id: 0x200  # Eigene CAN-ID
+  sensor_hub_id: 0x100        # Sensor Hub CAN-ID
+  max_frame_size: 6           # Bytes Nutzdaten pro Frame
+  frame_timeout: 1.0          # Sekunden
+
+# Web-Interface-Konfiguration
+web:
+  enabled: true
+  host: 0.0.0.0
+  port: 80
+  secret_key: ugv_motor_controller_2024
+  template_folder: templates
+  static_folder: static
+  max_speed_percent: 100.0
+
+# Logging-Konfiguration
+logging:
+  level: INFO              # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  file: /var/log/motor_controller.log
+  console: true
+  file_enabled: false
+
+# Allgemeine Einstellungen
+quiet: false
+monitor: true
+

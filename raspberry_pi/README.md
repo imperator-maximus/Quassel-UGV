@@ -1,4 +1,4 @@
-# 🚀 Quassel UGV - Sensor Hub & Controller
+# 🚀 Quassel UGV - Sensor Hub & Motor Controller v2.0
 
 **RTK-GPS + IMU sensor fusion with real-time web interface for autonomous UGV**
 
@@ -10,14 +10,44 @@
 - **Sensor Hub**: Raspberry Pi Zero 2W + PiCAN FD
   - Holybro UM982 (Dual-antenna RTK-GPS)
   - ICM-42688-P (6-DoF IMU)
-- **Controller**: Raspberry Pi 3 + PiCAN FD
-  - Motor control (2-channel PWM)
-  - Web interface (Bing Maps)
+- **Motor Controller**: Raspberry Pi 3 + Innomaker RS485 CAN HAT
+  - Motor control (2-channel Hardware-PWM via pigpio)
+  - Mower control (Relay + PWM speed control)
+  - Light control (Relay)
+  - Safety switch (Emergency stop)
+  - Web interface with virtual joystick
 
 **Communication:**
 - CAN Bus: 500 kbit/s (Sensor Hub) / 1 Mbps (Motor Control)
+- JSON-based Multi-Frame Protocol
 - Sensor Fusion: 50 Hz updates
 - WebSocket: Real-time web interface
+
+## 📁 Architektur
+
+```
+motor_controller/
+├── __init__.py              # Package-Initialisierung
+├── main.py                  # Entry Point
+├── config.py                # Konfigurationsverwaltung
+├── config.yaml.example      # Beispiel-Konfiguration
+├── hardware/
+│   ├── __init__.py
+│   ├── gpio_controller.py   # GPIO-Verwaltung (Singleton)
+│   ├── pwm_controller.py    # PWM-Steuerung (Motoren + Mäher)
+│   └── safety_monitor.py    # Sicherheitsüberwachung + Watchdog
+├── communication/
+│   ├── __init__.py
+│   ├── can_handler.py       # CAN-Bus-Kommunikation
+│   └── can_protocol.py      # Multi-Frame JSON-Protokoll
+├── control/
+│   ├── __init__.py
+│   ├── motor_control.py     # Motor-Logik (Skid Steering + Ramping)
+│   └── joystick_handler.py  # Joystick-Verarbeitung
+└── web/
+    ├── __init__.py
+    └── web_server.py         # Flask Web-Interface
+```
 
 ## 🚀 Quick Setup
 
@@ -34,15 +64,65 @@ sudo ./setup_sensor_hub.sh
 # - Reboot if needed for hardware activation
 ```
 
-### 2. Controller Setup (Pi 3)
+### 2. Motor Controller Setup (Pi 3) - v2.0
+
+#### **Installation**
 ```bash
-# Install web interface dependencies
-./install_web_dependencies.sh
+# Dependencies installieren
+pip3 install pyyaml python-can RPi.GPIO pigpio Flask
 
-# Start web interface
-python3 web_app.py
+# pigpiod aktivieren
+sudo systemctl enable pigpiod
+sudo systemctl start pigpiod
 
-# Access at http://raspberrycan:80
+# Verzeichnis erstellen
+mkdir -p /home/nicolay/motor_controller
+
+# Dateien kopieren (aus Repository)
+cp -r raspberry_pi/motor_controller/* /home/nicolay/motor_controller/
+```
+
+#### **Konfiguration**
+```bash
+# Beispiel-Config kopieren
+cp /home/nicolay/motor_controller/config.yaml.example \
+   /home/nicolay/motor_controller/config.yaml
+
+# Config anpassen
+nano /home/nicolay/motor_controller/config.yaml
+```
+
+#### **Manueller Test**
+```bash
+cd /home/nicolay/motor_controller
+python3 -m motor_controller.main --config config.yaml
+
+# Oder mit Legacy CLI-Args
+python3 -m motor_controller.main --pwm --pins 18,19 --web --can can0
+```
+
+#### **Systemd-Service**
+```bash
+# Service installieren
+sudo cp motor_controller_v2.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable motor-controller-v2.service
+sudo systemctl start motor-controller-v2.service
+
+# Status prüfen
+sudo systemctl status motor-controller-v2.service
+
+# Logs anzeigen
+sudo journalctl -u motor-controller-v2.service -f
+```
+
+#### **Web-Interface**
+```bash
+# Zugriff über Browser
+http://raspberrycan/
+
+# API-Status
+curl http://raspberrycan/api/status
 ```
 
 ### 3. Hardware Connection
