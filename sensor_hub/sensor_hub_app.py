@@ -18,7 +18,7 @@ import config
 from gps_handler import GPSHandler
 from ntrip_client import NTRIPClient
 from gps_ntrip_bridge import GPSNTRIPBridge
-from imu_handler_refactored import ICM42688P
+from imu_handler import ICM42688P
 from sensor_fusion import SensorFusion
 
 # Logging konfigurieren
@@ -383,7 +383,7 @@ class SensorHubApp:
 
         @self.app.route('/api/imu/data')
         def api_imu_data():
-            """API: IMU Sensor-Daten (Rohdaten + Orientierung aus Fusion)"""
+            """API: IMU Sensor-Daten (Rohdaten + Orientierung aus Fusion + Motion Status)"""
             if not self.imu or not self.imu.connected:
                 return jsonify({'error': 'IMU nicht verbunden'}), 503
 
@@ -391,7 +391,9 @@ class SensorHubApp:
             imu_data = self.imu.get_data()
 
             # Orientierung von Fusion Engine
-            orientation = {'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0, 'heading': 0.0}
+            orientation = {'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0, 'heading': 0.0,
+                          'is_stationary': False, 'gyro_bias': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+                          'gps_weight': 0.0}
             if self.fusion:
                 orientation = self.fusion.get_orientation()
 
@@ -404,6 +406,9 @@ class SensorHubApp:
                 'yaw': orientation['yaw'],
                 'heading': orientation['heading'],
                 'is_calibrated': imu_data['is_calibrated'],
+                'is_stationary': orientation['is_stationary'],
+                'gyro_bias': orientation['gyro_bias'],
+                'gps_weight': orientation['gps_weight'],
                 'timestamp': imu_data['timestamp']
             })
 
@@ -420,6 +425,14 @@ class SensorHubApp:
                 'bus': self.imu.bus_num,
                 'sample_rate': self.imu.sample_rate
             })
+
+        @self.app.route('/api/imu/motion')
+        def api_imu_motion():
+            """API: IMU Bewegungsstatus (Motion Detection + ZUPT)"""
+            if not self.fusion:
+                return jsonify({'error': 'Sensor Fusion nicht aktiviert'}), 503
+
+            return jsonify(self.fusion.get_motion_status())
     
     def run(self, host: str = None, port: int = None, debug: bool = None):
         """Startet die Anwendung"""
