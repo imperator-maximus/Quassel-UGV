@@ -18,7 +18,8 @@ import config
 from gps_handler import GPSHandler
 from ntrip_client import NTRIPClient
 from gps_ntrip_bridge import GPSNTRIPBridge
-from imu_handler import ICM42688P
+from imu_handler_refactored import ICM42688P
+from sensor_fusion import SensorFusion
 
 # Logging konfigurieren
 logging.basicConfig(
@@ -50,6 +51,7 @@ class SensorHubApp:
         self.ntrip = None
         self.bridge = None
         self.imu = None
+        self.fusion = None  # Sensor Fusion Engine
         self.can_bus = None
         self.can_sender_thread = None
         self.can_receiver_thread = None
@@ -106,6 +108,21 @@ class SensorHubApp:
 
             if self.imu.connect():
                 logger.info("✅ IMU (ICM-42688-P) aktiviert")
+
+                # IMU kalibrieren (5 Sekunden warten für Stabilisierung)
+                logger.info("⏳ Warte 5 Sekunden für IMU-Stabilisierung...")
+                time.sleep(5.0)
+                if self.imu.calibrate(samples=1000):
+                    logger.info("✅ IMU kalibriert")
+
+                # Sensor Fusion Engine initialisieren
+                self.fusion = SensorFusion(sample_rate=config.IMU_SAMPLE_RATE)
+                logger.info("✅ Sensor Fusion Engine initialisiert")
+
+                # Fusion Thread starten
+                self.fusion_thread = threading.Thread(target=self._sensor_fusion_loop, daemon=True)
+                self.fusion_thread.start()
+                logger.info("✅ Sensor Fusion Loop gestartet")
             else:
                 logger.warning("⚠️  IMU konnte nicht verbunden werden")
                 self.imu = None
@@ -192,6 +209,38 @@ class SensorHubApp:
                 logger.error(f"❌ CAN-Receiver Fehler: {e}")
                 time.sleep(0.1)
 
+    def _sensor_fusion_loop(self):
+        """
+        Sensor Fusion Loop
+        Liest IMU-Rohdaten und GPS-Heading, führt Fusion durch
+        """
+        logger.info("🔄 Sensor Fusion Loop gestartet")
+
+        while self.running:
+            try:
+                if self.imu and self.imu.connected and self.fusion:
+                    # IMU-Rohdaten holen (kalibriert)
+                    imu_data = self.imu.get_data()
+
+                    # GPS Heading holen (falls verfügbar)
+                    gps_heading = None
+                    if self.gps:
+                        gps_status = self.gps.get_status()
+                        gps_heading = gps_status.get('heading')
+
+                    # Fusion durchführen
+                    self.fusion.update(
+                        accel=imu_data['accel'],
+                        gyro=imu_data['gyro'],
+                        gps_heading=gps_heading
+                    )
+
+                time.sleep(1.0 / config.IMU_SAMPLE_RATE)  # Mit IMU-Sample-Rate laufen
+
+            except Exception as e:
+                logger.debug(f"⚠️  Sensor Fusion Fehler: {e}")
+                time.sleep(0.1)
+
     def _get_sensor_data(self):
         """Sammelt aktuelle Sensor-Daten"""
         data = {
@@ -208,18 +257,20 @@ class SensorHubApp:
             }
             data['rtk_status'] = gps_status.get('quality_indicator', 'NONE')
 
-        # IMU-Daten
-        if self.imu and self.imu.connected:
+        # IMU-Daten (Orientierung aus Fusion Engine)
+        if self.imu and self.imu.connected and self.fusion:
             imu_data = self.imu.get_data()
-            # Vereinfachte IMU-Daten (Roll/Pitch aus Accelerometer)
-            accel = imu_data.get('accel', {})
+            orientation = self.fusion.get_orientation()
+
             data['imu'] = {
-                'roll': accel.get('x', 0.0),
-                'pitch': accel.get('y', 0.0)
+                'roll': orientation['roll'],
+                'pitch': orientation['pitch'],
+                'yaw': orientation['yaw'],
+                'heading': orientation['heading'],
+                'is_calibrated': imu_data['is_calibrated']
             }
-            # Heading aus Gyro (vereinfacht)
-            gyro = imu_data.get('gyro', {})
-            data['heading'] = gyro.get('z', 0.0)
+            # Heading aus Fusion Engine (fusioniert mit GPS wenn verfügbar)
+            data['heading'] = orientation['heading']
 
         return data
 
@@ -332,16 +383,28 @@ class SensorHubApp:
 
         @self.app.route('/api/imu/data')
         def api_imu_data():
-            """API: IMU Sensor-Daten"""
+            """API: IMU Sensor-Daten (Rohdaten + Orientierung aus Fusion)"""
             if not self.imu or not self.imu.connected:
                 return jsonify({'error': 'IMU nicht verbunden'}), 503
 
-            data = self.imu.get_data()
+            # Rohdaten vom IMU
+            imu_data = self.imu.get_data()
+
+            # Orientierung von Fusion Engine
+            orientation = {'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0, 'heading': 0.0}
+            if self.fusion:
+                orientation = self.fusion.get_orientation()
+
             return jsonify({
-                'accel': data['accel'],
-                'gyro': data['gyro'],
-                'temperature': data['temperature'],
-                'timestamp': data['timestamp']
+                'accel': imu_data['accel'],
+                'gyro': imu_data['gyro'],
+                'temperature': imu_data['temperature'],
+                'roll': orientation['roll'],
+                'pitch': orientation['pitch'],
+                'yaw': orientation['yaw'],
+                'heading': orientation['heading'],
+                'is_calibrated': imu_data['is_calibrated'],
+                'timestamp': imu_data['timestamp']
             })
 
         @self.app.route('/api/imu/status')
