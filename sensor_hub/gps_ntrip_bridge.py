@@ -45,23 +45,26 @@ class GPSNTRIPBridge:
         """Startet die Bridge"""
         try:
             logger.info("🌉 Starte GPS-NTRIP Bridge")
-            
-            # NTRIP verbinden
-            if not self.ntrip.connect():
-                logger.error("❌ NTRIP Verbindung fehlgeschlagen")
-                return False
-            
+
+            # NTRIP Client aktivieren (für Reconnect-Versuche)
+            self.ntrip.enable()
+
             # NTRIP Callback registrieren
             self.ntrip.on_data_received = self._on_ntrip_data
-            
-            # Monitor-Thread starten
+
+            # Monitor-Thread starten (auch wenn initiale Verbindung fehlschlägt)
             self.running = True
             self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
             self.monitor_thread.start()
-            
-            logger.info("✅ GPS-NTRIP Bridge gestartet")
-            return True
-        
+
+            # NTRIP verbinden (erster Versuch)
+            if self.ntrip.connect():
+                logger.info("✅ GPS-NTRIP Bridge gestartet - NTRIP verbunden")
+                return True
+            else:
+                logger.warning("⚠️  NTRIP initiale Verbindung fehlgeschlagen - Reconnect-Versuche laufen im Hintergrund")
+                return True  # Trotzdem True zurückgeben, da Monitor-Thread läuft
+
         except Exception as e:
             logger.error(f"❌ Bridge Start-Fehler: {e}")
             return False

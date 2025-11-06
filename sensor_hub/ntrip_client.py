@@ -50,7 +50,12 @@ class NTRIPClient:
         
         # Callback für empfangene Daten
         self.on_data_received = None
-    
+
+    def enable(self):
+        """Aktiviert den Client für Verbindungsversuche"""
+        self.running = True
+        logger.debug("NTRIP Client aktiviert - Reconnect-Versuche möglich")
+
     def connect(self) -> bool:
         """Verbindet mit NTRIP-Server"""
         try:
@@ -196,7 +201,8 @@ class NTRIPClient:
         """Versucht zu reconnecten wenn nötig"""
         if not self.connected and self.running:
             now = time.time()
-            if now - self.last_connection_attempt > self.reconnect_interval:
+            # Beim ersten Versuch (connection_attempts == 0) sofort verbinden
+            if self.connection_attempts == 0 or (now - self.last_connection_attempt > self.reconnect_interval):
                 self.connection_attempts += 1
                 self.last_connection_attempt = now
                 logger.info(f"🔄 NTRIP Reconnect-Versuch #{self.connection_attempts}")
