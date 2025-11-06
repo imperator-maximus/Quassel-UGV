@@ -268,32 +268,83 @@
                     </span>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">Beschleunigung X:</span>
-                    <span class="status-value" id="imu-accel-x">0.00 m/s²</span>
+                    <span class="status-label">Kalibriert:</span>
+                    <span class="status-value" id="imu-calibrated">
+                        <span class="status-badge badge-no-gps">NEIN</span>
+                    </span>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">Beschleunigung Y:</span>
-                    <span class="status-value" id="imu-accel-y">0.00 m/s²</span>
+                    <span class="status-label">Roll:</span>
+                    <span class="status-value" id="imu-roll">0.0°</span>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">Beschleunigung Z:</span>
-                    <span class="status-value" id="imu-accel-z">0.00 m/s²</span>
+                    <span class="status-label">Pitch:</span>
+                    <span class="status-value" id="imu-pitch">0.0°</span>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">Drehrate X:</span>
-                    <span class="status-value" id="imu-gyro-x">0.00 °/s</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">Drehrate Y:</span>
-                    <span class="status-value" id="imu-gyro-y">0.00 °/s</span>
-                </div>
-                <div class="status-item">
-                    <span class="status-label">Drehrate Z:</span>
-                    <span class="status-value" id="imu-gyro-z">0.00 °/s</span>
+                    <span class="status-label">Yaw (Heading):</span>
+                    <span class="status-value" id="imu-yaw">0.0°</span>
                 </div>
                 <div class="status-item">
                     <span class="status-label">Temperatur:</span>
                     <span class="status-value" id="imu-temp">0.0°C</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- IMU Visualisierung -->
+        <div class="status-grid">
+            <div class="status-card">
+                <h2>🧭 Kompass (Heading)</h2>
+                <div style="display: flex; justify-content: center; align-items: center; padding: 20px;">
+                    <canvas id="compass-canvas" width="250" height="250"></canvas>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Heading:</span>
+                    <span class="status-value" id="compass-heading">0.0°</span>
+                </div>
+            </div>
+
+            <div class="status-card">
+                <h2>📐 Orientierung (Roll/Pitch)</h2>
+                <div style="display: flex; justify-content: center; align-items: center; padding: 20px;">
+                    <canvas id="orientation-canvas" width="250" height="250"></canvas>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Roll:</span>
+                    <span class="status-value" id="orientation-roll">0.0°</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Pitch:</span>
+                    <span class="status-value" id="orientation-pitch">0.0°</span>
+                </div>
+            </div>
+
+            <div class="status-card">
+                <h2>📈 IMU Rohdaten</h2>
+                <div class="status-item">
+                    <span class="status-label">Accel X:</span>
+                    <span class="status-value" id="imu-accel-x">0.00 m/s²</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Accel Y:</span>
+                    <span class="status-value" id="imu-accel-y">0.00 m/s²</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Accel Z:</span>
+                    <span class="status-value" id="imu-accel-z">0.00 m/s²</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Gyro X:</span>
+                    <span class="status-value" id="imu-gyro-x">0.00 °/s</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Gyro Y:</span>
+                    <span class="status-value" id="imu-gyro-y">0.00 °/s</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Gyro Z:</span>
+                    <span class="status-value" id="imu-gyro-z">0.00 °/s</span>
                 </div>
             </div>
         </div>
@@ -423,6 +474,7 @@
             fetch(`${API_BASE}/imu/data`)
                 .then(response => response.json())
                 .then(data => {
+                    // Rohdaten
                     document.getElementById('imu-accel-x').textContent = data.accel.x.toFixed(2) + ' m/s²';
                     document.getElementById('imu-accel-y').textContent = data.accel.y.toFixed(2) + ' m/s²';
                     document.getElementById('imu-accel-z').textContent = data.accel.z.toFixed(2) + ' m/s²';
@@ -430,6 +482,28 @@
                     document.getElementById('imu-gyro-y').textContent = data.gyro.y.toFixed(2) + ' °/s';
                     document.getElementById('imu-gyro-z').textContent = data.gyro.z.toFixed(2) + ' °/s';
                     document.getElementById('imu-temp').textContent = data.temperature.toFixed(1) + '°C';
+
+                    // Orientierung
+                    document.getElementById('imu-roll').textContent = data.roll.toFixed(1) + '°';
+                    document.getElementById('imu-pitch').textContent = data.pitch.toFixed(1) + '°';
+                    document.getElementById('imu-yaw').textContent = data.yaw.toFixed(1) + '°';
+
+                    // Kalibrierung Status
+                    const calibBadge = document.getElementById('imu-calibrated');
+                    if (data.is_calibrated) {
+                        calibBadge.innerHTML = '<span class="status-badge" style="background: #00aa00; color: #fff;">JA</span>';
+                    } else {
+                        calibBadge.innerHTML = '<span class="status-badge badge-no-gps">NEIN</span>';
+                    }
+
+                    // Kompass aktualisieren
+                    drawCompass(data.heading);
+                    document.getElementById('compass-heading').textContent = data.heading.toFixed(1) + '°';
+
+                    // Orientierung aktualisieren
+                    drawOrientation(data.roll, data.pitch);
+                    document.getElementById('orientation-roll').textContent = data.roll.toFixed(1) + '°';
+                    document.getElementById('orientation-pitch').textContent = data.pitch.toFixed(1) + '°';
                 })
                 .catch(error => {
                     console.error('IMU Update Fehler:', error);
@@ -449,6 +523,152 @@
                 .catch(error => {
                     console.error('IMU Status Update Fehler:', error);
                 });
+        }
+
+        // Kompass zeichnen
+        function drawCompass(heading) {
+            const canvas = document.getElementById('compass-canvas');
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+            const radius = 100;
+
+            // Canvas löschen
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Hintergrund
+            ctx.fillStyle = 'rgba(45, 80, 22, 0.6)';
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, radius + 10, 0, 2 * Math.PI);
+            ctx.fill();
+
+            // Kompass-Ring
+            ctx.strokeStyle = '#d4af37';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+            ctx.stroke();
+
+            // Himmelsrichtungen
+            ctx.fillStyle = '#d4af37';
+            ctx.font = 'bold 16px Georgia';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+
+            // N, E, S, W
+            ctx.fillText('N', centerX, centerY - radius - 20);
+            ctx.fillText('E', centerX + radius + 20, centerY);
+            ctx.fillText('S', centerX, centerY + radius + 20);
+            ctx.fillText('W', centerX - radius - 20, centerY);
+
+            // Heading-Pfeil (Norden zeigt nach oben, Heading im Uhrzeigersinn)
+            ctx.save();
+            ctx.translate(centerX, centerY);
+            ctx.rotate((heading - 90) * Math.PI / 180);
+
+            // Pfeil
+            ctx.fillStyle = '#ffd700';
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(radius - 20, 0);  // Spitze
+            ctx.lineTo(-20, -15);
+            ctx.lineTo(-20, 15);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.restore();
+
+            // Heading-Text in der Mitte
+            ctx.fillStyle = '#ffd700';
+            ctx.font = 'bold 20px Courier New';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(heading.toFixed(0) + '°', centerX, centerY);
+        }
+
+        // Orientierung zeichnen (Roll/Pitch)
+        function drawOrientation(roll, pitch) {
+            const canvas = document.getElementById('orientation-canvas');
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+            const radius = 80;
+
+            // Canvas löschen
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Hintergrund
+            ctx.fillStyle = 'rgba(45, 80, 22, 0.6)';
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, radius + 20, 0, 2 * Math.PI);
+            ctx.fill();
+
+            // Horizont-Linie (Pitch)
+            ctx.save();
+            ctx.translate(centerX, centerY);
+            ctx.rotate(roll * Math.PI / 180);
+
+            // Pitch-Offset berechnen (1° = 2 Pixel)
+            const pitchOffset = pitch * 2;
+
+            // Himmel (oben)
+            ctx.fillStyle = 'rgba(135, 206, 250, 0.3)';
+            ctx.fillRect(-radius - 20, -radius - 20 + pitchOffset, (radius + 20) * 2, radius + 20);
+
+            // Boden (unten)
+            ctx.fillStyle = 'rgba(139, 69, 19, 0.3)';
+            ctx.fillRect(-radius - 20, pitchOffset, (radius + 20) * 2, radius + 20);
+
+            // Horizont-Linie
+            ctx.strokeStyle = '#ffd700';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(-radius - 20, pitchOffset);
+            ctx.lineTo(radius + 20, pitchOffset);
+            ctx.stroke();
+
+            ctx.restore();
+
+            // Fadenkreuz (UGV-Position)
+            ctx.strokeStyle = '#ff0000';
+            ctx.lineWidth = 3;
+
+            // Horizontale Linie
+            ctx.beginPath();
+            ctx.moveTo(centerX - 30, centerY);
+            ctx.lineTo(centerX + 30, centerY);
+            ctx.stroke();
+
+            // Vertikale Linie
+            ctx.beginPath();
+            ctx.moveTo(centerX, centerY - 30);
+            ctx.lineTo(centerX, centerY + 30);
+            ctx.stroke();
+
+            // Kreis in der Mitte
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, 5, 0, 2 * Math.PI);
+            ctx.stroke();
+
+            // Ring
+            ctx.strokeStyle = '#d4af37';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+            ctx.stroke();
+
+            // Roll/Pitch Text
+            ctx.fillStyle = '#ffd700';
+            ctx.font = 'bold 14px Courier New';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('R:' + roll.toFixed(0) + '° P:' + pitch.toFixed(0) + '°', centerX, centerY + radius + 35);
         }
 
         function showError(message) {
