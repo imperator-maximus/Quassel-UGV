@@ -63,15 +63,16 @@ class MotorControl:
             Tuple (left_pwm, right_pwm) in μs
         """
         # Skid Steering Formel
+        # Vorzeichen für x vertauscht, da Motoren physisch vertauscht sind
         left_pwm = (
             self.pwm_config.neutral_value +
-            (y * self.pwm_config.forward_factor) -
+            (y * self.pwm_config.forward_factor) +
             (x * self.pwm_config.turn_factor)
         )
-        
+
         right_pwm = (
             self.pwm_config.neutral_value +
-            (y * self.pwm_config.forward_factor) +
+            (y * self.pwm_config.forward_factor) -
             (x * self.pwm_config.turn_factor)
         )
         

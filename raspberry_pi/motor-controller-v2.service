@@ -1,0 +1,30 @@
+[Unit]
+Description=Quassel UGV Motor Controller v2.0
+After=network.target pigpiod.service can0.service
+Requires=pigpiod.service
+Wants=can0.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/nicolay
+Environment="PYTHONUNBUFFERED=1"
+
+# Haupt-Befehl mit Config-Datei
+ExecStart=/usr/bin/python3 -m motor_controller.main --config /home/nicolay/motor_controller/config.yaml
+
+# Restart-Verhalten
+Restart=always
+RestartSec=5
+StartLimitInterval=200
+StartLimitBurst=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=motor-controller
+
+[Install]
+WantedBy=multi-user.target
+
