@@ -143,7 +143,7 @@ For issues with CAN communication:
 
 The new CAN architecture is designed for:
 - ✅ **Modular design** - Separate sensor hub and controller
-- ✅ **Real-time communication** - 50 Hz sensor fusion updates
+- ✅ **Real-time communication** - Continuous GPS/IMU CAN telemetry updates
 - ✅ **Scalability** - Easy to add new sensors or controllers
 - ✅ **Reliability** - Redundant communication paths
 

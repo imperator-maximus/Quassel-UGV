@@ -1,6 +1,6 @@
-# 🚁 Quassel UGV - RTK-GPS + IMU + WebApp
+# 🚁 Quassel UGV - RTK-GPS + WitMotion Sensor Hub + WebApp
 
-A professional autonomous UGV system with RTK-GPS positioning, IMU-based orientation, and real-time web interface for Raspberry Pi-based control.
+A professional autonomous UGV system with an Orange-Pi-based sensor hub, RTK-GPS positioning, WitMotion IMU orientation, CAN telemetry, and a real-time web interface.
 
 ## 🎯 Project Overview
 
@@ -16,7 +16,7 @@ This project implements a complete autonomous UGV system featuring:
 - ✅ RTK-GPS + IMU integration
 - ✅ CAN bus communication
 - ✅ Web interface framework
-- 🔄 Real-time sensor fusion and mapping
+- ✅ WitMotion-based IMU telemetry on the sensor hub
 
 ## 🏗️ System Architecture
 
@@ -24,12 +24,13 @@ This project implements a complete autonomous UGV system featuring:
 
 ```
 ┌─────────────────────────────────────────┐
-│  MAST (Pi Zero 2W + PiCAN FD)           │
+│  MAST (Orange Pi Zero 2W)               │
 │  ├─ Holybro UM982 (Dual-Antenna RTK)    │
-│  │  └─ UART (GPIO 14/15, 230400 baud)   │
-│  ├─ WitMotion USB-IMU                    │
 │  │  └─ USB Serial (/dev/serial/by-id)   │
-│  └─ CAN Transceiver (500 kbit/s)        │
+│  ├─ WitMotion USB-IMU                   │
+│  │  └─ USB Serial (/dev/serial/by-id)   │
+│  └─ CANable2                            │
+│     └─ SocketCAN can0                   │
 └─────────────────────────────────────────┘
             │
             │ CAN Bus
@@ -51,10 +52,10 @@ This project implements a complete autonomous UGV system featuring:
 **Pi Zero 2W (Sensor Hub):**
 | Component | Function | Interface |
 |-----------|----------|-----------|
-| UM982 GPS | RTK Position + Dual-Antenna Heading | UART /dev/serial0 |
+| UM982 GPS | RTK Position + Dual-Antenna Heading | USB Serial /dev/serial/by-id |
 | WitMotion USB-IMU | 9-DoF IMU incl. orientation frames | USB Serial |
-| PiCAN FD | CAN Bus Gateway | SocketCAN can0 |
-| Python Script | Sensor-Fusion & CAN-Broadcast | Systemd Service |
+| CANable2 | CAN Bus Gateway | SocketCAN can0 |
+| `sensor_hub_app.py` | Web API + CAN telemetry + sensor status | Systemd Service |
 
 **Data Flow:**
 - GPS-NMEA reading (pyserial)
@@ -76,7 +77,7 @@ This project implements a complete autonomous UGV system featuring:
 - 🧭 Heading Display (Dual-antenna)
 - 📊 RTK Status (No Fix / Float / Fixed)
 - 🛤️ Trail/Path (last N positions)
-- 📐 Roll/Pitch from IMU
+- 📐 Roll/Pitch/Yaw from IMU
 
 ## 🛠️ Development Tools (`tools/`)
 
@@ -112,13 +113,13 @@ pip3 install python-can
 
 ### 3. Setup Sensor Hub (Pi Zero 2W)
 ```bash
-# Upload sensor fusion script
-scp sensor_hub.py nicolay@raspberrycan:/home/nicolay/
+# Upload current sensor hub
+scp -r sensor_hub nicolay@orangeugv:/home/nicolay/
 
-# Start sensor hub service
-ssh nicolay@raspberrycan
-chmod +x sensor_hub.py
-sudo systemctl start sensor-hub
+# Follow the tested deploy guide
+ssh nicolay@orangeugv
+cd /home/nicolay/sensor_hub
+sudo systemctl start sensor-hub.service
 ```
 
 ### 4. Setup Controller (Pi 3)
@@ -133,14 +134,14 @@ python3 web_app.py
 
 ## 📋 Hardware Configuration
 
-### Sensor Hub (Pi Zero 2W)
-- **MCU**: Broadcom BCM2837 (ARM Cortex-A53 Dual-Core)
-- **CAN Interface**: PiCAN FD (MCP2515 + 16MHz oscillator)
+### Sensor Hub (Orange Pi Zero 2W)
+- **MCU**: Allwinner H616
+- **CAN Interface**: CANable2 via USB (`can0`)
 - **GPS**: Holybro UM982 (Dual-antenna RTK)
-  - UART: GPIO 14/15 (230400 baud)
+  - USB serial via `/dev/serial/by-id/...`
 - **IMU**: WitMotion USB-IMU
   - USB serial via `/dev/serial/by-id/...`
-- **Operating System**: Raspberry Pi OS (Debian-based)
+- **Operating System**: DietPi / Debian-based
 - **Network**: CAN Bus to Controller
 
 ### Controller (Pi 3)
@@ -150,16 +151,11 @@ python3 web_app.py
 - **Operating System**: Raspberry Pi OS (Debian-based)
 - **Network**: WiFi + SSH access (nicolay@raspberrycan)
 
-### GPIO Pin Configuration (Pi Zero 2W - Sensor Hub)
-**PiCAN FD Pin Usage:**
-- **GPIO 7 (CS1)**: CAN-Chip SPI Chip Select (spi0.1)
-- **GPIO 25**: CAN-Interrupt (MCP2515 CAN-Chip)
-- **SPI Interface**: Shared SPI bus
-  - MOSI, MISO, SCLK pins used by HAT
-
-**Sensor Pin Usage:**
-- **GPIO 14/15**: UART (GPS UM982)
-- **USB Serial**: WitMotion IMU + CANable2
+### Sensor Hub Device Usage (Orange Pi Zero 2W)
+**USB Devices:**
+- **Holybro UM982**: USB serial GNSS (`/dev/serial/by-id/...`)
+- **WitMotion IMU**: USB serial IMU (`/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`)
+- **CANable2**: USB CAN adapter (`can0` via `slcan-can0.service`)
 
 **Reserved/System Pins:**
 - **GPIO 9-11**: SPI (used by HAT)
@@ -215,7 +211,7 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
   "gps": {"lat": 53.8234, "lon": 10.4567, "altitude": 45.2},
   "heading": 45.2,
   "rtk_status": "FIXED",
-  "imu": {"roll": 2.3, "pitch": -1.8},
+  "imu": {"roll": 2.3, "pitch": -1.8, "yaw": 45.2, "heading": 45.2, "is_calibrated": true},
   "timestamp": 1234567890.123
 }
 ```
@@ -250,10 +246,10 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
   - Roll/Pitch/Yaw orientation
   - USB serial interface
 
-### Sensor Fusion
+### Sensor Hub Telemetry
 - **Real-time position tracking** with RTK-GPS
 - **Heading calculation** from dual-antenna GPS
-- **Orientation estimation** from IMU data
+- **Native orientation data** from the WitMotion IMU
 - **CAN bus broadcasting** to controller
 
 ### Web Interface
@@ -262,7 +258,7 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
 - **Heading indicator** (dual-antenna)
 - **RTK status display** (No Fix / Float / Fixed)
 - **Trail visualization** (last N positions)
-- **Roll/Pitch display** from IMU
+- **Roll/Pitch/Yaw display** from IMU
 - **WebSocket real-time updates** (50Hz)
 
 ### Motor Control
@@ -281,11 +277,11 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
 
 ### Sensor Hub (Pi Zero 2W)
 ```bash
-# Start sensor fusion service
-sudo systemctl start sensor-hub
+# Start sensor hub service
+sudo systemctl start sensor-hub.service
 
 # View sensor data
-sudo systemctl status sensor-hub
+sudo systemctl status sensor-hub.service
 
 # Monitor CAN messages
 candump can0
@@ -330,13 +326,15 @@ Sensor Hub (Pi Zero 2W)          Controller (Pi 3)
 ```
 UGV ESP32CAN/
 ├── 📄 README.md                    # This documentation
-├── 📁 raspberry_pi/               # Main project (PRODUCTION)
-│   ├── sensor_hub.py              # Sensor fusion (Pi Zero 2W)
-│   ├── web_app.py                 # Web interface (Pi 3)
+├── 📁 sensor_hub/                 # Current sensor hub (Orange Pi Zero 2W)
+│   ├── sensor_hub_app.py          # Flask API + CAN telemetry
+│   ├── imu_handler.py             # WitMotion USB IMU parser
 │   ├── sensor-hub.service         # systemd service file
-│   ├── setup_sensor_hub.sh        # Automated setup script
-│   ├── templates/index.html       # Web interface template
+│   ├── templates/sensor_hub.html  # Sensor hub web interface
 │   └── README.md                  # Detailed usage guide
+├── 📁 raspberry_pi/               # Controller and legacy Raspberry Pi docs
+│   ├── motor_controller/          # Current controller implementation
+│   └── README.md                  # Controller / legacy setup notes
 ├── 📁 tools/                      # Testing and configuration
 │   └── 📁 dronecan/               # CAN testing tools
 └── 📁 archive/                    # Development history
@@ -389,10 +387,10 @@ python3 web_app.py
 
 ## 🔧 Configuration Options
 
-### Sensor Hub Settings (`sensor_hub.py`)
+### Sensor Hub Settings (`sensor_hub/config.py`)
 ```python
 # GPS Configuration
-GPS_PORT = '/dev/serial0'         # UART port for UM982
+GPS_PORT = '/dev/serial/by-id/usb-FTDI_FT231X_USB_UART_*'
 GPS_BAUDRATE = 230400            # UM982 baud rate
 
 # IMU Configuration
@@ -427,10 +425,10 @@ WEBSOCKET_TIMEOUT = 30           # Seconds
 ### Service Configuration (`sensor-hub.service`)
 ```ini
 [Service]
-ExecStart=/usr/bin/python3 /home/nicolay/sensor_hub.py
+ExecStart=/usr/bin/python3 /home/nicolay/sensor_hub/sensor_hub_app.py
 Restart=always
 RestartSec=5
-User=root
+User=nicolay
 ```
 
 ### CAN Interface Configuration (`can-interface.service`)
@@ -450,10 +448,10 @@ ExecStart=/bin/bash -c 'ip link set can0 down; ip link set can0 type can bitrate
 #### ❌ "Sensor Hub service not starting"
 **Cause**: Dependencies or permissions issue
 **Solution**:
-1. Check I2C: `i2cdetect -y 1` (should show IMU at 0x68)
-2. Check UART: `ls -la /dev/serial0`
+1. Check serial devices: `ls /dev/serial/by-id/`
+2. Check CAN interface: `ip link show can0`
 3. Verify python-can: `python3 -c "import can"`
-4. Check service logs: `journalctl -u sensor-hub -f`
+4. Check service logs: `journalctl -u sensor-hub.service -f`
 5. Restart service: `sudo systemctl restart sensor-hub`
 
 #### ❌ "GPS not receiving data"
@@ -495,17 +493,17 @@ ExecStart=/bin/bash -c 'ip link set can0 down; ip link set can0 type can bitrate
 #### Service Management
 ```bash
 # Check sensor hub status
-sudo systemctl status sensor-hub
+sudo systemctl status sensor-hub.service
 
 # View live logs
-journalctl -u sensor-hub -f
+journalctl -u sensor-hub.service -f
 
 # Stop for manual testing
-sudo systemctl stop sensor-hub
-python3 sensor_hub.py
+sudo systemctl stop sensor-hub.service
+python3 sensor_hub/sensor_hub_app.py
 
 # Restart service
-sudo systemctl restart sensor-hub
+sudo systemctl restart sensor-hub.service
 ```
 
 #### Hardware Testing
@@ -514,10 +512,10 @@ sudo systemctl restart sensor-hub
 candump can0
 
 # Test GPS
-cat /dev/serial0
+ls /dev/serial/by-id/
 
 # Test IMU
-i2cdetect -y 1
+curl http://127.0.0.1:8080/api/imu/status
 
 # Monitor web app
 tail -f /var/log/ugv_app.log
@@ -541,14 +539,14 @@ tail -f /var/log/ugv_app.log
 
 ## 🔄 Development History
 
-This project evolved from an Orange Cube-based implementation to the current RTK-GPS + IMU system:
+This project evolved from an Orange Cube-based implementation to the current RTK-GPS + WitMotion sensor hub system:
 
 ### Phase 1: ESP32 Prototype (`archive/esp32_files/`)
 - Initial CAN implementation attempts
 - CAN bus communication challenges
 - Multiple timeout and reset issues
 
-### Phase 2: RTK-GPS + IMU System (Current)
+### Phase 2: RTK-GPS + WitMotion Sensor Hub (Current)
 - Switched to Holybro UM982 dual-antenna RTK-GPS
 - Added WitMotion USB-IMU
 - Replaced legacy I2C fusion path with native WitMotion orientation frames
@@ -568,7 +566,7 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 1. **Test on hardware** - Always validate with real Raspberry Pi and sensors
 2. **Use service management** - Stop service before testing new versions
 3. **Document changes** - Update README and inline comments
-4. **Archive old code** - Move obsolete files to archive/
+4. **Archive old code** - Remove obsolete files or move them to archive/
 
 ## 📞 Support and Resources
 
@@ -595,14 +593,14 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 
 ## 🎯 Project Status Summary
 
-**🔄 ACTIVE DEVELOPMENT** - This RTK-GPS + IMU autonomous UGV system is under active development with a modular architecture featuring dual-antenna positioning, 6-DoF orientation, and real-time web interface.
+**🔄 ACTIVE DEVELOPMENT** - This RTK-GPS + WitMotion autonomous UGV system is under active development with a modular architecture featuring dual-antenna positioning, USB-based sensor ingestion, and real-time web interfaces.
 
 **Key Achievements:**
 - ✅ Sensor hub architecture (Pi Zero 2W + PiCAN FD)
 - ✅ RTK-GPS + IMU integration
 - ✅ JSON-based CAN communication (robust, human-readable)
 - ✅ Web interface framework with motor control
-- 🔄 Real-time sensor fusion and mapping
+- ✅ WitMotion-based IMU telemetry on the sensor hub
 
 **Communication Architecture:**
 - **Sensor Hub → Controller**: JSON CAN messages (50Hz sensor data)

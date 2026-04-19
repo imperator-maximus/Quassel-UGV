@@ -10,10 +10,11 @@ RTK-GPS + WitMotion USB-IMU + CAN-Telemetrie für den **Orange Pi Zero 2W (DietP
 - **NTRIP/RTK Client** - Automatische Verbindung zu RTK-Korrekturdaten
 - **NMEA-Parser** - Vollständige GPS-Datenverarbeitung
 - **RTK-Status Anzeige** - NO GPS / GPS FIX / RTK FLOAT / RTK FIXED
+- **WitMotion USB-IMU** - Native Roll/Pitch/Yaw-Daten über USB-Serial
 - **Web-Interface** - Einfache HTML5 Oberfläche mit Live-Updates
 - **Bing Maps Integration** - Direkter Link zu aktuellen Koordinaten
 - **GPS-NTRIP Bridge** - Automatisches Routing von RTK-Daten zum GPS
-- **Modular aufgebaut** - Einfach erweiterbar für IMU und CAN
+- **CAN-Telemetrie** - JSON-basierte Sensordaten über `can0`
 
 ## 📋 Voraussetzungen
 
@@ -85,7 +86,8 @@ http://orangeugv:8080
 
 ### Anzeige
 - **GPS Status** - RTK Status, Satelliten, Höhe, Heading
-- **Verbindung** - GPS Online/Offline, letzte Aktualisierung
+- **Verbindung** - GPS/NTRIP/IMU Online-Status, letzte Aktualisierung
+- **IMU Status** - Roll, Pitch, Yaw, Temperatur, Magnetometer
 - **Koordinaten** - Latitude, Longitude mit Bing Maps Link
 
 ## 🔧 Konfiguration
@@ -181,7 +183,7 @@ curl http://orangeugv:8080/api/status
 
 ### Logs anschauen
 ```bash
-ssh nicolay@raspberryzero
+ssh nicolay@orangeugv
 cd /home/nicolay/sensor_hub
 python3 sensor_hub_app.py
 ```
@@ -202,49 +204,63 @@ sensor_hub/
 
 ### GPS Status
 ```bash
-curl http://raspberryzero:8080/api/status
+curl http://orangeugv:8080/api/status
 ```
 Gibt: Latitude, Longitude, Altitude, Heading, RTK-Status, Satelliten
 
 ### Koordinaten
 ```bash
-curl http://raspberryzero:8080/api/coordinates
+curl http://orangeugv:8080/api/coordinates
 ```
 Gibt: Lat/Lon mit Bing Maps URL
 
 ### NTRIP Status
 ```bash
-curl http://raspberryzero:8080/api/ntrip/status
+curl http://orangeugv:8080/api/ntrip/status
 ```
 Gibt: NTRIP Verbindungsstatus, Bytes empfangen, Mountpoint
 
 ### Bridge Status
 ```bash
-curl http://raspberryzero:8080/api/bridge/status
+curl http://orangeugv:8080/api/bridge/status
 ```
 Gibt: GPS + NTRIP Status, RTK-Uptime, RTK-Fix-Zähler
 
 ### Health Check
 ```bash
-curl http://raspberryzero:8080/api/health
+curl http://orangeugv:8080/api/health
 ```
 Gibt: Allgemeiner System-Status
+
+### IMU Status
+```bash
+curl http://orangeugv:8080/api/imu/status
+curl http://orangeugv:8080/api/imu/data
+```
+Gibt: WitMotion Verbindungsstatus, Orientierung, Rohdaten und Temperatur
 
 ## 🔄 Nächste Schritte
 
 - [x] Orange-Pi-Deploy mit USB-CAN ✅
 - [x] GPS via USB/by-id ✅
 - [x] CAN JSON-Transport bidirektional ✅
+- [x] WitMotion USB-IMU integriert ✅
 - [ ] RTK/NTRIP wieder aktivieren
-- [ ] USB-IMU integrieren
+- [ ] Achs-/Montagerichtung der IMU im Fahrbetrieb validieren
 
 ## 🐛 Troubleshooting
 
 ### GPS zeigt "NO GPS"
-1. Überprüfe GPS-Verbindung: `cat /dev/serial0`
+1. Überprüfe GPS-Gerät: `ls /dev/serial/by-id/`
 2. Überprüfe Baud Rate: 230400 für UM982
 3. Überprüfe GPS-Stromversorgung
 4. Warte 30-60 Sekunden für GPS-Lock
+
+### IMU zeigt keine Daten
+1. Überprüfe WitMotion-Gerät: `ls /dev/serial/by-id/`
+2. Überprüfe API lokal: `curl http://127.0.0.1:8080/api/imu/status`
+3. Überprüfe Service-Logs: `journalctl -u sensor-hub.service -n 50`
+4. Überprüfe Baud Rate: 9600
 
 ### Web-Interface nicht erreichbar
 1. Überprüfe Port: `sudo netstat -tlnp | grep 8080`

@@ -2,14 +2,16 @@
 
 **RTK-GPS + USB-IMU telemetry with real-time web interface for autonomous UGV**
 
+> Hinweis: Der aktuelle produktive Sensor-Hub läuft inzwischen im Verzeichnis **`sensor_hub/`** auf einem **Orange Pi Zero 2W**. Diese Datei beschreibt vor allem den Raspberry-Pi-Controller und ältere Raspberry-Pi-Setup-Schritte.
+
 ## 🎯 Project Overview
 
 **Goal:** Implement autonomous UGV with RTK-GPS positioning, IMU orientation, and real-time web interface.
 
 **Hardware:**
-- **Sensor Hub**: Raspberry Pi Zero 2W + PiCAN FD
-  - Holybro UM982 (Dual-antenna RTK-GPS)
-  - WitMotion USB-IMU
+- **Sensor Hub**: Orange Pi Zero 2W + CANable2
+  - Holybro UM982 (Dual-antenna RTK-GPS, USB)
+  - WitMotion USB-IMU (USB)
 - **Motor Controller**: Raspberry Pi 3 + Innomaker RS485 CAN HAT
   - Motor control (2-channel Hardware-PWM via pigpio)
   - Mower control (Relay + PWM speed control)
@@ -53,15 +55,9 @@ motor_controller/
 
 ### 1. Sensor Hub Setup (Pi Zero 2W)
 ```bash
-# Run the complete setup script
-sudo ./setup_sensor_hub.sh
-
-# This will:
-# - Install all required packages (python3-can, pyserial)
-# - Configure PiCAN FD hardware in boot config
-# - Setup UART / USB serial access for sensors
-# - Configure CAN interface at 500 kbit/s
-# - Reboot if needed for hardware activation
+# Follow the current Orange Pi deploy guide
+cd ../sensor_hub
+less DEPLOY_ORANGE_PI.md
 ```
 
 ### 2. Motor Controller Setup (Pi 3) - v2.0
@@ -141,14 +137,13 @@ Connect Sensor Hub to Controller via CAN Bus:
 
 ### Sensor Hub (Pi Zero 2W) Boot Configuration
 ```bash
-# /boot/firmware/config.txt
-dtparam=spi=on
-dtparam=i2c_arm=on
-dtparam=uart0=on
-dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=25
-
-# UART for GPS (UM982)
-enable_uart=1
+# Current production sensor hub:
+# - Orange Pi Zero 2W
+# - CANable2 via USB / slcan
+# - Holybro UM982 via USB serial
+# - WitMotion via USB serial
+#
+# See ../sensor_hub/DEPLOY_ORANGE_PI.md for the tested setup.
 ```
 
 ### Controller (Pi 3) Boot Configuration
@@ -173,13 +168,13 @@ dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=25
 
 ```
 raspberry_pi/
-├── sensor_hub.py                  # Sensor fusion (Pi Zero 2W)
+├── motor_controller/              # Current Raspberry Pi 3 controller
 ├── web_app.py                     # Web interface (Pi 3)
-├── setup_sensor_hub.sh            # Sensor hub setup script
+├── setup_sensor_hub.sh            # Older Raspberry Pi sensor hub setup script
 ├── install_web_dependencies.sh    # Web interface setup
 ├── templates/index.html           # Web interface template
-├── README.md                       # This documentation
-└── sensor-hub.service             # systemd service file
+├── README.md                      # This documentation
+└── sensor-hub.service             # Historical Raspberry Pi service example
 ```
 
 ## 🧪 Testing & Validation
@@ -297,7 +292,7 @@ curl http://localhost:80
 - ✅ WitMotion USB device detected
 - ✅ UART GPS receiving NMEA data
 
-### Sensor Fusion Working
+### Sensor Hub Telemetry Working
 - ✅ GPS position updates at 50 Hz
 - ✅ IMU orientation data available
 - ✅ CAN messages broadcast to controller
