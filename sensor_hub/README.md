@@ -1,6 +1,8 @@
 # 👑 Quassel UGV - Sensor Hub 👑
 
-RTK-GPS + IMU Sensor Fusion für Raspberry Pi Zero 2W
+RTK-GPS + optional IMU + CAN-Telemetrie für den **Orange Pi Zero 2W (DietPi)**.
+
+> Der aktuelle produktive Deploy-Stand steht in **`DEPLOY_ORANGE_PI.md`**.
 
 ## 🎯 Features
 
@@ -16,39 +18,36 @@ RTK-GPS + IMU Sensor Fusion für Raspberry Pi Zero 2W
 ## 📋 Voraussetzungen
 
 ### Hardware
-- Raspberry Pi Zero 2W
-- Holybro UM982 RTK-GPS (verbunden mit /dev/serial0)
-- Stromversorgung
+- Orange Pi Zero 2W
+- CANable2 per USB (`can0` via `slcand`)
+- Holybro UM982 RTK-GPS per USB (`/dev/serial/by-id/...`)
+- optionale IMU (aktuell deaktiviert)
+- stabile 5V-Versorgung
 
 ### Software
-```bash
-sudo apt update
-sudo apt install python3-pip python3-flask
-pip3 install flask pyserial
-```
+Siehe **`DEPLOY_ORANGE_PI.md`** für die tatsächlich getesteten Pakete und Deploy-Schritte.
 
 ## 🚀 Installation
 
-### 1. Dateien auf Raspberry Pi Zero kopieren
+### 1. Dateien auf Orange Pi kopieren
 ```bash
-scp -r sensor_hub/ nicolay@raspberryzero:/home/nicolay/
+scp -r sensor_hub/ nicolay@orangeugv:/home/nicolay/
 ```
 
-### 2. Dependencies installieren
-```bash
-ssh nicolay@raspberryzero
-cd /home/nicolay/sensor_hub
-pip3 install python-dotenv
-```
+### 2. Dependencies und Service
 
-### 3. ⚠️ WICHTIG: Credentials konfigurieren
+Die aktuelle, getestete Anleitung steht in **`DEPLOY_ORANGE_PI.md`**.
+
+### 3. ⚠️ WICHTIG: RTK/NTRIP separat aktivieren
 
 **NIEMALS Passwörter in config.py speichern!**
 
-Erstelle eine `.env` Datei mit deinen NTRIP-Credentials:
+Für den aktuellen Orange-Deploy ist **GPS aktiv**, aber **NTRIP/RTK im Service vorerst deaktiviert**.
+
+Wenn du RTK aktivieren willst, erstelle eine `.env` Datei mit deinen NTRIP-Credentials:
 
 ```bash
-ssh nicolay@raspberryzero
+ssh nicolay@orangeugv
 cd /home/nicolay/sensor_hub
 cp .env.example .env
 nano .env
@@ -68,7 +67,7 @@ NTRIP_PASSWORD=your_password
 - Jeder Entwickler hat seine eigene `.env` Datei
 - Verwende `.env.example` als Template
 
-### 3. Anwendung starten
+### 4. Anwendung starten
 ```bash
 cd /home/nicolay/sensor_hub
 python3 sensor_hub_app.py
@@ -79,6 +78,9 @@ python3 sensor_hub_app.py
 Öffne im Browser:
 ```
 http://raspberryzero:8080
+
+# oder aktuell
+http://orangeugv:8080
 ```
 
 ### Anzeige
@@ -92,7 +94,7 @@ http://raspberryzero:8080
 
 ```python
 # GPS
-GPS_PORT = '/dev/serial0'           # UART Port
+GPS_PORT = '/dev/serial/by-id/usb-FTDI_FT231X_USB_UART_*'
 GPS_BAUDRATE = 230400              # UM982 Baud Rate
 GPS_TIMEOUT = 5.0                  # Timeout
 
@@ -155,8 +157,8 @@ NTRIP_PASSWORD = os.getenv('NTRIP_PASSWORD', 'your_password')
 
 ### GPS-Verbindung testen
 ```bash
-ssh nicolay@raspberryzero
-cat /dev/serial0
+ssh nicolay@orangeugv
+curl http://127.0.0.1:8080/api/status
 ```
 
 Sollte NMEA-Sätze anzeigen:
@@ -167,8 +169,8 @@ $GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47
 
 ### Web-Interface testen
 ```bash
-curl http://raspberryzero:8080/api/status
-curl http://raspberryzero:8080/api/coordinates
+curl http://orangeugv:8080/api/health
+curl http://orangeugv:8080/api/status
 ```
 
 ### Logs anschauen
@@ -224,11 +226,11 @@ Gibt: Allgemeiner System-Status
 
 ## 🔄 Nächste Schritte
 
-- [x] NTRIP-Client implementieren (RTK-Korrekturdaten) ✅
-- [ ] IMU-Integration (ICM-42688-P)
-- [ ] CAN-Bus Integration
-- [ ] Sensor Fusion (Position + Heading + Roll/Pitch)
-- [ ] Systemd Service Setup
+- [x] Orange-Pi-Deploy mit USB-CAN ✅
+- [x] GPS via USB/by-id ✅
+- [x] CAN JSON-Transport bidirektional ✅
+- [ ] RTK/NTRIP wieder aktivieren
+- [ ] USB-IMU integrieren
 
 ## 🐛 Troubleshooting
 

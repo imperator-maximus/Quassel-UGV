@@ -1,9 +1,9 @@
 # 🚀 NTRIP/RTK Setup - Schnellstart
 
-## Schritt 1: SSH auf Raspberry Pi Zero verbinden
+## Schritt 1: SSH auf Orange Pi verbinden
 
 ```bash
-ssh nicolay@raspberryzero
+ssh nicolay@orangeugv
 cd /home/nicolay/sensor_hub
 ```
 
@@ -31,13 +31,40 @@ Ersetze die Platzhalter mit deinen NTRIP-Daten:
 NTRIP_HOST=openrtk-mv.de
 NTRIP_PORT=2101
 NTRIP_MOUNTPOINT=openrtk_mv_2G
-NTRIP_USERNAME=odmv-3569452
-NTRIP_PASSWORD=hSahH6jy9e
+NTRIP_USERNAME=your_username
+NTRIP_PASSWORD=your_password
 ```
 
 **Speichern:** `Ctrl+O`, `Enter`, `Ctrl+X`
 
-## Schritt 5: Anwendung starten
+## Schritt 5: NTRIP im Service aktivieren
+
+Bearbeite die Service-Datei und setze:
+
+```bash
+sudo nano /etc/systemd/system/sensor-hub.service
+```
+
+von:
+
+```ini
+Environment=NTRIP_ENABLED=0
+```
+
+auf:
+
+```ini
+Environment=NTRIP_ENABLED=1
+```
+
+Danach:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart sensor-hub.service
+```
+
+## Schritt 6: Anwendung prüfen
 
 ```bash
 python3 sensor_hub_app.py
@@ -46,7 +73,7 @@ python3 sensor_hub_app.py
 Du solltest folgende Ausgabe sehen:
 
 ```
-✅ GPS verbunden: /dev/serial0 @ 230400 baud
+✅ GPS verbunden: /dev/serial/by-id/... @ 230400 baud
 ✅ GPS initialisiert
 🌉 Starte GPS-NTRIP Bridge
 🔗 Verbinde mit NTRIP-Server: openrtk-mv.de:2101/openrtk_mv_2G
@@ -56,11 +83,11 @@ Du solltest folgende Ausgabe sehen:
 🌐 Starte Web-Interface auf 0.0.0.0:8080
 ```
 
-## Schritt 6: Web-Interface öffnen
+## Schritt 7: Web-Interface öffnen
 
 Öffne im Browser:
 ```
-http://raspberryzero:8080
+http://orangeugv:8080
 ```
 
 Du solltest sehen:
@@ -79,8 +106,8 @@ Du solltest sehen:
    ```
 
 2. Überprüfe Credentials:
-   - Username: `odmv-3569452`
-   - Password: `hSahH6jy9e`
+   - Username: dein eigener NTRIP-Benutzername
+   - Password: dein eigenes NTRIP-Passwort
    - Host: `openrtk-mv.de`
    - Port: `2101`
    - Mountpoint: `openrtk_mv_2G`
@@ -94,7 +121,7 @@ Du solltest sehen:
 
 1. Überprüfe GPS-Verbindung:
    ```bash
-   cat /dev/serial0
+   curl http://127.0.0.1:8080/api/status
    ```
 
 2. Sollte NMEA-Sätze anzeigen (z.B. `$GPRMC...`)
@@ -132,16 +159,16 @@ Siehe `SECURITY.md` für mehr Informationen.
 
 ```bash
 # GPS Status
-curl http://raspberryzero:8080/api/status
+curl http://orangeugv:8080/api/status
 
 # NTRIP Status
-curl http://raspberryzero:8080/api/ntrip/status
+curl http://orangeugv:8080/api/ntrip/status
 
 # Bridge Status (GPS + NTRIP)
-curl http://raspberryzero:8080/api/bridge/status
+curl http://orangeugv:8080/api/bridge/status
 
 # Koordinaten
-curl http://raspberryzero:8080/api/coordinates
+curl http://orangeugv:8080/api/coordinates
 ```
 
 ## Nächste Schritte

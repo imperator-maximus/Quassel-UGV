@@ -10,6 +10,8 @@ import logging
 import signal
 import time
 import json
+import glob
+import subprocess
 from pathlib import Path
 
 # Konfiguration laden
@@ -18,8 +20,8 @@ import config
 from gps_handler import GPSHandler
 from ntrip_client import NTRIPClient
 from gps_ntrip_bridge import GPSNTRIPBridge
-from imu_handler import ICM42688P
-from sensor_fusion import SensorFusion
+from can_protocol import CANProtocol
+from telemetry_payload import build_status_payload, build_telemetry_payload, serialize_can_payload
 
 # Logging konfigurieren
 logging.basicConfig(
@@ -52,7 +54,18 @@ class SensorHubApp:
         self.bridge = None
         self.imu = None
         self.fusion = None  # Sensor Fusion Engine
+        self.fusion_thread = None
         self.can_bus = None
+        self.can_send_lock = threading.Lock()
+        self.resolved_gps_port = config.GPS_PORT
+        self.can_messages_sent = 0
+        self.can_send_errors = 0
+        self.last_command = None
+        self.last_command_time = None
+        self.can_protocol = CANProtocol(
+            max_frame_size=config.CAN_MAX_FRAME_SIZE,
+            frame_timeout=config.CAN_FRAME_TIMEOUT
+        )
         self.can_sender_thread = None
         self.can_receiver_thread = None
         self.app = Flask(__name__, template_folder='templates')
@@ -64,9 +77,13 @@ class SensorHubApp:
         """Initialisiert Sensoren"""
         logger.info("🚀 Initialisiere Sensoren...")
 
+        gps_port = self._resolve_device_path(config.GPS_PORT)
+        self.resolved_gps_port = gps_port
+        logger.info(f"📡 Verwende GPS-Port: {gps_port}")
+
         # GPS initialisieren
         self.gps = GPSHandler(
-            port=config.GPS_PORT,
+            port=gps_port,
             baudrate=config.GPS_BAUDRATE,
             timeout=config.GPS_TIMEOUT
         )
@@ -100,6 +117,14 @@ class SensorHubApp:
 
         # IMU initialisieren wenn aktiviert
         if config.IMU_ENABLED:
+            try:
+                from imu_handler import ICM42688P
+                from sensor_fusion import SensorFusion
+            except ImportError as e:
+                logger.error(f"❌ IMU aktiviert, aber Abhängigkeit fehlt: {e}")
+                logger.info("ℹ️  Starte ohne IMU")
+                return
+
             self.imu = ICM42688P(
                 bus=config.IMU_BUS,
                 address=config.IMU_ADDRESS,
@@ -161,8 +186,8 @@ class SensorHubApp:
             self.can_bus = None
 
     def _can_sender_loop(self):
-        """Sendet Sensor-Daten über CAN (50Hz)"""
-        interval = 1.0 / config.FUSION_RATE  # 50Hz = 20ms
+        """Sendet Sensor-Daten über CAN mit konfigurierbarer Rate"""
+        interval = 1.0 / config.CAN_SEND_RATE
 
         while self.running:
             try:
@@ -174,7 +199,7 @@ class SensorHubApp:
                 sensor_data = self._get_sensor_data()
 
                 # JSON-String erstellen
-                json_str = json.dumps(sensor_data)
+                json_str = serialize_can_payload(sensor_data)
 
                 # CAN-Nachricht senden (max 8 Bytes pro Frame)
                 # Bei längeren Nachrichten müssen wir fragmentieren
@@ -198,12 +223,22 @@ class SensorHubApp:
                 if msg is None:
                     continue
 
-                # JSON aus CAN-Daten dekodieren
+                if msg.arbitration_id != config.CAN_CONTROLLER_ID:
+                    self.can_protocol.cleanup_old_buffers()
+                    continue
+
                 try:
-                    data = json.loads(msg.data.decode('utf-8'))
+                    json_str = self.can_protocol.decode_frame(msg.arbitration_id, bytes(msg.data))
+                    if not json_str:
+                        self.can_protocol.cleanup_old_buffers()
+                        continue
+
+                    data = json.loads(json_str)
                     self._process_can_command(data)
-                except:
-                    pass  # Nicht-JSON Nachrichten ignorieren
+                except json.JSONDecodeError as e:
+                    logger.warning(f"⚠️  CAN JSON-Decode Fehler: {e}")
+
+                self.can_protocol.cleanup_old_buffers()
 
             except Exception as e:
                 logger.error(f"❌ CAN-Receiver Fehler: {e}")
@@ -243,84 +278,111 @@ class SensorHubApp:
 
     def _get_sensor_data(self):
         """Sammelt aktuelle Sensor-Daten"""
-        data = {
-            'timestamp': time.time()
-        }
-
-        # GPS-Daten
+        gps_status = None
         if self.gps:
             gps_status = self.gps.get_status()
-            data['gps'] = {
-                'lat': gps_status.get('latitude', 0.0),
-                'lon': gps_status.get('longitude', 0.0),
-                'altitude': gps_status.get('altitude', 0.0)
-            }
-            data['rtk_status'] = gps_status.get('quality_indicator', 'NONE')
 
-        # IMU-Daten (Orientierung aus Fusion Engine)
+        imu_data = None
+        orientation = None
         if self.imu and self.imu.connected and self.fusion:
             imu_data = self.imu.get_data()
             orientation = self.fusion.get_orientation()
 
-            data['imu'] = {
-                'roll': orientation['roll'],
-                'pitch': orientation['pitch'],
-                'yaw': orientation['yaw'],
-                'heading': orientation['heading'],
-                'is_calibrated': imu_data['is_calibrated']
-            }
-            # Heading aus Fusion Engine (fusioniert mit GPS wenn verfügbar)
-            data['heading'] = orientation['heading']
+        return build_telemetry_payload(gps_status=gps_status, orientation=orientation, imu_data=imu_data)
 
-        return data
+    def _get_status_response(self):
+        """Erstellt eine erweiterte Status-Antwort für On-Demand-Kommandos."""
+        return build_status_payload(
+            self._get_sensor_data(),
+            {
+                'source': 'sensor_hub_status',
+                'gps_connected': bool(self.gps and self.gps.running),
+                'gps_port': self.resolved_gps_port,
+                'imu_enabled': config.IMU_ENABLED,
+                'imu_connected': bool(self.imu and self.imu.connected),
+                'ntrip_enabled': config.NTRIP_ENABLED,
+                'ntrip_connected': bool(self.ntrip and self.ntrip.is_connected()),
+                'can_enabled': bool(self.can_bus),
+                'can_interface': config.CAN_INTERFACE,
+                'messages_sent': self.can_messages_sent,
+                'send_errors': self.can_send_errors,
+                'last_command': self.last_command,
+                'last_command_time': self.last_command_time,
+            }
+        )
 
     def _send_can_json(self, json_str):
         """Sendet JSON-String über CAN (Multi-Frame für längere Nachrichten)"""
-        data_bytes = json_str.encode('utf-8')
+        if not self.can_bus:
+            return False
 
-        # Multi-Frame Übertragung (6 Bytes Nutzdaten pro Frame, 2 Bytes Header)
-        chunk_size = 6
-        total_frames = (len(data_bytes) + chunk_size - 1) // chunk_size
+        with self.can_send_lock:
+            data_bytes = json_str.encode('utf-8')
 
-        for frame_idx in range(total_frames):
-            start = frame_idx * chunk_size
-            end = min(start + chunk_size, len(data_bytes))
-            chunk = data_bytes[start:end]
+            # Multi-Frame Übertragung (6 Bytes Nutzdaten pro Frame, 2 Bytes Header)
+            chunk_size = 6
+            total_frames = (len(data_bytes) + chunk_size - 1) // chunk_size
 
-            # Frame-Header: [frame_idx, total_frames, ...data (max 6 bytes)]
-            frame_data = bytes([frame_idx, total_frames]) + chunk
+            for frame_idx in range(total_frames):
+                start = frame_idx * chunk_size
+                end = min(start + chunk_size, len(data_bytes))
+                chunk = data_bytes[start:end]
 
-            # Auf 8 Bytes auffüllen
-            frame_data = frame_data + b'\x00' * (8 - len(frame_data))
+                # Frame-Header: [frame_idx, total_frames, ...data (max 6 bytes)]
+                frame_data = bytes([frame_idx, total_frames]) + chunk
 
-            msg = can.Message(
-                arbitration_id=0x100,  # Sensor Hub ID
-                data=frame_data,
-                is_extended_id=False
-            )
+                # Auf 8 Bytes auffüllen
+                frame_data = frame_data + b'\x00' * (8 - len(frame_data))
 
-            try:
-                self.can_bus.send(msg)
-                # Kleine Pause zwischen Frames
-                time.sleep(0.001)  # 1ms
-            except Exception as e:
-                logger.error(f"❌ CAN-Send Fehler (Frame {frame_idx}/{total_frames}): {e}")
-                break
+                msg = can.Message(
+                    arbitration_id=config.CAN_SENSOR_HUB_ID,
+                    data=frame_data,
+                    is_extended_id=False
+                )
+
+                try:
+                    self.can_bus.send(msg)
+                    # Kleine Pause zwischen Frames
+                    time.sleep(0.001)  # 1ms
+                except Exception as e:
+                    self.can_send_errors += 1
+                    logger.error(f"❌ CAN-Send Fehler (Frame {frame_idx}/{total_frames}): {e}")
+                    return False
+
+        self.can_messages_sent += 1
+        return True
 
     def _process_can_command(self, data):
         """Verarbeitet CAN-Befehle vom Controller"""
         cmd = data.get('cmd') or data.get('request')
+        self.last_command = cmd
+        self.last_command_time = round(time.time(), 3)
 
         if cmd == 'status_request' or cmd == 'sensor_status':
             logger.info("📡 Status-Anfrage empfangen")
-            # TODO: Status-Antwort senden
+            status_response = self._get_status_response()
+            if self._send_can_json(serialize_can_payload(status_response)):
+                logger.info("📤 Sensor-Status über CAN gesendet")
 
         elif cmd == 'restart':
             logger.warning("🔄 Restart-Befehl empfangen")
-            # TODO: Restart implementieren
+            threading.Thread(target=self._restart_service_async, daemon=True).start()
 
         else:
             logger.debug(f"📡 Unbekannter CAN-Befehl: {cmd}")
+
+    def _restart_service_async(self):
+        """Startet den Sensor-Hub-Dienst asynchron neu."""
+        try:
+            time.sleep(0.5)
+            subprocess.Popen(
+                ['sudo', 'systemctl', 'restart', 'sensor-hub.service'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+        except Exception as e:
+            logger.error(f"❌ Restart fehlgeschlagen: {e}")
 
     def _setup_routes(self):
         """Konfiguriert Flask Routes"""
@@ -362,6 +424,9 @@ class SensorHubApp:
                 'status': 'ok',
                 'gps_connected': self.gps.running if self.gps else False,
                 'ntrip_connected': self.ntrip.is_connected() if self.ntrip else False,
+                'can_enabled': bool(self.can_bus),
+                'gps_port': self.resolved_gps_port,
+                'imu_enabled': config.IMU_ENABLED,
                 'timestamp': time.time()
             })
 
@@ -433,6 +498,15 @@ class SensorHubApp:
                 return jsonify({'error': 'Sensor Fusion nicht aktiviert'}), 503
 
             return jsonify(self.fusion.get_motion_status())
+
+    @staticmethod
+    def _resolve_device_path(path_pattern: str) -> str:
+        """Löst Wildcards für stabile /dev/serial/by-id-Pfade auf."""
+        if any(token in path_pattern for token in '*?['):
+            matches = sorted(glob.glob(path_pattern))
+            if matches:
+                return matches[0]
+        return path_pattern
     
     def run(self, host: str = None, port: int = None, debug: bool = None):
         """Startet die Anwendung"""
