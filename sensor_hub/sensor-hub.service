@@ -1,5 +1,5 @@
 [Unit]
-Description=Quassel UGV Sensor Hub (RTK-GPS + optional IMU + CAN)
+Description=Quassel UGV Sensor Hub (RTK-GPS + WitMotion IMU + CAN)
 Wants=network-online.target slcan-can0.service
 After=network-online.target slcan-can0.service
 
@@ -9,7 +9,10 @@ User=nicolay
 SupplementaryGroups=dialout
 WorkingDirectory=/home/nicolay/sensor_hub
 Environment=PYTHONUNBUFFERED=1
-Environment=IMU_ENABLED=0
+Environment=IMU_ENABLED=1
+Environment=IMU_TYPE=witmotion
+Environment=IMU_PORT=/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
+Environment=IMU_BAUDRATE=9600
 Environment=NTRIP_ENABLED=0
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 20); do /usr/sbin/ip link show can0 >/dev/null 2>&1 && exit 0; sleep 1; done; echo "can0 not ready" >&2; exit 1'
 ExecStart=/usr/bin/python3 /home/nicolay/sensor_hub/sensor_hub_app.py

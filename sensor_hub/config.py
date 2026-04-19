@@ -1,10 +1,4 @@
-"""
-Quassel UGV Sensor Hub - Konfiguration
-RTK-GPS + IMU Sensor Fusion für Raspberry Pi Zero 2W
-
-WICHTIG: Sensitive Daten (Passwörter, API-Keys) gehören in .env Datei!
-Siehe README.md für Setup-Anleitung.
-"""
+"""Quassel UGV Sensor Hub - Konfiguration für GPS, WitMotion-IMU und CAN."""
 
 import os
 from dotenv import load_dotenv
@@ -40,11 +34,13 @@ NTRIP_TIMEOUT = float(os.getenv('NTRIP_TIMEOUT', '10.0'))
 NTRIP_RECONNECT_INTERVAL = float(os.getenv('NTRIP_RECONNECT_INTERVAL', '30.0'))
 
 # ============================================================================
-# IMU KONFIGURATION (ICM-42688-P)
+# IMU KONFIGURATION
 # ============================================================================
 IMU_ENABLED = _env_flag('IMU_ENABLED', False)
-IMU_ADDRESS = int(os.getenv('IMU_ADDRESS', '0x69'), 0)
-IMU_BUS = int(os.getenv('IMU_BUS', '1'))
+IMU_TYPE = os.getenv('IMU_TYPE', 'witmotion').strip().lower()
+IMU_PORT = os.getenv('IMU_PORT', '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0')
+IMU_BAUDRATE = int(os.getenv('IMU_BAUDRATE', '9600'))
+IMU_TIMEOUT = float(os.getenv('IMU_TIMEOUT', '1.0'))
 IMU_SAMPLE_RATE = int(os.getenv('IMU_SAMPLE_RATE', '200'))
 
 # ============================================================================
@@ -56,10 +52,8 @@ WEB_DEBUG = _env_flag('WEB_DEBUG', False)
 WEB_UPDATE_RATE = int(os.getenv('WEB_UPDATE_RATE', '2'))
 
 # ============================================================================
-# SENSOR FUSION KONFIGURATION
+# TELEMETRIE KONFIGURATION
 # ============================================================================
-FUSION_RATE = int(os.getenv('FUSION_RATE', '50'))
-TRAIL_LENGTH = int(os.getenv('TRAIL_LENGTH', '100'))
 CAN_SEND_RATE = int(os.getenv('CAN_SEND_RATE', '10'))
 
 # ============================================================================

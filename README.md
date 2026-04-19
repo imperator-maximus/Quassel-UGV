@@ -6,8 +6,8 @@ A professional autonomous UGV system with RTK-GPS positioning, IMU-based orienta
 
 This project implements a complete autonomous UGV system featuring:
 - **Dual-antenna RTK-GPS** (Holybro UM982) for precise positioning and heading
-- **6-DoF IMU** (ICM-42688-P) for roll/pitch orientation
-- **CAN Bus Integration** for sensor fusion and motor control
+- **WitMotion USB-IMU** for roll/pitch/yaw orientation
+- **CAN Bus Integration** for sensor and motor telemetry
 - **Real-time Web Interface** with Bing Maps satellite view
 - **Modular Architecture** with Pi Zero 2W sensor hub and Pi 3 controller
 
@@ -27,8 +27,8 @@ This project implements a complete autonomous UGV system featuring:
 │  MAST (Pi Zero 2W + PiCAN FD)           │
 │  ├─ Holybro UM982 (Dual-Antenna RTK)    │
 │  │  └─ UART (GPIO 14/15, 230400 baud)   │
-│  ├─ ICM-42688-P IMU                      │
-│  │  └─ I2C (GPIO 2/3, Adresse 0x68)     │
+│  ├─ WitMotion USB-IMU                    │
+│  │  └─ USB Serial (/dev/serial/by-id)   │
 │  └─ CAN Transceiver (500 kbit/s)        │
 └─────────────────────────────────────────┘
             │
@@ -52,14 +52,14 @@ This project implements a complete autonomous UGV system featuring:
 | Component | Function | Interface |
 |-----------|----------|-----------|
 | UM982 GPS | RTK Position + Dual-Antenna Heading | UART /dev/serial0 |
-| ICM-42688-P | 6-DoF IMU (Accel + Gyro) | I2C Bus 1 |
+| WitMotion USB-IMU | 9-DoF IMU incl. orientation frames | USB Serial |
 | PiCAN FD | CAN Bus Gateway | SocketCAN can0 |
 | Python Script | Sensor-Fusion & CAN-Broadcast | Systemd Service |
 
 **Data Flow:**
 - GPS-NMEA reading (pyserial)
-- IMU data reading (smbus2 / i2c)
-- Sensor fusion (Position + Heading + Roll/Pitch)
+- IMU data reading (pyserial / WitMotion binary protocol)
+- Sensor telemetry (Position + Heading + Roll/Pitch/Yaw)
 - CAN message transmission (python-can)
 
 **Pi 3 (Controller + WebApp):**
@@ -91,13 +91,12 @@ Testing and configuration utilities for CAN communication:
 ### 1. Install Dependencies on Raspberry Pi Zero 2W (Sensor Hub)
 ```bash
 # Install required packages
-sudo apt install python3-pip python3-smbus2 python3-can
+sudo apt install python3-pip python3-can python3-serial
 
 # Install Python libraries
 pip3 install pyserial python-can
 
-# Enable I2C and UART
-sudo raspi-config nonint do_i2c 0
+# Enable UART / serial devices as needed
 sudo raspi-config nonint do_serial 0
 ```
 
@@ -139,8 +138,8 @@ python3 web_app.py
 - **CAN Interface**: PiCAN FD (MCP2515 + 16MHz oscillator)
 - **GPS**: Holybro UM982 (Dual-antenna RTK)
   - UART: GPIO 14/15 (230400 baud)
-- **IMU**: ICM-42688-P (6-DoF)
-  - I2C: GPIO 2/3 (Address 0x68)
+- **IMU**: WitMotion USB-IMU
+  - USB serial via `/dev/serial/by-id/...`
 - **Operating System**: Raspberry Pi OS (Debian-based)
 - **Network**: CAN Bus to Controller
 
@@ -160,7 +159,7 @@ python3 web_app.py
 
 **Sensor Pin Usage:**
 - **GPIO 14/15**: UART (GPS UM982)
-- **GPIO 2/3**: I2C (IMU ICM-42688-P)
+- **USB Serial**: WitMotion IMU + CANable2
 
 **Reserved/System Pins:**
 - **GPIO 9-11**: SPI (used by HAT)
@@ -246,10 +245,10 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
   - Precise positioning (cm-level accuracy)
   - Dual-antenna heading (no compass needed)
   - NMEA output via UART
-- **6-DoF IMU** (ICM-42688-P)
-  - Accelerometer + Gyroscope
-  - Roll/Pitch orientation
-  - I2C interface
+- **WitMotion USB-IMU**
+  - Accelerometer + Gyroscope + orientation frames
+  - Roll/Pitch/Yaw orientation
+  - USB serial interface
 
 ### Sensor Fusion
 - **Real-time position tracking** with RTK-GPS
@@ -315,7 +314,7 @@ tail -f /var/log/ugv_app.log
 ```
 Sensor Hub (Pi Zero 2W)          Controller (Pi 3)
 ├─ GPS (UM982)                   ├─ Web Interface
-├─ IMU (ICM-42688-P)             ├─ Motor Control
+├─ IMU (WitMotion USB)           ├─ Motor Control
 └─ CAN Transceiver               └─ CAN Transceiver
         │                                │
         └────────── CAN Bus ────────────┘
@@ -397,16 +396,16 @@ GPS_PORT = '/dev/serial0'         # UART port for UM982
 GPS_BAUDRATE = 230400            # UM982 baud rate
 
 # IMU Configuration
-IMU_ADDRESS = 0x68               # I2C address for ICM-42688-P
-IMU_BUS = 1                      # I2C bus number
+IMU_TYPE = 'witmotion'
+IMU_PORT = '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0'
+IMU_BAUDRATE = 9600
 
 # CAN Configuration
 CAN_INTERFACE = 'can0'           # CAN interface
 CAN_BITRATE = 500000             # 500 kbit/s for sensor hub
 
-# Sensor Fusion
-FUSION_RATE = 50                 # Hz (20ms updates)
-TRAIL_LENGTH = 100               # Number of positions to keep
+# Telemetry
+CAN_SEND_RATE = 10               # Hz CAN transmit rate
 ```
 
 ### Web App Settings (`web_app.py`)
@@ -466,12 +465,12 @@ ExecStart=/bin/bash -c 'ip link set can0 down; ip link set can0 type can bitrate
 4. Test with: `python3 -c "import serial; s=serial.Serial('/dev/serial0', 230400); print(s.readline())"`
 
 #### ❌ "IMU not responding"
-**Cause**: I2C communication failure
+**Cause**: USB serial device or IMU communication failure
 **Solution**:
-1. Check I2C address: `i2cdetect -y 1` (should show 0x68)
-2. Verify I2C pins (GPIO 2/3)
-3. Check pull-up resistors (4.7kΩ typical)
-4. Test with: `python3 -c "import smbus2; bus=smbus2.SMBus(1); print(bus.read_byte_data(0x68, 0x75))"`
+1. Check device path: `ls /dev/serial/by-id/`
+2. Verify the WitMotion symlink exists
+3. Confirm configured baudrate is `9600`
+4. Check service logs: `journalctl -u sensor-hub.service -n 50`
 
 #### ❌ "CAN messages not received"
 **Cause**: CAN interface or hardware issue
@@ -551,8 +550,8 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 
 ### Phase 2: RTK-GPS + IMU System (Current)
 - Switched to Holybro UM982 dual-antenna RTK-GPS
-- Added ICM-42688-P 6-DoF IMU
-- Implemented sensor fusion on Pi Zero 2W
+- Added WitMotion USB-IMU
+- Replaced legacy I2C fusion path with native WitMotion orientation frames
 - Created web interface with Bing Maps
 - Implemented JSON-based CAN protocol for robust communication
 - Achieved superior positioning and orientation capabilities
@@ -576,7 +575,7 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 ### Official Documentation
 - **Raspberry Pi Foundation**: https://www.raspberrypi.org/documentation/
 - **Holybro UM982**: https://holybro.com/products/um982-rtk-gnss-receiver
-- **ICM-42688-P**: https://invensense.tdk.com/products/motion-tracking/6-axis/icm-42688-p/
+- **WitMotion Protocol**: https://wit-motion.gitbook.io/witmotion-sdk/wit-standard-protocol/wit-standard-communication-protocol
 - **PiCAN FD**: https://www.skpang.co.uk/products/pican-fd-can-bus-board-for-raspberry-pi
 - **pigpio Library**: http://abyz.me.uk/rpi/pigpio/
 
@@ -585,7 +584,7 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 - **Raspberry Pi 3**: ARM Cortex-A53 Quad-Core
 - **PiCAN FD**: MCP2515-based CAN interface
 - **Holybro UM982**: Dual-antenna RTK-GPS receiver
-- **ICM-42688-P**: 6-DoF IMU sensor
+- **WitMotion USB-IMU**: IMU sensor with native orientation output
 
 ### Community
 - **Raspberry Pi Community**: https://www.raspberrypi.org/forums/

@@ -6,7 +6,7 @@
 - **OS:** DietPi
 - **CAN:** CANable2 per USB via `slcan-can0.service` → `can0`
 - **GPS:** Holybro UM982 per USB, stabil über `/dev/serial/by-id/...`
-- **IMU:** aktuell deaktiviert
+- **IMU:** WitMotion USB aktiv über `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`
 - **NTRIP/RTK:** im Service derzeit bewusst deaktiviert für stabilen Erstbetrieb
 
 ## 1. Systempakete installieren
@@ -56,10 +56,13 @@ curl http://127.0.0.1:8080/api/status
 
 ## 6. Aktuelle Default-Annahmen
 
-Der Service startet derzeit absichtlich mit:
+Der Service startet derzeit mit:
 
 ```ini
-Environment=IMU_ENABLED=0
+Environment=IMU_ENABLED=1
+Environment=IMU_TYPE=witmotion
+Environment=IMU_PORT=/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
+Environment=IMU_BAUDRATE=9600
 Environment=NTRIP_ENABLED=0
 ```
 
@@ -67,7 +70,7 @@ Das bedeutet:
 
 - **GPS ist aktiv**
 - **CAN ist aktiv**
-- **IMU ist aus**
+- **WitMotion-IMU ist aktiv**
 - **RTK/NTRIP ist aus**
 
 ## 7. RTK/NTRIP wieder aktivieren

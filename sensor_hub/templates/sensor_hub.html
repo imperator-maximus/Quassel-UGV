@@ -207,7 +207,7 @@
     <div class="container">
         <div class="header">
             <h1>👑 Quassel UGV - Sensor Hub 👑</h1>
-            <p>RTK-GPS + IMU Sensor Fusion</p>
+            <p>RTK-GPS + WitMotion USB-IMU + CAN Telemetrie</p>
         </div>
 
         <div id="error-container"></div>
@@ -268,9 +268,23 @@
                     </span>
                 </div>
                 <div class="status-item">
-                    <span class="status-label">Kalibriert:</span>
+                    <span class="status-label">Datenstatus:</span>
                     <span class="status-value" id="imu-calibrated">
-                        <span class="status-badge badge-no-gps">NEIN</span>
+                        <span class="status-badge badge-no-gps">STARTET</span>
+                    </span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">IMU Typ:</span>
+                    <span class="status-value" id="imu-type">-</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Quelle:</span>
+                    <span class="status-value" id="imu-source">-</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">🚗 Bewegung:</span>
+                    <span class="status-value" id="imu-motion">
+                        <span class="status-badge badge-no-gps">UNBEKANNT</span>
                     </span>
                 </div>
                 <div class="status-item">
@@ -346,6 +360,18 @@
                     <span class="status-label">Gyro Z:</span>
                     <span class="status-value" id="imu-gyro-z">0.00 °/s</span>
                 </div>
+                <div class="status-item">
+                    <span class="status-label">Mag X:</span>
+                    <span class="status-value" id="imu-mag-x">-</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Mag Y:</span>
+                    <span class="status-value" id="imu-mag-y">-</span>
+                </div>
+                <div class="status-item">
+                    <span class="status-label">Mag Z:</span>
+                    <span class="status-value" id="imu-mag-z">-</span>
+                </div>
             </div>
         </div>
 
@@ -377,9 +403,18 @@
         const API_BASE = '/api';
         const UPDATE_INTERVAL = 2000; // 2 Sekunden
 
+        function fetchJson(url) {
+            return fetch(url).then(async response => {
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(payload.error || `HTTP ${response.status}`);
+                }
+                return payload;
+            });
+        }
+
         function updateStatus() {
-            fetch(`${API_BASE}/status`)
-                .then(response => response.json())
+            fetchJson(`${API_BASE}/status`)
                 .then(data => {
                     const gps = data.gps;
                     
@@ -423,8 +458,7 @@
                 });
 
             // Bridge Status aktualisieren
-            fetch(`${API_BASE}/bridge/status`)
-                .then(response => response.json())
+            fetchJson(`${API_BASE}/bridge/status`)
                 .then(data => {
                     // NTRIP verbunden
                     const nrtipBadge = document.getElementById('ntrip-connected');
@@ -450,15 +484,13 @@
                     }
                 })
                 .catch(error => {
-                    console.error('Bridge Status Update Fehler:', error);
+                    console.warn('Bridge Status Update Fehler:', error);
+                    document.getElementById('ntrip-connected').innerHTML = '<span class="status-badge badge-no-gps">OFFLINE</span>';
+                    document.getElementById('rtk-uptime').textContent = '0s';
                 });
             
             // Koordinaten aktualisieren
-            fetch(`${API_BASE}/coordinates`)
-                .then(response => {
-                    if (!response.ok) throw new Error('Koordinaten API Fehler');
-                    return response.json();
-                })
+            fetchJson(`${API_BASE}/coordinates`)
                 .then(data => {
                     document.getElementById('latitude').textContent = data.latitude.toFixed(6) + '°';
                     document.getElementById('longitude').textContent = data.longitude.toFixed(6) + '°';
@@ -471,8 +503,7 @@
                 });
 
             // IMU Daten aktualisieren
-            fetch(`${API_BASE}/imu/data`)
-                .then(response => response.json())
+            fetchJson(`${API_BASE}/imu/data`)
                 .then(data => {
                     // Rohdaten
                     document.getElementById('imu-accel-x').textContent = data.accel.x.toFixed(2) + ' m/s²';
@@ -482,6 +513,18 @@
                     document.getElementById('imu-gyro-y').textContent = data.gyro.y.toFixed(2) + ' °/s';
                     document.getElementById('imu-gyro-z').textContent = data.gyro.z.toFixed(2) + ' °/s';
                     document.getElementById('imu-temp').textContent = data.temperature.toFixed(1) + '°C';
+                    document.getElementById('imu-type').textContent = data.imu_type || '-';
+                    document.getElementById('imu-source').textContent = data.orientation_source || '-';
+
+                    if (data.mag) {
+                        document.getElementById('imu-mag-x').textContent = data.mag.x.toFixed(0);
+                        document.getElementById('imu-mag-y').textContent = data.mag.y.toFixed(0);
+                        document.getElementById('imu-mag-z').textContent = data.mag.z.toFixed(0);
+                    } else {
+                        document.getElementById('imu-mag-x').textContent = '-';
+                        document.getElementById('imu-mag-y').textContent = '-';
+                        document.getElementById('imu-mag-z').textContent = '-';
+                    }
 
                     // Orientierung
                     document.getElementById('imu-roll').textContent = data.roll.toFixed(1) + '°';
@@ -491,9 +534,21 @@
                     // Kalibrierung Status
                     const calibBadge = document.getElementById('imu-calibrated');
                     if (data.is_calibrated) {
-                        calibBadge.innerHTML = '<span class="status-badge" style="background: #00aa00; color: #fff;">JA</span>';
+                        calibBadge.innerHTML = '<span class="status-badge" style="background: #00aa00; color: #fff;">BEREIT</span>';
                     } else {
-                        calibBadge.innerHTML = '<span class="status-badge badge-no-gps">NEIN</span>';
+                        calibBadge.innerHTML = '<span class="status-badge badge-no-gps">STARTET</span>';
+                    }
+
+                    // Bewegungsstatus
+                    const motionBadge = document.getElementById('imu-motion');
+                    if (data.is_stationary !== undefined) {
+                        if (data.is_stationary) {
+                            motionBadge.innerHTML = '<span class="status-badge" style="background: #0066cc; color: #fff;">STILLSTAND</span>';
+                        } else {
+                            motionBadge.innerHTML = '<span class="status-badge" style="background: #00aa00; color: #fff;">IN BEWEGUNG</span>';
+                        }
+                    } else {
+                        motionBadge.innerHTML = '<span class="status-badge badge-no-gps">UNBEKANNT</span>';
                     }
 
                     // Kompass aktualisieren
@@ -506,22 +561,25 @@
                     document.getElementById('orientation-pitch').textContent = data.pitch.toFixed(1) + '°';
                 })
                 .catch(error => {
-                    console.error('IMU Update Fehler:', error);
+                    console.warn('IMU Update Fehler:', error);
+                    document.getElementById('imu-type').textContent = '-';
+                    document.getElementById('imu-source').textContent = '-';
                 });
 
             // IMU Status aktualisieren
-            fetch(`${API_BASE}/imu/status`)
-                .then(response => response.json())
+            fetchJson(`${API_BASE}/imu/status`)
                 .then(data => {
                     const imuBadge = document.getElementById('imu-connected');
-                    if (data.connected) {
+                    document.getElementById('imu-type').textContent = data.imu_type || document.getElementById('imu-type').textContent;
+                    if (data.connected && (data.receiving_data === undefined || data.receiving_data)) {
                         imuBadge.innerHTML = '<span class="status-badge" style="background: #00aa00; color: #fff;">ONLINE</span>';
                     } else {
-                        imuBadge.innerHTML = '<span class="status-badge badge-no-gps">OFFLINE</span>';
+                        imuBadge.innerHTML = '<span class="status-badge badge-gps-fix">STARTET</span>';
                     }
                 })
                 .catch(error => {
-                    console.error('IMU Status Update Fehler:', error);
+                    console.warn('IMU Status Update Fehler:', error);
+                    document.getElementById('imu-connected').innerHTML = '<span class="status-badge badge-no-gps">OFFLINE</span>';
                 });
         }
 

@@ -173,7 +173,7 @@ curl http://orangeugv:8080/api/coordinates
 
 ## Nächste Schritte
 
-- [ ] IMU-Integration (wenn ICM-42688-P ankommt)
+- [x] WitMotion USB-IMU integriert
 - [ ] CAN-Bus Integration
 - [ ] Systemd Service für Auto-Start
 - [ ] Produktions-WSGI Server (Gunicorn)

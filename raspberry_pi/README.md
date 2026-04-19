@@ -1,6 +1,6 @@
 # 🚀 Quassel UGV - Sensor Hub & Motor Controller v2.0
 
-**RTK-GPS + IMU sensor fusion with real-time web interface for autonomous UGV**
+**RTK-GPS + USB-IMU telemetry with real-time web interface for autonomous UGV**
 
 ## 🎯 Project Overview
 
@@ -9,7 +9,7 @@
 **Hardware:**
 - **Sensor Hub**: Raspberry Pi Zero 2W + PiCAN FD
   - Holybro UM982 (Dual-antenna RTK-GPS)
-  - ICM-42688-P (6-DoF IMU)
+  - WitMotion USB-IMU
 - **Motor Controller**: Raspberry Pi 3 + Innomaker RS485 CAN HAT
   - Motor control (2-channel Hardware-PWM via pigpio)
   - Mower control (Relay + PWM speed control)
@@ -20,7 +20,7 @@
 **Communication:**
 - CAN Bus: 500 kbit/s (Sensor Hub) / 1 Mbps (Motor Control)
 - JSON-based Multi-Frame Protocol
-- Sensor Fusion: 50 Hz updates
+- IMU/GPS telemetry updates
 - WebSocket: Real-time web interface
 
 ## 📁 Architektur
@@ -57,9 +57,9 @@ motor_controller/
 sudo ./setup_sensor_hub.sh
 
 # This will:
-# - Install all required packages (python3-can, pyserial, smbus2)
+# - Install all required packages (python3-can, pyserial)
 # - Configure PiCAN FD hardware in boot config
-# - Setup I2C and UART for sensors
+# - Setup UART / USB serial access for sensors
 # - Configure CAN interface at 500 kbit/s
 # - Reboot if needed for hardware activation
 ```
@@ -164,9 +164,9 @@ dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=25
 - Baud Rate: 230400
 - Output: NMEA sentences
 
-**IMU (ICM-42688-P):**
-- I2C Address: 0x68
-- I2C Bus: 1
+**IMU (WitMotion USB):**
+- Port: `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`
+- Baudrate: 9600
 - Sampling Rate: 200 Hz
 
 ## 📁 Project Files
@@ -186,9 +186,9 @@ raspberry_pi/
 
 ### 1. Sensor Hub Validation
 ```bash
-# Check I2C devices
-i2cdetect -y 1
-# Expected: IMU at 0x68
+# Check WitMotion USB device
+ls /dev/serial/by-id/
+# Expected: usb-1a86_USB_Serial-if00-port0
 
 # Check UART GPS
 cat /dev/serial0
@@ -241,12 +241,12 @@ python3 -c "import serial; s=serial.Serial('/dev/serial0', 230400); print(s.read
 
 ### IMU Not Responding
 ```bash
-# Check I2C address
-i2cdetect -y 1
-# Should show 0x68
+# Check USB serial devices
+ls /dev/serial/by-id/
+# Should show usb-1a86_USB_Serial-if00-port0
 
-# Test I2C communication
-python3 -c "import smbus2; bus=smbus2.SMBus(1); print(bus.read_byte_data(0x68, 0x75))"
+# Check live IMU status from the sensor hub
+curl http://127.0.0.1:8080/api/imu/status
 ```
 
 ### CAN Messages Not Received
@@ -294,7 +294,7 @@ curl http://localhost:80
 - ✅ PiCAN FD properly configured in boot config
 - ✅ MCP2515 successfully initialized on spi0.1
 - ✅ CAN interface can0 UP and ready
-- ✅ I2C devices detected (IMU at 0x68)
+- ✅ WitMotion USB device detected
 - ✅ UART GPS receiving NMEA data
 
 ### Sensor Fusion Working
@@ -308,7 +308,7 @@ curl http://localhost:80
 Once setup is complete, the system provides:
 - **Precise RTK-GPS positioning** (cm-level accuracy)
 - **Dual-antenna heading** without compass
-- **6-DoF orientation** from IMU
+- **6-DoF orientation** from WitMotion IMU
 - **Real-time web interface** with Bing Maps
 - **Autonomous navigation** capabilities
 

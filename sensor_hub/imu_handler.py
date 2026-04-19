@@ -1,249 +1,262 @@
 #!/usr/bin/env python3
-"""
-ICM-42688-P IMU Handler (Treiber)
-Verantwortlich für:
-- Hardware-Kommunikation (I2C)
-- Sensor-Konfiguration
-- Lesen von ROHDATEN (Temp, Accel, Gyro)
-- Kalibrierungs-METHODE (wird von außen aufgerufen)
-"""
+"""IMU-Handler für den WitMotion USB-Sensor."""
 
-import smbus2
-import struct
-import time
-import threading
 import logging
-from typing import Dict, Optional
+import struct
+import threading
+import time
+from typing import Dict, Set
+
+try:
+    import serial
+except ImportError:  # pragma: no cover - optional in tests
+    serial = None
 
 logger = logging.getLogger(__name__)
 
-class ICM42688P:
-    """ICM-42688-P IMU Sensor Handler (Reiner Treiber)"""
-    
-    # Register Adressen (ICM-42688-P, Bank 0)
-    REG_WHO_AM_I = 0x75
-    REG_TEMP_DATA1 = 0x1D      # Start des 14-Byte-Datenblocks
-    REG_PWR_MGMT0 = 0x4E
-    REG_ACCEL_CONFIG0 = 0x50
-    REG_GYRO_CONFIG0 = 0x4F
-    REG_SIGNAL_PATH_RESET = 0x4B
-    
-    # Skalierungsfaktoren (bei ±2g und ±250°/s)
-    ACCEL_SCALE_2G = 16384.0
-    GYRO_SCALE_250DPS = 131.0
-    TEMP_SCALE = 132.48
-    TEMP_OFFSET = 25.0
-    
-    def __init__(self, bus: int = 1, address: int = 0x68, sample_rate: int = 200):
-        self.bus_num = bus
-        self.address = address
+
+def _normalize_heading(angle: float) -> float:
+    """Normalisiert Winkel in den Bereich 0-360°."""
+    normalized = angle % 360.0
+    if normalized < 0:
+        normalized += 360.0
+    return normalized
+
+
+class WitMotionUSBIMU:
+    """WitMotion USB-IMU mit klassischem 0x55/0x51..0x54 Binärprotokoll."""
+
+    FRAME_HEADER = 0x55
+    FRAME_SIZE = 11
+    FRAME_ACCEL = 0x51
+    FRAME_GYRO = 0x52
+    FRAME_ANGLE = 0x53
+    FRAME_MAG = 0x54
+
+    REQUIRED_FRAMES = {FRAME_ACCEL, FRAME_GYRO, FRAME_ANGLE}
+    ACCEL_RANGE_G = 16.0
+    GYRO_RANGE_DPS = 2000.0
+    ANGLE_RANGE_DEG = 180.0
+
+    def __init__(self, port: str, baudrate: int = 9600, timeout: float = 1.0, sample_rate: int = 100):
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
         self.sample_rate = sample_rate
-        self.bus = None
+        self.serial_port = None
         self.running = False
         self.connected = False
         self.read_thread = None
         self.lock = threading.Lock()
+        self._rx_buffer = bytearray()
+        self._frames_seen: Set[int] = set()
+        self.last_packet_time = None
 
-        # Kalibrierungs-Daten (werden von außen gesetzt)
-        self.gyro_bias = {'x': 0.0, 'y': 0.0, 'z': 0.0}
-        self.accel_offset = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+        self.raw_accel = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+        self.raw_gyro = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+        self.raw_angles = {'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0}
+        self.raw_mag = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+        self.temperature = 0.0
         self.is_calibrated = False
-
-        # Rohdaten-Speicher
-        self.raw_accel = {'x': 0.0, 'y': 0.0, 'z': 0.0}  # m/s²
-        self.raw_gyro = {'x': 0.0, 'y': 0.0, 'z': 0.0}   # °/s
-        self.temperature = 0.0                            # °C
+        self.is_stationary = False
 
     def connect(self) -> bool:
-        """Verbindet sich mit dem Sensor"""
+        """Öffnet die serielle Verbindung und wartet auf valide WitMotion Frames."""
         try:
-            self.bus = smbus2.SMBus(self.bus_num)
-            logger.info(f"✅ I2C Bus {self.bus_num} geöffnet")
+            if serial is None:
+                raise ImportError("pyserial nicht installiert")
 
-            # WHO_AM_I Register auslesen (mit try-except, da manchmal I/O-Fehler auftreten)
-            try:
-                device_id = self.bus.read_byte_data(self.address, self.REG_WHO_AM_I)
-                logger.info(f"✅ WHO_AM_I gelesen: 0x{device_id:02x}")
-
-                if device_id == 0x47:
-                    logger.info(f"✅ ICM-42688-P erkannt")
-                else:
-                    logger.warning(f"⚠️  Unerwartete Device ID: 0x{device_id:02x}")
-            except Exception as e:
-                logger.warning(f"⚠️  WHO_AM_I Fehler: {e}")
-                # Trotzdem weitermachen - Sensor antwortet manchmal erst nach Konfiguration
-
-            # Sensor konfigurieren
-            self._configure_sensor()
-
-            self.connected = True
+            self.serial_port = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
             self.running = True
+            self.connected = True
+            self._rx_buffer.clear()
+            self._frames_seen.clear()
+
             self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
             self.read_thread.start()
-            logger.info(f"✅ IMU verbunden auf I2C Bus {self.bus_num}, Adresse 0x{self.address:02x}")
-            return True
 
-        except Exception as e:
-            logger.error(f"❌ IMU-Verbindung fehlgeschlagen: {e}")
-            if self.bus:
-                self.bus.close()
+            deadline = time.time() + max(2.0, self.timeout * 5.0)
+            while time.time() < deadline:
+                with self.lock:
+                    if self.REQUIRED_FRAMES.issubset(self._frames_seen):
+                        logger.info(f"✅ WitMotion liefert Frames auf {self.port} @ {self.baudrate} Baud")
+                        return True
+                time.sleep(0.05)
+
+            logger.warning("⚠️  WitMotion-Port geöffnet, aber keine vollständige Frame-Folge empfangen")
+            self.disconnect()
             return False
-    
-    def _configure_sensor(self):
-        """Konfiguriert den Sensor korrekt"""
-        try:
-            # 1. Reset Signal Path
-            self.bus.write_byte_data(self.address, self.REG_SIGNAL_PATH_RESET, 0x01)
-            time.sleep(0.1)
-            logger.debug("✅ Signal Path Reset")
-
-            # 2. Power Management: Accel & Gyro im Low Noise Mode
-            self.bus.write_byte_data(self.address, self.REG_PWR_MGMT0, 0x0F)
-            time.sleep(0.1)
-            logger.debug("✅ Power Management konfiguriert")
-
-            # 3. ODR (Sample Rate)
-            if self.sample_rate >= 1000:
-                odr_bits = 0x06
-            elif self.sample_rate >= 200:
-                odr_bits = 0x07
-            elif self.sample_rate >= 100:
-                odr_bits = 0x08
-            else:
-                odr_bits = 0x09  # 50Hz Standard
-            logger.info(f"Setze ODR auf {self.sample_rate}Hz (Register-Bits: 0x{odr_bits:02X})")
-
-            # 4. Accelerometer Config: ±2g, ODR
-            accel_config = (0b011 << 5) | odr_bits
-            self.bus.write_byte_data(self.address, self.REG_ACCEL_CONFIG0, accel_config)
-            time.sleep(0.05)
-
-            # 5. Gyroscope Config: ±250 dps, ODR
-            gyro_config = (0b011 << 5) | odr_bits
-            self.bus.write_byte_data(self.address, self.REG_GYRO_CONFIG0, gyro_config)
-            time.sleep(0.05)
-            
-            time.sleep(0.1)
-            logger.info(f"✅ Sensor konfiguriert: ±2g, ±250dps @ {self.sample_rate}Hz")
 
         except Exception as e:
-            logger.warning(f"⚠️  Sensor-Konfiguration: {e}")
-    
+            logger.error(f"❌ WitMotion-Verbindung fehlgeschlagen: {e}")
+            self.disconnect()
+            return False
+
     def _read_loop(self):
-        """Liest kontinuierlich Sensor-Daten"""
-        sleep_duration = 1.0 / self.sample_rate
+        """Liest kontinuierlich Daten vom seriellen Port."""
         while self.running:
             try:
-                self._read_sensor_data()
-                time.sleep(sleep_duration)
+                chunk = self.serial_port.read(64)
+                if not chunk:
+                    continue
+                self._process_bytes(chunk)
             except Exception as e:
-                logger.debug(f"⚠️  Sensor-Read Fehler: {e}")
-                time.sleep(0.1)  # Kurze Pause bei Fehler
-    
-    def _read_sensor_data(self):
-        """Liest Rohdaten vom Sensor aus dem korrekten zusammenhängenden Register-Block"""
-        try:
-            # Lese ALLE 14 Bytes am Stück (Temp + Accel + Gyro)
-            data_block = self.bus.read_i2c_block_data(
-                self.address, self.REG_TEMP_DATA1, 14
-            )
+                if self.running:
+                    logger.debug(f"⚠️  WitMotion Read Fehler: {e}")
+                time.sleep(0.1)
 
-            if len(data_block) < 14:
-                logger.debug(f"⚠️  Unvollständige Daten: {len(data_block)} Bytes")
-                return
-
-            # Daten entpacken (Big-Endian)
-            temp_raw, \
-            accel_x_raw, accel_y_raw, accel_z_raw, \
-            gyro_x_raw, gyro_y_raw, gyro_z_raw = struct.unpack('>hhhhhhh', bytes(data_block))
-
-            with self.lock:
-                self.temperature = self.TEMP_OFFSET + (temp_raw / self.TEMP_SCALE)
-                
-                # Skalierte, aber *unkalibrierte* Rohdaten speichern
-                self.raw_accel['x'] = (accel_x_raw / self.ACCEL_SCALE_2G) * 9.81
-                self.raw_accel['y'] = (accel_y_raw / self.ACCEL_SCALE_2G) * 9.81
-                self.raw_accel['z'] = (accel_z_raw / self.ACCEL_SCALE_2G) * 9.81
-
-                self.raw_gyro['x'] = gyro_x_raw / self.GYRO_SCALE_250DPS
-                self.raw_gyro['y'] = gyro_y_raw / self.GYRO_SCALE_250DPS
-                self.raw_gyro['z'] = gyro_z_raw / self.GYRO_SCALE_250DPS
-
-        except OSError as e:
-            logger.debug(f"⚠️  I2C Lese-Fehler (OSError): {e}")
-        except Exception as e:
-            logger.debug(f"⚠️  IMU-Daten-Fehler: {e}")
-
-    def calibrate(self, samples: int = 1000) -> bool:
-        """
-        Kalibriert Gyro und Accelerometer. 
-        WICHTIG: IMU muss während Kalibrierung STILL liegen!
-        """
-        if not self.connected:
-            logger.error("❌ IMU nicht verbunden - Kalibrierung nicht möglich")
-            return False
-
-        logger.info(f"🔧 Starte IMU-Kalibrierung mit {samples} Samples...")
-        logger.info("⚠️  WICHTIG: IMU muss STILL liegen!")
-
-        gyro_sum = {'x': 0.0, 'y': 0.0, 'z': 0.0}
-        accel_sum = {'x': 0.0, 'y': 0.0, 'z': 0.0}
-
-        sample_count = 0
-        while sample_count < samples:
-            with self.lock:
-                # Hole die *letzten gelesenen* Rohdaten
-                gyro_sum['x'] += self.raw_gyro['x']
-                gyro_sum['y'] += self.raw_gyro['y']
-                gyro_sum['z'] += self.raw_gyro['z']
-                accel_sum['x'] += self.raw_accel['x']
-                accel_sum['y'] += self.raw_accel['y']
-                accel_sum['z'] += self.raw_accel['z']
-            sample_count += 1
-            time.sleep(1.0 / self.sample_rate)  # Warte auf nächstes Sample
+    def _process_bytes(self, data: bytes):
+        """Verarbeitet einen Byte-Stream und extrahiert vollständige 11-Byte Frames."""
+        if not data:
+            return
 
         with self.lock:
-            self.gyro_bias['x'] = gyro_sum['x'] / samples
-            self.gyro_bias['y'] = gyro_sum['y'] / samples
-            self.gyro_bias['z'] = gyro_sum['z'] / samples
+            self._rx_buffer.extend(data)
 
-            self.accel_offset['x'] = accel_sum['x'] / samples
-            self.accel_offset['y'] = accel_sum['y'] / samples
-            self.accel_offset['z'] = (accel_sum['z'] / samples) - 9.81  # Z-Achse auf 9.81 normieren
+            while len(self._rx_buffer) >= self.FRAME_SIZE:
+                if self._rx_buffer[0] != self.FRAME_HEADER:
+                    del self._rx_buffer[0]
+                    continue
 
-            self.is_calibrated = True
+                frame = bytes(self._rx_buffer[:self.FRAME_SIZE])
+                del self._rx_buffer[:self.FRAME_SIZE]
 
-        logger.info(f"✅ Kalibrierung abgeschlossen!")
-        logger.info(f"   Gyro Bias: X={self.gyro_bias['x']:.3f}°/s, Y={self.gyro_bias['y']:.3f}°/s, Z={self.gyro_bias['z']:.3f}°/s")
-        logger.info(f"   Accel Offset: X={self.accel_offset['x']:.3f}m/s², Y={self.accel_offset['y']:.3f}m/s², Z={self.accel_offset['z']:.3f}m/s²")
-        return True
+                checksum = sum(frame[:10]) & 0xFF
+                if checksum != frame[10]:
+                    logger.debug("⚠️  WitMotion Checksum-Fehler verworfen")
+                    continue
+
+                self._process_frame_locked(frame)
+
+    def _process_frame_locked(self, frame: bytes):
+        """Aktualisiert die zuletzt empfangenen Sensorwerte."""
+        frame_type = frame[1]
+        d1, d2, d3, d4 = struct.unpack('<hhhh', frame[2:10])
+
+        self.last_packet_time = time.time()
+        self._frames_seen.add(frame_type)
+
+        if frame_type == self.FRAME_ACCEL:
+            scale = self.ACCEL_RANGE_G * 9.81 / 32768.0
+            self.raw_accel['x'] = d1 * scale
+            self.raw_accel['y'] = d2 * scale
+            self.raw_accel['z'] = d3 * scale
+            self.temperature = d4 / 100.0
+
+        elif frame_type == self.FRAME_GYRO:
+            scale = self.GYRO_RANGE_DPS / 32768.0
+            self.raw_gyro['x'] = d1 * scale
+            self.raw_gyro['y'] = d2 * scale
+            self.raw_gyro['z'] = d3 * scale
+            self.temperature = d4 / 100.0
+
+        elif frame_type == self.FRAME_ANGLE:
+            scale = self.ANGLE_RANGE_DEG / 32768.0
+            self.raw_angles['roll'] = d1 * scale
+            self.raw_angles['pitch'] = d2 * scale
+            self.raw_angles['yaw'] = d3 * scale
+
+        elif frame_type == self.FRAME_MAG:
+            self.raw_mag['x'] = float(d1)
+            self.raw_mag['y'] = float(d2)
+            self.raw_mag['z'] = float(d3)
+
+        self.is_calibrated = self.REQUIRED_FRAMES.issubset(self._frames_seen)
+        self.is_stationary = (
+            abs(self.raw_gyro['x']) < 1.0 and
+            abs(self.raw_gyro['y']) < 1.0 and
+            abs(self.raw_gyro['z']) < 1.0 and
+            abs(self.raw_accel['x']) < 0.5 and
+            abs(self.raw_accel['y']) < 0.5
+        )
 
     def get_data(self) -> Dict:
-        """Gibt die *kalibrierten* Sensor-Rohdaten zurück"""
+        """Gibt die zuletzt empfangenen Rohdaten zurück."""
         with self.lock:
-            acc_x = self.raw_accel['x'] - self.accel_offset['x']
-            acc_y = self.raw_accel['y'] - self.accel_offset['y']
-            acc_z = self.raw_accel['z'] - self.accel_offset['z']
-            
-            gyro_x = self.raw_gyro['x'] - self.gyro_bias['x']
-            gyro_y = self.raw_gyro['y'] - self.gyro_bias['y']
-            gyro_z = self.raw_gyro['z'] - self.gyro_bias['z']
-
             return {
-                'accel': {'x': acc_x, 'y': acc_y, 'z': acc_z},
-                'gyro': {'x': gyro_x, 'y': gyro_y, 'z': gyro_z},
+                'accel': self.raw_accel.copy(),
+                'gyro': self.raw_gyro.copy(),
+                'mag': self.raw_mag.copy(),
                 'temperature': self.temperature,
                 'is_calibrated': self.is_calibrated,
-                'timestamp': time.time()
+                'timestamp': self.last_packet_time or time.time(),
+                'orientation_source': 'witmotion_native'
             }
-    
+
+    def get_orientation(self) -> Dict:
+        """Gibt die native WitMotion-Orientierung zurück."""
+        with self.lock:
+            yaw = _normalize_heading(self.raw_angles['yaw'])
+            return {
+                'roll': self.raw_angles['roll'],
+                'pitch': self.raw_angles['pitch'],
+                'yaw': yaw,
+                'heading': yaw,
+                'is_stationary': self.is_stationary,
+                'gyro_bias': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+                'gps_weight': 0.0,
+                'source': 'witmotion_native'
+            }
+
+    def get_motion_status(self) -> Dict:
+        """Gibt einfachen Bewegungsstatus für UI/API zurück."""
+        with self.lock:
+            return {
+                'is_stationary': self.is_stationary,
+                'gyro_bias': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+                'gps_weight': 0.0,
+                'zupt_enabled': False,
+                'motion_threshold_gyro': 1.0,
+                'motion_threshold_accel': 0.5,
+                'source': 'witmotion_native'
+            }
+
+    def get_status(self) -> Dict:
+        """Gibt generische Statusinformationen für API/UI zurück."""
+        with self.lock:
+            return {
+                'connected': self.connected,
+                'running': self.running,
+                'imu_type': 'witmotion_usb',
+                'port': self.port,
+                'baudrate': self.baudrate,
+                'sample_rate': self.sample_rate,
+                'receiving_data': bool(self.last_packet_time and (time.time() - self.last_packet_time) < 2.0),
+                'last_packet_time': self.last_packet_time,
+                'orientation_source': 'witmotion_native'
+            }
+
+    def calibrate(self, samples: int = 0) -> bool:
+        """Für WitMotion nicht erforderlich; erfolgreiche Frame-Erkennung reicht."""
+        logger.info("ℹ️  WitMotion nutzt native Sensordaten, explizite Kalibrierung wird übersprungen")
+        return self.is_calibrated
+
     def disconnect(self):
-        """Trennt Verbindung zum Sensor"""
+        """Schließt die serielle Verbindung sicher."""
         self.running = False
-        if self.read_thread:
+        if self.read_thread and self.read_thread.is_alive():
             self.read_thread.join(timeout=1.0)
-        if self.bus:
-            self.bus.close()
+        if self.serial_port:
+            try:
+                self.serial_port.close()
+            except Exception:
+                pass
+        self.serial_port = None
         self.connected = False
-        logger.info("✅ IMU getrennt")
+        logger.info("✅ WitMotion getrennt")
+
+
+def create_imu_handler(imu_type: str, **kwargs):
+    """Erzeugt den passenden IMU-Handler anhand des konfigurierten Typs."""
+    normalized = (imu_type or 'witmotion').strip().lower()
+
+    if normalized in {'witmotion', 'witmotion_usb', 'usb'}:
+        return WitMotionUSBIMU(
+            port=kwargs.get('port', '/dev/ttyUSB0'),
+            baudrate=kwargs.get('baudrate', 9600),
+            timeout=kwargs.get('timeout', 1.0),
+            sample_rate=kwargs.get('sample_rate', 100)
+        )
+
+    raise ValueError(f"Nicht unterstützter IMU-Typ für diesen Stand: {imu_type}")
 

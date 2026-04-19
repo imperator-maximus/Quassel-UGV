@@ -45,7 +45,7 @@ pip install python-can
 
 ### Sensor Hub (Pi Zero 2W)
 - **Holybro UM982 RTK-GPS**: Dual-antenna for position and heading
-- **ICM-42688-P IMU**: 6-DoF accelerometer and gyroscope
+- **WitMotion USB-IMU**: IMU with native orientation output
 - **PiCAN FD**: CAN interface (500 kbit/s)
 - **Sends**: GPS position, heading, RTK status, IMU orientation
 

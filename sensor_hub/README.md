@@ -1,6 +1,6 @@
 # 👑 Quassel UGV - Sensor Hub 👑
 
-RTK-GPS + optional IMU + CAN-Telemetrie für den **Orange Pi Zero 2W (DietPi)**.
+RTK-GPS + WitMotion USB-IMU + CAN-Telemetrie für den **Orange Pi Zero 2W (DietPi)**.
 
 > Der aktuelle produktive Deploy-Stand steht in **`DEPLOY_ORANGE_PI.md`**.
 
@@ -21,7 +21,7 @@ RTK-GPS + optional IMU + CAN-Telemetrie für den **Orange Pi Zero 2W (DietPi)**.
 - Orange Pi Zero 2W
 - CANable2 per USB (`can0` via `slcand`)
 - Holybro UM982 RTK-GPS per USB (`/dev/serial/by-id/...`)
-- optionale IMU (aktuell deaktiviert)
+- WitMotion USB-IMU (`/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`)
 - stabile 5V-Versorgung
 
 ### Software
@@ -42,7 +42,7 @@ Die aktuelle, getestete Anleitung steht in **`DEPLOY_ORANGE_PI.md`**.
 
 **NIEMALS Passwörter in config.py speichern!**
 
-Für den aktuellen Orange-Deploy ist **GPS aktiv**, aber **NTRIP/RTK im Service vorerst deaktiviert**.
+Für den aktuellen Orange-Deploy sind **GPS und WitMotion-IMU aktiv**, aber **NTRIP/RTK im Service vorerst deaktiviert**.
 
 Wenn du RTK aktivieren willst, erstelle eine `.env` Datei mit deinen NTRIP-Credentials:
 
@@ -97,6 +97,12 @@ http://orangeugv:8080
 GPS_PORT = '/dev/serial/by-id/usb-FTDI_FT231X_USB_UART_*'
 GPS_BAUDRATE = 230400              # UM982 Baud Rate
 GPS_TIMEOUT = 5.0                  # Timeout
+
+# IMU
+IMU_ENABLED = True
+IMU_TYPE = 'witmotion'
+IMU_PORT = '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0'
+IMU_BAUDRATE = 9600
 
 # Web
 WEB_HOST = '0.0.0.0'               # Listen auf allen Interfaces
