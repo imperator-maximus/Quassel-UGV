@@ -52,13 +52,17 @@ class GPSNTRIPBridge:
             # NTRIP Callback registrieren
             self.ntrip.on_data_received = self._on_ntrip_data
 
-            # Monitor-Thread starten (auch wenn initiale Verbindung fehlschlägt)
+            # NTRIP verbinden (erster Versuch)
+            initial_connected = self.ntrip.connect()
+
+            # Monitor-Thread erst nach dem initialen Verbindungsversuch starten,
+            # damit connect()/reconnect_if_needed() nicht parallel auf denselben
+            # Socket loslaufen.
             self.running = True
             self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
             self.monitor_thread.start()
 
-            # NTRIP verbinden (erster Versuch)
-            if self.ntrip.connect():
+            if initial_connected:
                 logger.info("✅ GPS-NTRIP Bridge gestartet - NTRIP verbunden")
                 return True
             else:
