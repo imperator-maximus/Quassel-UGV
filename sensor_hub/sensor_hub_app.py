@@ -22,6 +22,7 @@ from ntrip_client import NTRIPClient
 from gps_ntrip_bridge import GPSNTRIPBridge
 from can_protocol import CANProtocol
 from telemetry_payload import build_status_payload, build_telemetry_payload, serialize_can_payload
+from vehicle_geometry import build_local_footprint, build_visual_markers_local, load_vehicle_geometry
 
 # Logging konfigurieren
 logging.basicConfig(
@@ -68,9 +69,31 @@ class SensorHubApp:
         self.can_sender_thread = None
         self.can_receiver_thread = None
         self.app = Flask(__name__, template_folder='templates')
+        self.vehicle_geometry = None
+        self.vehicle_footprint_local = []
+        self.vehicle_markers_local = {}
+        self._load_vehicle_geometry()
         self._setup_routes()
         self._init_sensors()
         self._init_can_bus()
+
+    def _load_vehicle_geometry(self):
+        """Lädt die statische Fahrzeuggeometrie für UI/Diagnose."""
+        try:
+            self.vehicle_geometry = load_vehicle_geometry(config.VEHICLE_GEOMETRY_PATH)
+            self.vehicle_footprint_local = build_local_footprint(self.vehicle_geometry)
+            self.vehicle_markers_local = build_visual_markers_local(self.vehicle_geometry)
+            dimensions = self.vehicle_geometry.get('dimensions_m', {})
+            logger.info(
+                "📐 Fahrzeuggeometrie geladen (%.2fm x %.2fm)",
+                float(dimensions.get('length', 0.0)),
+                float(dimensions.get('width', 0.0)),
+            )
+        except Exception as e:
+            logger.warning(f"⚠️  Fahrzeuggeometrie konnte nicht geladen werden: {e}")
+            self.vehicle_geometry = None
+            self.vehicle_footprint_local = []
+            self.vehicle_markers_local = {}
     
     def _init_sensors(self):
         """Initialisiert Sensoren"""
@@ -271,6 +294,43 @@ class SensorHubApp:
 
         return None
 
+    def _get_vehicle_pose(self):
+        """Liefert aktuelle Pose für Visualisierung/Diagnose."""
+        gps_status = self.gps.get_status() if self.gps else None
+        latitude = gps_status.get('latitude') if gps_status else None
+        longitude = gps_status.get('longitude') if gps_status else None
+        heading = gps_status.get('heading', 0.0) if gps_status else 0.0
+        heading_source = 'dual_gnss' if gps_status else 'unknown'
+
+        if not gps_status and self.imu and self.imu.connected:
+            orientation = self._get_orientation()
+            if orientation:
+                heading = orientation.get('heading', 0.0)
+                heading_source = orientation.get('source', 'imu')
+
+        return {
+            'latitude': latitude,
+            'longitude': longitude,
+            'heading_deg': heading,
+            'heading_source': heading_source,
+        }
+
+    def _get_vehicle_footprint_response(self):
+        """Erstellt die Antwort für Fahrzeuggeometrie/Footprint."""
+        if not self.vehicle_geometry:
+            return None
+
+        return {
+            'geometry': self.vehicle_geometry,
+            'footprint': {
+                'outline_local_m': self.vehicle_footprint_local,
+                'reference_point': self.vehicle_geometry.get('reference_frame', {}).get('origin', 'vehicle_center'),
+                'markers_local_m': self.vehicle_markers_local,
+            },
+            'pose': self._get_vehicle_pose(),
+            'timestamp': time.time(),
+        }
+
     def _get_status_response(self):
         """Erstellt eine erweiterte Status-Antwort für On-Demand-Kommandos."""
         return build_status_payload(
@@ -399,6 +459,23 @@ class SensorHubApp:
                 'longitude': status['longitude'],
                 'bing_maps_url': self.gps.get_bing_maps_url()
             })
+
+        @self.app.route('/api/vehicle/geometry')
+        def api_vehicle_geometry():
+            """API: Statische Fahrzeuggeometrie"""
+            if not self.vehicle_geometry:
+                return jsonify({'error': 'Fahrzeuggeometrie nicht verfügbar'}), 503
+
+            return jsonify(self.vehicle_geometry)
+
+        @self.app.route('/api/vehicle/footprint')
+        def api_vehicle_footprint():
+            """API: Fahrzeug-Footprint für Visualisierung"""
+            response = self._get_vehicle_footprint_response()
+            if not response:
+                return jsonify({'error': 'Fahrzeuggeometrie nicht verfügbar'}), 503
+
+            return jsonify(response)
         
         @self.app.route('/api/health')
         def api_health():

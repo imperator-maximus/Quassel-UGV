@@ -61,6 +61,8 @@ This project implements a complete autonomous UGV system featuring:
 - **Primary GPS antenna**: mounted on the mast, rear left, at approx. **130 cm** height
 - **Secondary GPS antenna**: mounted rear right directly on the housing at approx. **60 cm** height
 - **Distance between GPS antennas**: approx. **51 cm**
+- **Side inset of both GPS antennas**: approx. **14 cm** inboard from the left/right vehicle edge
+- **Rear inset of both GPS antennas**: approx. **10 cm** forward from the rear edge
 - **IMU position**: mounted at the top of the mast
 
 ### Software Stack
@@ -160,6 +162,8 @@ python3 web_app.py
 - **Upper GPS antenna**: rear left on mast, approx. **130 cm** above ground
 - **Lower GPS antenna**: rear right on housing, approx. **60 cm** above ground
 - **GPS antenna baseline**: approx. **51 cm**
+- **Lateral antenna inset**: approx. **14 cm** from each outer side edge (`(0.79 m - 0.51 m) / 2`)
+- **Rear antenna inset**: approx. **10 cm** from the rear edge
 - **IMU**: mounted on top of the mast
 - **Ride-on capability**: one person can ride on the vehicle
 

@@ -1,0 +1,60 @@
+{
+  "reference_frame": {
+    "origin": "vehicle_center",
+    "x_axis": "forward",
+    "y_axis": "right",
+    "z_axis": "up",
+    "notes": "The current UI footprint uses the vehicle center as schematic reference point. Sensor mounting positions are documented for diagnostics, not yet used for georeferenced lever-arm correction."
+  },
+  "dimensions_m": {
+    "length": 1.15,
+    "width": 0.79,
+    "body_height": 0.6,
+    "mast_extra_height": 0.7,
+    "overall_height": 1.3
+  },
+  "capabilities": {
+    "ride_on": true
+  },
+  "mast": {
+    "mount_position": "rear_left",
+    "height_above_body_m": 0.7,
+    "top_height_m": 1.3,
+    "visual_anchor": "rear_left",
+    "side_inset_m": 0.14,
+    "rear_inset_m": 0.10
+  },
+  "gnss": {
+    "heading_source": "dual_antenna",
+    "antenna_baseline_m": 0.51,
+    "side_inset_m": 0.14,
+    "rear_inset_m": 0.10,
+    "notes": "With 0.79 m vehicle width and 0.51 m antenna baseline, each antenna sits approx. 0.14 m inboard from its respective side edge and approx. 0.10 m forward from the rear edge."
+  },
+  "sensors": {
+    "gps_primary": {
+      "label": "GPS 1",
+      "mount_position": "rear_left_mast_top",
+      "height_m": 1.3,
+      "visual_anchor": "rear_left",
+      "side_inset_m": 0.14,
+      "rear_inset_m": 0.10
+    },
+    "gps_secondary": {
+      "label": "GPS 2",
+      "mount_position": "rear_right_body_top",
+      "height_m": 0.6,
+      "visual_anchor": "rear_right",
+      "side_inset_m": 0.14,
+      "rear_inset_m": 0.10
+    },
+    "imu": {
+      "label": "IMU",
+      "mount_position": "mast_top",
+      "height_m": 1.3,
+      "visual_anchor": "rear_left",
+      "side_inset_m": 0.14,
+      "rear_inset_m": 0.10
+    }
+  }
+}

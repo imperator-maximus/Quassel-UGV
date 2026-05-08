@@ -1,6 +1,7 @@
 """Quassel UGV Sensor Hub - Konfiguration für GPS, WitMotion-IMU und CAN."""
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 # .env Datei laden
@@ -50,6 +51,7 @@ WEB_HOST = os.getenv('WEB_HOST', '0.0.0.0')
 WEB_PORT = int(os.getenv('WEB_PORT', '8080'))
 WEB_DEBUG = _env_flag('WEB_DEBUG', False)
 WEB_UPDATE_RATE = int(os.getenv('WEB_UPDATE_RATE', '2'))
+VEHICLE_GEOMETRY_PATH = os.getenv('VEHICLE_GEOMETRY_PATH', str(Path(__file__).with_name('vehicle_geometry.json')))
 
 # ============================================================================
 # TELEMETRIE KONFIGURATION

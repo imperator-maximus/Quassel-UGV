@@ -160,6 +160,66 @@
             word-break: break-all;
         }
 
+        .coordinates-layout {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            align-items: start;
+        }
+
+        .vehicle-footprint-panel {
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid rgba(212, 175, 55, 0.2);
+            border-radius: 10px;
+            padding: 15px;
+        }
+
+        .vehicle-footprint-canvas {
+            width: 100%;
+            max-width: 360px;
+            display: block;
+            margin: 0 auto 15px;
+            border-radius: 8px;
+            background: rgba(12, 24, 8, 0.9);
+            border: 1px solid rgba(212, 175, 55, 0.25);
+        }
+
+        .footprint-meta {
+            display: grid;
+            gap: 10px;
+        }
+
+        .footprint-note {
+            color: #d4af37;
+            font-size: 0.85em;
+            opacity: 0.85;
+            margin-top: 10px;
+            text-align: center;
+        }
+
+        .footprint-legend {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+            margin-top: 8px;
+        }
+
+        .footprint-legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.85em;
+            color: #f5f5dc;
+        }
+
+        .footprint-legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+
         .bing-maps-link {
             display: inline-block;
             background: linear-gradient(135deg, #d4af37 0%, #ffd700 100%);
@@ -377,20 +437,59 @@
 
         <div class="coordinates-section">
             <h2>📍 Koordinaten</h2>
-            <div class="coordinate-display">
-                <div class="coordinate-label">Latitude:</div>
-                <div class="coordinate-value" id="latitude">0.0000°</div>
-            </div>
-            <div class="coordinate-display">
-                <div class="coordinate-label">Longitude:</div>
-                <div class="coordinate-value" id="longitude">0.0000°</div>
-            </div>
-            <div class="coordinate-display">
-                <div class="coordinate-label">Bing Maps Link:</div>
-                <div class="coordinate-value">
-                    <a id="bing-maps-link" href="#" class="bing-maps-link" target="_blank">
-                        🗺️ Auf Bing Maps öffnen
-                    </a>
+            <div class="coordinates-layout">
+                <div>
+                    <div class="coordinate-display">
+                        <div class="coordinate-label">Latitude:</div>
+                        <div class="coordinate-value" id="latitude">0.0000°</div>
+                    </div>
+                    <div class="coordinate-display">
+                        <div class="coordinate-label">Longitude:</div>
+                        <div class="coordinate-value" id="longitude">0.0000°</div>
+                    </div>
+                    <div class="coordinate-display">
+                        <div class="coordinate-label">Bing Maps Link:</div>
+                        <div class="coordinate-value">
+                            <a id="bing-maps-link" href="#" class="bing-maps-link" target="_blank">
+                                🗺️ Auf Bing Maps öffnen
+                            </a>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="vehicle-footprint-panel">
+                    <div class="coordinate-label">Fahrzeug-Footprint</div>
+                    <canvas id="vehicle-footprint-canvas" class="vehicle-footprint-canvas" width="360" height="320"></canvas>
+
+                    <div class="footprint-meta">
+                        <div class="status-item">
+                            <span class="status-label">Fahrzeug:</span>
+                            <span class="status-value" id="vehicle-size">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Referenz:</span>
+                            <span class="status-value" id="vehicle-reference">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Heading-Quelle:</span>
+                            <span class="status-value" id="vehicle-heading-source">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">GNSS-Basis:</span>
+                            <span class="status-value" id="vehicle-baseline">-</span>
+                        </div>
+                    </div>
+
+                    <div class="footprint-legend">
+                        <span class="footprint-legend-item"><span class="footprint-legend-dot" style="background:#ff6b6b"></span>Mast</span>
+                        <span class="footprint-legend-item"><span class="footprint-legend-dot" style="background:#ffd700"></span>GPS 1</span>
+                        <span class="footprint-legend-item"><span class="footprint-legend-dot" style="background:#4dd0e1"></span>GPS 2</span>
+                        <span class="footprint-legend-item"><span class="footprint-legend-dot" style="background:#b388ff"></span>IMU</span>
+                    </div>
+
+                    <div class="footprint-note">
+                        Schematische Draufsicht, Norden oben.
+                    </div>
                 </div>
             </div>
             <div class="update-info">
@@ -500,6 +599,32 @@
                 })
                 .catch(error => {
                     console.warn('Koordinaten Update Fehler (nicht kritisch):', error);
+                });
+
+            fetchJson(`${API_BASE}/vehicle/footprint`)
+                .then(data => {
+                    const geometry = data.geometry || {};
+                    const dimensions = geometry.dimensions_m || {};
+                    const gnss = geometry.gnss || {};
+                    const pose = data.pose || {};
+
+                    document.getElementById('vehicle-size').textContent =
+                        `${(dimensions.length || 0).toFixed(2)} m × ${(dimensions.width || 0).toFixed(2)} m`;
+                    document.getElementById('vehicle-reference').textContent =
+                        (data.footprint && data.footprint.reference_point) || '-';
+                    document.getElementById('vehicle-heading-source').textContent = pose.heading_source || '-';
+                    document.getElementById('vehicle-baseline').textContent =
+                        gnss.antenna_baseline_m ? `${gnss.antenna_baseline_m.toFixed(2)} m` : '-';
+
+                    drawVehicleFootprint(data);
+                })
+                .catch(error => {
+                    console.warn('Vehicle Footprint Update Fehler:', error);
+                    drawVehicleFootprint(null);
+                    document.getElementById('vehicle-size').textContent = '-';
+                    document.getElementById('vehicle-reference').textContent = '-';
+                    document.getElementById('vehicle-heading-source').textContent = '-';
+                    document.getElementById('vehicle-baseline').textContent = '-';
                 });
 
             // IMU Daten aktualisieren
@@ -735,6 +860,120 @@
             setTimeout(() => {
                 container.innerHTML = '';
             }, 5000);
+        }
+
+        function projectLocalPoint(point, headingDeg, scale, centerX, centerY) {
+            const headingRad = headingDeg * Math.PI / 180;
+            const north = point.x * Math.cos(headingRad) - point.y * Math.sin(headingRad);
+            const east = point.x * Math.sin(headingRad) + point.y * Math.cos(headingRad);
+            return {
+                x: centerX + east * scale,
+                y: centerY - north * scale,
+            };
+        }
+
+        function drawVehicleFootprint(payload) {
+            const canvas = document.getElementById('vehicle-footprint-canvas');
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width;
+            const height = canvas.height;
+            const centerX = width / 2;
+            const centerY = height / 2 + 8;
+
+            ctx.clearRect(0, 0, width, height);
+            ctx.fillStyle = 'rgba(12, 24, 8, 0.9)';
+            ctx.fillRect(0, 0, width, height);
+
+            ctx.strokeStyle = 'rgba(212, 175, 55, 0.18)';
+            ctx.lineWidth = 1;
+            for (let i = 30; i < width; i += 30) {
+                ctx.beginPath();
+                ctx.moveTo(i, 0);
+                ctx.lineTo(i, height);
+                ctx.stroke();
+            }
+            for (let i = 30; i < height; i += 30) {
+                ctx.beginPath();
+                ctx.moveTo(0, i);
+                ctx.lineTo(width, i);
+                ctx.stroke();
+            }
+
+            ctx.fillStyle = '#d4af37';
+            ctx.font = 'bold 14px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('N', centerX, 18);
+
+            if (!payload || !payload.geometry || !payload.footprint) {
+                ctx.fillStyle = '#f5f5dc';
+                ctx.font = '14px Georgia';
+                ctx.fillText('Fahrzeuggeometrie nicht verfügbar', centerX, centerY);
+                return;
+            }
+
+            const geometry = payload.geometry;
+            const footprint = payload.footprint;
+            const dimensions = geometry.dimensions_m || {};
+            const length = dimensions.length || 0;
+            const widthM = dimensions.width || 0;
+            const heading = (payload.pose && payload.pose.heading_deg) || 0;
+            const outline = footprint.outline_local_m || [];
+
+            const scale = Math.min((width - 90) / Math.max(length, 0.1), (height - 110) / Math.max(widthM, 0.1));
+            const projected = outline.map(point => projectLocalPoint(point, heading, scale, centerX, centerY));
+
+            if (projected.length >= 4) {
+                ctx.fillStyle = 'rgba(77, 208, 225, 0.18)';
+                ctx.strokeStyle = '#4dd0e1';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(projected[0].x, projected[0].y);
+                for (let i = 1; i < projected.length; i += 1) {
+                    ctx.lineTo(projected[i].x, projected[i].y);
+                }
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+
+                const frontCenter = projectLocalPoint({ x: length / 2, y: 0 }, heading, scale, centerX, centerY);
+                const noseLeft = projectLocalPoint({ x: length / 2 - 0.12, y: -0.09 }, heading, scale, centerX, centerY);
+                const noseRight = projectLocalPoint({ x: length / 2 - 0.12, y: 0.09 }, heading, scale, centerX, centerY);
+                ctx.fillStyle = '#ffd700';
+                ctx.beginPath();
+                ctx.moveTo(frontCenter.x, frontCenter.y);
+                ctx.lineTo(noseLeft.x, noseLeft.y);
+                ctx.lineTo(noseRight.x, noseRight.y);
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            const markerColors = {
+                mast: '#ff6b6b',
+                gps_primary: '#ffd700',
+                gps_secondary: '#4dd0e1',
+                imu: '#b388ff',
+            };
+            const markers = (footprint.markers_local_m && Object.entries(footprint.markers_local_m)) || [];
+
+            markers.forEach(([key, marker]) => {
+                const local = marker.point_local_m;
+                if (!local) return;
+                const projectedPoint = projectLocalPoint(local, heading, scale, centerX, centerY);
+                ctx.fillStyle = markerColors[key] || '#ffffff';
+                ctx.beginPath();
+                ctx.arc(projectedPoint.x, projectedPoint.y, 5, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            });
+
+            ctx.fillStyle = '#f5f5dc';
+            ctx.font = '13px Courier New';
+            ctx.textAlign = 'left';
+            ctx.fillText(`Heading ${heading.toFixed(1)}°`, 14, height - 18);
         }
 
         // Initial update
