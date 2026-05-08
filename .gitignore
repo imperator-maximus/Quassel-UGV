@@ -94,6 +94,7 @@ logs/*.log
 *.temp
 *.bak
 *.backup
+*.b64
 
 # Environment Variables - NIEMALS committen!
 .env

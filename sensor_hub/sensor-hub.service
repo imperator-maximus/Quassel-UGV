@@ -5,17 +5,15 @@ After=network-online.target slcan-can0.service
 
 [Service]
 Type=simple
-User=nicolay
+User=imperator
+Group=imperator
 SupplementaryGroups=dialout
-WorkingDirectory=/home/nicolay/sensor_hub
+WorkingDirectory=/opt/sensor_hub
 Environment=PYTHONUNBUFFERED=1
-Environment=IMU_ENABLED=1
-Environment=IMU_TYPE=witmotion
-Environment=IMU_PORT=/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
-Environment=IMU_BAUDRATE=9600
-Environment=NTRIP_ENABLED=0
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 20); do /usr/sbin/ip link show can0 >/dev/null 2>&1 && exit 0; sleep 1; done; echo "can0 not ready" >&2; exit 1'
-ExecStart=/usr/bin/python3 /home/nicolay/sensor_hub/sensor_hub_app.py
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ExecStartPre=/usr/local/bin/wait-can0.sh
+ExecStart=/usr/bin/python3 /opt/sensor_hub/sensor_hub_app.py
 Restart=always
 RestartSec=10
 StandardOutput=journal
@@ -23,4 +21,3 @@ StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
-

@@ -32,24 +32,24 @@ Siehe **`DEPLOY_ORANGE_PI.md`** für die tatsächlich getesteten Pakete und Depl
 
 ### 1. Dateien auf Orange Pi kopieren
 ```bash
-scp -r sensor_hub/ nicolay@orangeugv:/home/nicolay/
+scp -r sensor_hub/ imperator@orangeugv:/home/imperator/
 ```
 
 ### 2. Dependencies und Service
 
 Die aktuelle, getestete Anleitung steht in **`DEPLOY_ORANGE_PI.md`**.
 
-### 3. ⚠️ WICHTIG: RTK/NTRIP separat aktivieren
+### 3. ⚠️ WICHTIG: RTK/NTRIP über `.env` konfigurieren
 
 **NIEMALS Passwörter in config.py speichern!**
 
-Für den aktuellen Orange-Deploy sind **GPS und WitMotion-IMU aktiv**, aber **NTRIP/RTK im Service vorerst deaktiviert**.
+Für den aktuellen Orange-Deploy sind **GPS, CAN, WitMotion-IMU und NTRIP/RTK aktiv**.
 
-Wenn du RTK aktivieren willst, erstelle eine `.env` Datei mit deinen NTRIP-Credentials:
+Lege die produktive `.env` mit deinen NTRIP-Credentials an:
 
 ```bash
-ssh nicolay@orangeugv
-cd /home/nicolay/sensor_hub
+ssh imperator@orangeugv
+cd /opt/sensor_hub
 cp .env.example .env
 nano .env
 ```
@@ -70,7 +70,7 @@ NTRIP_PASSWORD=your_password
 
 ### 4. Anwendung starten
 ```bash
-cd /home/nicolay/sensor_hub
+cd /opt/sensor_hub
 python3 sensor_hub_app.py
 ```
 
@@ -78,10 +78,10 @@ python3 sensor_hub_app.py
 
 Öffne im Browser:
 ```
-http://raspberryzero:8080
+http://orangeugv/
 
-# oder aktuell
-http://orangeugv:8080
+# oder direkt per IP
+http://192.168.178.20/
 ```
 
 ### Anzeige
@@ -108,7 +108,7 @@ IMU_BAUDRATE = 9600
 
 # Web
 WEB_HOST = '0.0.0.0'               # Listen auf allen Interfaces
-WEB_PORT = 8080                    # Web-Port
+WEB_PORT = 8080                    # Code-Default; Produktion überschreibt via .env auf 80
 WEB_UPDATE_RATE = 2                # Updates pro Sekunde
 
 # NTRIP/RTK
@@ -165,8 +165,8 @@ NTRIP_PASSWORD = os.getenv('NTRIP_PASSWORD', 'your_password')
 
 ### GPS-Verbindung testen
 ```bash
-ssh nicolay@orangeugv
-curl http://127.0.0.1:8080/api/status
+ssh imperator@orangeugv
+curl http://127.0.0.1/api/status
 ```
 
 Sollte NMEA-Sätze anzeigen:
@@ -177,14 +177,14 @@ $GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47
 
 ### Web-Interface testen
 ```bash
-curl http://orangeugv:8080/api/health
-curl http://orangeugv:8080/api/status
+curl http://orangeugv/api/health
+curl http://orangeugv/api/status
 ```
 
 ### Logs anschauen
 ```bash
-ssh nicolay@orangeugv
-cd /home/nicolay/sensor_hub
+ssh imperator@orangeugv
+cd /opt/sensor_hub
 python3 sensor_hub_app.py
 ```
 
@@ -204,38 +204,38 @@ sensor_hub/
 
 ### GPS Status
 ```bash
-curl http://orangeugv:8080/api/status
+curl http://orangeugv/api/status
 ```
 Gibt: Latitude, Longitude, Altitude, Heading, RTK-Status, Satelliten
 
 ### Koordinaten
 ```bash
-curl http://orangeugv:8080/api/coordinates
+curl http://orangeugv/api/coordinates
 ```
 Gibt: Lat/Lon mit Bing Maps URL
 
 ### NTRIP Status
 ```bash
-curl http://orangeugv:8080/api/ntrip/status
+curl http://orangeugv/api/ntrip/status
 ```
 Gibt: NTRIP Verbindungsstatus, Bytes empfangen, Mountpoint
 
 ### Bridge Status
 ```bash
-curl http://orangeugv:8080/api/bridge/status
+curl http://orangeugv/api/bridge/status
 ```
 Gibt: GPS + NTRIP Status, RTK-Uptime, RTK-Fix-Zähler
 
 ### Health Check
 ```bash
-curl http://orangeugv:8080/api/health
+curl http://orangeugv/api/health
 ```
 Gibt: Allgemeiner System-Status
 
 ### IMU Status
 ```bash
-curl http://orangeugv:8080/api/imu/status
-curl http://orangeugv:8080/api/imu/data
+curl http://orangeugv/api/imu/status
+curl http://orangeugv/api/imu/data
 ```
 Gibt: WitMotion Verbindungsstatus, Orientierung, Rohdaten und Temperatur
 
@@ -245,7 +245,7 @@ Gibt: WitMotion Verbindungsstatus, Orientierung, Rohdaten und Temperatur
 - [x] GPS via USB/by-id ✅
 - [x] CAN JSON-Transport bidirektional ✅
 - [x] WitMotion USB-IMU integriert ✅
-- [ ] RTK/NTRIP wieder aktivieren
+- [x] RTK/NTRIP produktiv aktiviert ✅
 - [ ] Achs-/Montagerichtung der IMU im Fahrbetrieb validieren
 
 ## 🐛 Troubleshooting
@@ -258,14 +258,14 @@ Gibt: WitMotion Verbindungsstatus, Orientierung, Rohdaten und Temperatur
 
 ### IMU zeigt keine Daten
 1. Überprüfe WitMotion-Gerät: `ls /dev/serial/by-id/`
-2. Überprüfe API lokal: `curl http://127.0.0.1:8080/api/imu/status`
+2. Überprüfe API lokal: `curl http://127.0.0.1/api/imu/status`
 3. Überprüfe Service-Logs: `journalctl -u sensor-hub.service -n 50`
 4. Überprüfe Baud Rate: 9600
 
 ### Web-Interface nicht erreichbar
-1. Überprüfe Port: `sudo netstat -tlnp | grep 8080`
+1. Überprüfe Port: `sudo netstat -tlnp | grep :80`
 2. Überprüfe Firewall
-3. Teste lokal: `curl http://localhost:8080`
+3. Teste lokal: `curl http://localhost/`
 
 ### Koordinaten sind 0.0
 1. Warte auf GPS-Lock (RTK FIXED)
