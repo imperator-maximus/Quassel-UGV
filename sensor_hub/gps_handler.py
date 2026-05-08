@@ -15,6 +15,11 @@ import pynmea2
 logger = logging.getLogger(__name__)
 
 
+def _normalize_heading(angle: float) -> float:
+    """Normalisiert Heading auf [0, 360)."""
+    return angle % 360.0
+
+
 class GPSHandler:
     """Verwaltet GPS-Kommunikation und Datenverarbeitung mit pynmea2"""
     
@@ -47,6 +52,40 @@ class GPSHandler:
         
         # Thread-Sicherheit
         self.lock = threading.Lock()
+
+    def _update_heading(self, heading: float):
+        """Aktualisiert das zuletzt bekannte GPS-Heading."""
+        with self.lock:
+            self.heading = _normalize_heading(float(heading))
+
+    def _parse_raw_heading_sentence(self, sentence: str) -> bool:
+        """Parst Heading aus rohen NMEA-Sätzen, die pynmea2 evtl. nicht kennt.
+
+        Relevant für UM982 insbesondere bei `THS` und talker-spezifischen `..HDT`-Sätzen.
+        """
+        if not sentence.startswith('$'):
+            return False
+
+        try:
+            body = sentence[1:].split('*', 1)[0]
+            parts = body.split(',')
+            sentence_id = parts[0]
+            fields = parts[1:]
+
+            if sentence_id.endswith('HDT') and fields and fields[0]:
+                self._update_heading(float(fields[0]))
+                return True
+
+            if sentence_id.endswith('THS') and len(fields) >= 2 and fields[0]:
+                mode = (fields[1] or '').strip().upper()
+                if mode in {'A', 'E', 'M', 'S'}:
+                    self._update_heading(float(fields[0]))
+                    return True
+
+        except (ValueError, IndexError):
+            return False
+
+        return False
     
     def connect(self) -> bool:
         """Verbindet mit GPS-Gerät"""
@@ -90,6 +129,9 @@ class GPSHandler:
         """Parst NMEA-Sätze mit pynmea2 (robust mit Checksummen-Validierung)"""
         if not sentence.startswith('$'):
             return
+
+        # Vorab rohes Heading parsen, damit auch Sätze ohne pynmea2-Support funktionieren.
+        self._parse_raw_heading_sentence(sentence)
         
         try:
             msg = pynmea2.parse(sentence)
@@ -132,9 +174,8 @@ class GPSHandler:
             
             # HDT: Heading True (von Dual-Antenna, genauer als RMC)
             elif isinstance(msg, pynmea2.HDT):
-                with self.lock:
-                    if msg.heading:
-                        self.heading = msg.heading
+                if msg.heading:
+                    self._update_heading(msg.heading)
         
         except pynmea2.ParseError:
             # Ignoriere Parse-Fehler (z.B. korrupte Sätze)

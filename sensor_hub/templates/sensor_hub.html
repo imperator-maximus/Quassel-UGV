@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>👑 Quassel UGV - Sensor Hub 👑</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="" defer></script>
     <style>
         * {
             margin: 0;
@@ -219,6 +221,36 @@
             border-radius: 50%;
             display: inline-block;
         }
+
+        .vehicle-map-panel {
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid rgba(212, 175, 55, 0.2);
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+
+        .vehicle-map-panel .coordinate-label {
+            margin-bottom: 10px;
+        }
+
+        #vehicle-map {
+            height: 480px;
+            width: 100%;
+            border-radius: 8px;
+            background: rgba(12, 24, 8, 0.9);
+            border: 1px solid rgba(212, 175, 55, 0.25);
+        }
+
+        .vehicle-map-note {
+            margin-top: 10px;
+            color: #d4af37;
+            font-size: 0.85em;
+            opacity: 0.85;
+            text-align: center;
+        }
+
+        .leaflet-container { font-family: 'Georgia', 'Times New Roman', serif; }
 
         .bing-maps-link {
             display: inline-block;
@@ -437,6 +469,15 @@
 
         <div class="coordinates-section">
             <h2>📍 Koordinaten</h2>
+
+            <div class="vehicle-map-panel">
+                <div class="coordinate-label">🗺️ Karte (Heading-Verifikation)</div>
+                <div id="vehicle-map"></div>
+                <div class="vehicle-map-note">
+                    Layer oben rechts: Satellit (Bing) ↔ Satellit (Esri) ↔ Straßenkarte (OSM). Fahrzeug-Outline und Antennen maßstabsgetreu.
+                </div>
+            </div>
+
             <div class="coordinates-layout">
                 <div>
                     <div class="coordinate-display">
@@ -488,10 +529,11 @@
                     </div>
 
                     <div class="footprint-note">
-                        Schematische Draufsicht, Norden oben.
+                        Schematische Draufsicht, Fahrzeugfront oben.
                     </div>
                 </div>
             </div>
+
             <div class="update-info">
                 Auto-Update alle 2 Sekunden
             </div>
@@ -612,11 +654,27 @@
                         `${(dimensions.length || 0).toFixed(2)} m × ${(dimensions.width || 0).toFixed(2)} m`;
                     document.getElementById('vehicle-reference').textContent =
                         (data.footprint && data.footprint.reference_point) || '-';
-                    document.getElementById('vehicle-heading-source').textContent = pose.heading_source || '-';
+                    let headingSourceText = pose.heading_source || '-';
+                    if (typeof pose.heading_offset_deg === 'number' && Math.abs(pose.heading_offset_deg) > 0.01) {
+                        const raw = (typeof pose.heading_raw_deg === 'number') ? `, roh ${pose.heading_raw_deg.toFixed(1)}°` : '';
+                        headingSourceText += ` (Offset ${pose.heading_offset_deg.toFixed(1)}°${raw})`;
+                    }
+                    if (typeof pose.imu_heading_offset_deg === 'number' && pose.imu_offset_source && pose.imu_offset_source !== 'none') {
+                        const raw = (typeof pose.heading_raw_deg === 'number') ? `, roh ${pose.heading_raw_deg.toFixed(1)}°` : '';
+                        headingSourceText += ` (IMU-Offset ${pose.imu_heading_offset_deg.toFixed(1)}° ${pose.imu_offset_source}${raw})`;
+                    }
+                    const cal = pose.imu_heading_calibration;
+                    if (cal) {
+                        const liveOffset = (typeof cal.live_offset_deg === 'number') ? `${cal.live_offset_deg.toFixed(1)}°` : '–';
+                        const status = cal.ready ? 'aktiv' : 'lernt';
+                        headingSourceText += ` · IMU-Cal ${status} ${cal.sample_count}/${cal.window_size}, Live ${liveOffset}`;
+                    }
+                    document.getElementById('vehicle-heading-source').textContent = headingSourceText;
                     document.getElementById('vehicle-baseline').textContent =
                         gnss.antenna_baseline_m ? `${gnss.antenna_baseline_m.toFixed(2)} m` : '-';
 
                     drawVehicleFootprint(data);
+                    updateVehicleMap(data);
                 })
                 .catch(error => {
                     console.warn('Vehicle Footprint Update Fehler:', error);
@@ -862,6 +920,134 @@
             }, 5000);
         }
 
+        // ---- Leaflet-Karte: Heading-Verifikation gegen Satellit/OSM ---------------
+        let mapInstance = null;
+        let mapVehiclePolygon = null;
+        let mapHeadingArrow = null;
+        let mapAntennaMarkers = { gps_primary: null, gps_secondary: null };
+        let mapCenterDone = false;
+
+        function initVehicleMap() {
+            if (mapInstance) return;
+            const mapEl = document.getElementById('vehicle-map');
+            if (!mapEl) return;
+            if (typeof L === 'undefined') return; // Leaflet noch nicht geladen
+
+            // Bing Aerial via öffentliche Quadkey-Tile-URL (kein API-Key nötig).
+            // In DE meist deutlich höher aufgelöst als Esri World Imagery.
+            const BingLayer = L.TileLayer.extend({
+                getTileUrl: function (coords) {
+                    const z = this._getZoomForUrl();
+                    let x = coords.x;
+                    let y = coords.y;
+                    let quadKey = '';
+                    for (let i = z; i > 0; i--) {
+                        let digit = 0;
+                        const mask = 1 << (i - 1);
+                        if ((x & mask) !== 0) digit += 1;
+                        if ((y & mask) !== 0) digit += 2;
+                        quadKey += digit.toString();
+                    }
+                    return L.Util.template(this._url, {
+                        s: this._getSubdomain(coords),
+                        q: quadKey,
+                    });
+                },
+            });
+            const bingAerial = new BingLayer(
+                'https://ecn.t{s}.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1',
+                {
+                    subdomains: ['0', '1', '2', '3'],
+                    maxZoom: 23,
+                    maxNativeZoom: 20,
+                    attribution: 'Tiles © Microsoft Bing',
+                }
+            );
+            const esriSat = L.tileLayer(
+                'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                { maxZoom: 23, maxNativeZoom: 19, attribution: 'Tiles © Esri' }
+            );
+            const osm = L.tileLayer(
+                'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                { maxZoom: 23, maxNativeZoom: 19, attribution: '© OpenStreetMap' }
+            );
+            mapInstance = L.map('vehicle-map', {
+                center: [0, 0],
+                zoom: 21,
+                maxZoom: 23,
+                layers: [bingAerial],
+            });
+            L.control.layers(
+                {
+                    'Satellit (Bing)': bingAerial,
+                    'Satellit (Esri)': esriSat,
+                    'Straßenkarte (OSM)': osm,
+                },
+                null,
+                { position: 'topright', collapsed: false }
+            ).addTo(mapInstance);
+        }
+
+        function localToLatLon(local, headingDeg, lat, lon) {
+            const h = headingDeg * Math.PI / 180;
+            const north = local.x * Math.cos(h) - local.y * Math.sin(h);
+            const east = local.x * Math.sin(h) + local.y * Math.cos(h);
+            const dLat = north / 111320;
+            const dLon = east / (111320 * Math.cos(lat * Math.PI / 180));
+            return [lat + dLat, lon + dLon];
+        }
+
+        function updateVehicleMap(payload) {
+            if (!mapInstance) initVehicleMap();
+            if (!mapInstance) return;
+            if (!payload || !payload.geometry || !payload.footprint || !payload.pose) return;
+
+            const lat = payload.pose.latitude;
+            const lon = payload.pose.longitude;
+            if (typeof lat !== 'number' || typeof lon !== 'number' || (!lat && !lon)) return;
+
+            const heading = payload.pose.heading_deg || 0;
+            const outline = payload.footprint.outline_local_m || [];
+            const markers = payload.footprint.markers_local_m || {};
+
+            const cornerLatLngs = outline.map(p => localToLatLon(p, heading, lat, lon));
+            if (mapVehiclePolygon) mapVehiclePolygon.remove();
+            if (cornerLatLngs.length >= 3) {
+                mapVehiclePolygon = L.polygon(cornerLatLngs, {
+                    color: '#4dd0e1', weight: 3, fillColor: '#4dd0e1', fillOpacity: 0.15,
+                }).addTo(mapInstance);
+            }
+
+            const dimensions = payload.geometry.dimensions_m || {};
+            const length = dimensions.length || 1.0;
+            const arrowTail = localToLatLon({ x: 0, y: 0 }, heading, lat, lon);
+            const arrowHead = localToLatLon({ x: length / 2, y: 0 }, heading, lat, lon);
+            if (mapHeadingArrow) mapHeadingArrow.remove();
+            mapHeadingArrow = L.polyline([arrowTail, arrowHead], {
+                color: '#ffd700', weight: 4,
+            }).addTo(mapInstance);
+
+            ['gps_primary', 'gps_secondary'].forEach(key => {
+                const marker = markers[key];
+                if (mapAntennaMarkers[key]) {
+                    mapAntennaMarkers[key].remove();
+                    mapAntennaMarkers[key] = null;
+                }
+                if (!marker || !marker.point_local_m) return;
+                const ll = localToLatLon(marker.point_local_m, heading, lat, lon);
+                const colour = key === 'gps_primary' ? '#ffd700' : '#4dd0e1';
+                mapAntennaMarkers[key] = L.circleMarker(ll, {
+                    radius: 5, color: '#000', weight: 1,
+                    fillColor: colour, fillOpacity: 1,
+                }).bindTooltip(marker.label || key).addTo(mapInstance);
+            });
+
+            if (!mapCenterDone) {
+                mapInstance.setView([lat, lon], 21);
+                mapCenterDone = true;
+            }
+        }
+
         function projectLocalPoint(point, headingDeg, scale, centerX, centerY) {
             const headingRad = headingDeg * Math.PI / 180;
             const north = point.x * Math.cos(headingRad) - point.y * Math.sin(headingRad);
@@ -901,11 +1087,6 @@
                 ctx.stroke();
             }
 
-            ctx.fillStyle = '#d4af37';
-            ctx.font = 'bold 14px Georgia';
-            ctx.textAlign = 'center';
-            ctx.fillText('N', centerX, 18);
-
             if (!payload || !payload.geometry || !payload.footprint) {
                 ctx.fillStyle = '#f5f5dc';
                 ctx.font = '14px Georgia';
@@ -919,10 +1100,12 @@
             const length = dimensions.length || 0;
             const widthM = dimensions.width || 0;
             const heading = (payload.pose && payload.pose.heading_deg) || 0;
+            // Karten-/Nordansicht: Canvas-Top zeigt nach Norden, Fahrzeug rotiert mit Heading.
+            const drawingHeading = heading;
             const outline = footprint.outline_local_m || [];
 
             const scale = Math.min((width - 90) / Math.max(length, 0.1), (height - 110) / Math.max(widthM, 0.1));
-            const projected = outline.map(point => projectLocalPoint(point, heading, scale, centerX, centerY));
+            const projected = outline.map(point => projectLocalPoint(point, drawingHeading, scale, centerX, centerY));
 
             if (projected.length >= 4) {
                 ctx.fillStyle = 'rgba(77, 208, 225, 0.18)';
@@ -937,9 +1120,9 @@
                 ctx.fill();
                 ctx.stroke();
 
-                const frontCenter = projectLocalPoint({ x: length / 2, y: 0 }, heading, scale, centerX, centerY);
-                const noseLeft = projectLocalPoint({ x: length / 2 - 0.12, y: -0.09 }, heading, scale, centerX, centerY);
-                const noseRight = projectLocalPoint({ x: length / 2 - 0.12, y: 0.09 }, heading, scale, centerX, centerY);
+                const frontCenter = projectLocalPoint({ x: length / 2, y: 0 }, drawingHeading, scale, centerX, centerY);
+                const noseLeft = projectLocalPoint({ x: length / 2 - 0.12, y: -0.09 }, drawingHeading, scale, centerX, centerY);
+                const noseRight = projectLocalPoint({ x: length / 2 - 0.12, y: 0.09 }, drawingHeading, scale, centerX, centerY);
                 ctx.fillStyle = '#ffd700';
                 ctx.beginPath();
                 ctx.moveTo(frontCenter.x, frontCenter.y);
@@ -955,12 +1138,18 @@
                 gps_secondary: '#4dd0e1',
                 imu: '#b388ff',
             };
+            const markerLabels = {
+                mast: 'MAST',
+                gps_primary: 'GPS 1',
+                gps_secondary: 'GPS 2',
+                imu: 'IMU',
+            };
             const markers = (footprint.markers_local_m && Object.entries(footprint.markers_local_m)) || [];
 
             markers.forEach(([key, marker]) => {
                 const local = marker.point_local_m;
                 if (!local) return;
-                const projectedPoint = projectLocalPoint(local, heading, scale, centerX, centerY);
+                const projectedPoint = projectLocalPoint(local, drawingHeading, scale, centerX, centerY);
                 ctx.fillStyle = markerColors[key] || '#ffffff';
                 ctx.beginPath();
                 ctx.arc(projectedPoint.x, projectedPoint.y, 5, 0, 2 * Math.PI);
@@ -968,7 +1157,63 @@
                 ctx.strokeStyle = '#000';
                 ctx.lineWidth = 1.5;
                 ctx.stroke();
+                if (key === 'mast') {
+                    ctx.fillStyle = '#ff6b6b';
+                    ctx.font = 'bold 12px Courier New';
+                    ctx.textAlign = 'right';
+                    ctx.fillText('MAST', projectedPoint.x - 9, projectedPoint.y + 4);
+                }
             });
+
+            // Fahrzeug-Kantenbeschriftung: Labels sitzen am Fahrzeug und rotieren mit
+            // dem Heading mit, sodass „VORNE/HINTEN/LINKS/RECHTS" immer am korrekten
+            // Fahrzeugrand stehen, unabhängig von der Bild-Orientierung.
+            const labelPad = 0.18;
+            const edgeLabels = [
+                { text: 'VORNE',  local: { x:  length / 2 + labelPad, y: 0 } },
+                { text: 'HINTEN', local: { x: -length / 2 - labelPad, y: 0 } },
+                { text: 'LINKS',  local: { x: 0, y: -widthM / 2 - labelPad } },
+                { text: 'RECHTS', local: { x: 0, y:  widthM / 2 + labelPad } },
+            ];
+            ctx.fillStyle = '#f5f5dc';
+            ctx.font = 'bold 12px Courier New';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            edgeLabels.forEach(lbl => {
+                const p = projectLocalPoint(lbl.local, drawingHeading, scale, centerX, centerY);
+                ctx.fillText(lbl.text, p.x, p.y);
+            });
+            ctx.textBaseline = 'alphabetic';
+
+            // Nord-Indikator oben rechts: Canvas-Top entspricht in der Kartenansicht
+            // immer Norden, daher zeigt der N-Pfeil senkrecht nach oben.
+            const compassR = 22;
+            const compassCx = width - compassR - 12;
+            const compassCy = compassR + 14;
+            ctx.strokeStyle = 'rgba(245,245,220,0.6)';
+            ctx.fillStyle = 'rgba(0,0,0,0.35)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(compassCx, compassCy, compassR, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.stroke();
+            ctx.strokeStyle = '#ff6b6b';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(compassCx, compassCy + compassR - 6);
+            ctx.lineTo(compassCx, compassCy - compassR + 6);
+            ctx.stroke();
+            ctx.fillStyle = '#ff6b6b';
+            ctx.beginPath();
+            ctx.moveTo(compassCx, compassCy - compassR + 2);
+            ctx.lineTo(compassCx - 4, compassCy - compassR + 8);
+            ctx.lineTo(compassCx + 4, compassCy - compassR + 8);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = '#f5f5dc';
+            ctx.font = 'bold 11px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText('N', compassCx, compassCy - compassR - 4);
 
             ctx.fillStyle = '#f5f5dc';
             ctx.font = '13px Courier New';

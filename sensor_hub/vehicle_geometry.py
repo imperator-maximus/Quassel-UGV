@@ -5,6 +5,115 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 
+def _normalize_heading_deg(value: float) -> float:
+    """Normalisiert einen Heading-Wert auf das Intervall [0, 360)."""
+    normalized = value % 360.0
+    if normalized < 0:
+        normalized += 360.0
+    return normalized
+
+
+def select_heading_for_visualization(
+    gps_status: Optional[Dict[str, Any]] = None,
+    orientation: Optional[Dict[str, Any]] = None,
+    gps_heading_offset_deg: float = 0.0,
+    imu_heading_offset_deg: float = 0.0,
+    imu_offset_source: str = 'none',
+) -> Dict[str, Any]:
+    """Wählt eine sinnvolle Heading-Quelle für UI/Visualisierung.
+
+    Aktuell gilt:
+    - GPS/Dual-GNSS nur verwenden, wenn ein nicht-triviales Heading vorliegt.
+    - Sonst auf IMU-Heading zurückfallen, optional mit gelerntem oder statischem
+      Offset, der den IMU-Yaw an die GPS-Referenz angleicht.
+    - Falls beides nicht brauchbar ist, 0.0 zurückgeben.
+
+    ``gps_heading_offset_deg`` kompensiert den Winkel zwischen Antennen-Baseline
+    und Fahrzeug-Vorwärtsachse. ``imu_heading_offset_deg`` kompensiert den Yaw
+    zwischen IMU-Mount/Magnetometer und der Fahrzeug-Vorwärtsachse. Beide
+    Ergebnisse werden auf [0, 360) normalisiert. ``imu_offset_source`` gibt an,
+    woher der IMU-Offset stammt: 'live' (online kalibriert), 'static'
+    (vehicle_geometry.json) oder 'none' (kein Offset bekannt).
+    """
+    gps_heading = None
+    if gps_status is not None:
+        try:
+            gps_heading = float(gps_status.get('heading', 0.0))
+        except (TypeError, ValueError):
+            gps_heading = None
+
+    imu_heading = None
+    imu_source = 'imu'
+    if orientation is not None:
+        try:
+            imu_heading = float(orientation.get('heading', 0.0))
+            imu_source = orientation.get('source', 'imu')
+        except (TypeError, ValueError):
+            imu_heading = None
+
+    if gps_heading is not None and abs(gps_heading) > 0.01:
+        corrected = _normalize_heading_deg(gps_heading + gps_heading_offset_deg)
+        return {
+            'heading_deg': corrected,
+            'heading_source': 'dual_gnss',
+            'heading_raw_deg': gps_heading,
+            'heading_offset_deg': gps_heading_offset_deg,
+        }
+
+    if imu_heading is not None:
+        return _build_imu_fallback(
+            imu_heading=imu_heading,
+            imu_source=imu_source,
+            gps_status=gps_status,
+            imu_heading_offset_deg=imu_heading_offset_deg,
+            imu_offset_source=imu_offset_source,
+        )
+
+    if gps_heading is not None:
+        corrected = _normalize_heading_deg(gps_heading + gps_heading_offset_deg)
+        return {
+            'heading_deg': corrected,
+            'heading_source': 'dual_gnss',
+            'heading_raw_deg': gps_heading,
+            'heading_offset_deg': gps_heading_offset_deg,
+        }
+
+    return {'heading_deg': 0.0, 'heading_source': 'unknown'}
+
+
+def _build_imu_fallback(
+    imu_heading: float,
+    imu_source: str,
+    gps_status: Optional[Dict[str, Any]],
+    imu_heading_offset_deg: float,
+    imu_offset_source: str,
+) -> Dict[str, Any]:
+    """Erstellt das Fallback-Ergebnis basierend auf IMU + Offset."""
+    offset_source = (imu_offset_source or 'none').lower()
+    has_offset = offset_source in ('live', 'static') and abs(imu_heading_offset_deg) > 1e-6
+
+    if has_offset:
+        corrected = _normalize_heading_deg(imu_heading + imu_heading_offset_deg)
+        if offset_source == 'live':
+            label = 'imu_calibrated_fallback'
+        else:
+            label = 'imu_static_fallback'
+        return {
+            'heading_deg': corrected,
+            'heading_source': label,
+            'heading_raw_deg': imu_heading,
+            'imu_heading_offset_deg': imu_heading_offset_deg,
+            'imu_offset_source': offset_source,
+        }
+
+    base_source = imu_source if gps_status is None else f'{imu_source}_fallback'
+    return {
+        'heading_deg': _normalize_heading_deg(imu_heading),
+        'heading_source': base_source,
+        'imu_offset_source': 'none',
+    }
+
+
 def load_vehicle_geometry(path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
     """Lädt die Fahrzeuggeometrie aus einer JSON-Datei."""
     geometry_path = Path(path) if path is not None else Path(__file__).with_name('vehicle_geometry.json')

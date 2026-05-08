@@ -22,7 +22,8 @@ from ntrip_client import NTRIPClient
 from gps_ntrip_bridge import GPSNTRIPBridge
 from can_protocol import CANProtocol
 from telemetry_payload import build_status_payload, build_telemetry_payload, serialize_can_payload
-from vehicle_geometry import build_local_footprint, build_visual_markers_local, load_vehicle_geometry
+from vehicle_geometry import build_local_footprint, build_visual_markers_local, load_vehicle_geometry, select_heading_for_visualization
+from imu_heading_calibration import ImuHeadingOffsetEstimator
 
 # Logging konfigurieren
 logging.basicConfig(
@@ -72,6 +73,7 @@ class SensorHubApp:
         self.vehicle_geometry = None
         self.vehicle_footprint_local = []
         self.vehicle_markers_local = {}
+        self.imu_heading_estimator = None
         self._load_vehicle_geometry()
         self._setup_routes()
         self._init_sensors()
@@ -94,6 +96,35 @@ class SensorHubApp:
             self.vehicle_geometry = None
             self.vehicle_footprint_local = []
             self.vehicle_markers_local = {}
+
+        self.imu_heading_estimator = self._build_imu_heading_estimator()
+
+    def _build_imu_heading_estimator(self):
+        """Erzeugt den IMU-Heading-Offset-Estimator anhand der Geometrie-Konfig."""
+        cfg = (self.vehicle_geometry or {}).get('imu', {}).get('calibration', {}) or {}
+        try:
+            window_size = int(cfg.get('window_size', 60))
+        except (TypeError, ValueError):
+            window_size = 60
+        try:
+            min_samples = int(cfg.get('min_samples', 10))
+        except (TypeError, ValueError):
+            min_samples = 10
+        try:
+            max_rate = float(cfg.get('max_heading_rate_dps', 5.0))
+        except (TypeError, ValueError):
+            max_rate = 5.0
+        statuses = cfg.get('allowed_rtk_statuses') or ['RTK FIXED', 'RTK FLOAT']
+        try:
+            statuses_tuple = tuple(str(s) for s in statuses)
+        except TypeError:
+            statuses_tuple = ('RTK FIXED', 'RTK FLOAT')
+        return ImuHeadingOffsetEstimator(
+            window_size=window_size,
+            min_samples=min_samples,
+            max_heading_rate_dps=max_rate,
+            allowed_rtk_statuses=statuses_tuple,
+        )
     
     def _init_sensors(self):
         """Initialisiert Sensoren"""
@@ -297,23 +328,94 @@ class SensorHubApp:
     def _get_vehicle_pose(self):
         """Liefert aktuelle Pose für Visualisierung/Diagnose."""
         gps_status = self.gps.get_status() if self.gps else None
+        orientation = self._get_orientation() if self.imu and self.imu.connected else None
         latitude = gps_status.get('latitude') if gps_status else None
         longitude = gps_status.get('longitude') if gps_status else None
-        heading = gps_status.get('heading', 0.0) if gps_status else 0.0
-        heading_source = 'dual_gnss' if gps_status else 'unknown'
 
-        if not gps_status and self.imu and self.imu.connected:
-            orientation = self._get_orientation()
-            if orientation:
-                heading = orientation.get('heading', 0.0)
-                heading_source = orientation.get('source', 'imu')
+        gnss_cfg = (self.vehicle_geometry or {}).get('gnss', {}) if self.vehicle_geometry else {}
+        try:
+            gps_heading_offset = float(gnss_cfg.get('heading_offset_deg', 0.0))
+        except (TypeError, ValueError):
+            gps_heading_offset = 0.0
 
-        return {
+        imu_cfg = (self.vehicle_geometry or {}).get('imu', {}) if self.vehicle_geometry else {}
+        try:
+            imu_static_offset = float(imu_cfg.get('heading_offset_deg', 0.0))
+        except (TypeError, ValueError):
+            imu_static_offset = 0.0
+
+        gps_heading_raw = None
+        if gps_status is not None:
+            try:
+                gps_heading_raw = float(gps_status.get('heading', 0.0))
+            except (TypeError, ValueError):
+                gps_heading_raw = None
+        imu_heading = None
+        if orientation is not None:
+            try:
+                imu_heading = float(orientation.get('heading', 0.0))
+            except (TypeError, ValueError):
+                imu_heading = None
+
+        if (
+            self.imu_heading_estimator is not None
+            and gps_heading_raw is not None
+            and abs(gps_heading_raw) > 0.01
+            and imu_heading is not None
+        ):
+            corrected_gps = (gps_heading_raw + gps_heading_offset) % 360.0
+            self.imu_heading_estimator.update(
+                corrected_gps_heading_deg=corrected_gps,
+                imu_heading_deg=imu_heading,
+                rtk_status=(gps_status or {}).get('rtk_status'),
+                timestamp=time.time(),
+            )
+
+        live_offset = (
+            self.imu_heading_estimator.current_offset_deg()
+            if self.imu_heading_estimator is not None
+            else None
+        )
+        if live_offset is not None:
+            imu_offset_deg = live_offset
+            imu_offset_source = 'live'
+        elif abs(imu_static_offset) > 1e-6:
+            imu_offset_deg = imu_static_offset
+            imu_offset_source = 'static'
+        else:
+            imu_offset_deg = 0.0
+            imu_offset_source = 'none'
+
+        heading_info = select_heading_for_visualization(
+            gps_status=gps_status,
+            orientation=orientation,
+            gps_heading_offset_deg=gps_heading_offset,
+            imu_heading_offset_deg=imu_offset_deg,
+            imu_offset_source=imu_offset_source,
+        )
+
+        pose = {
             'latitude': latitude,
             'longitude': longitude,
-            'heading_deg': heading,
-            'heading_source': heading_source,
+            'heading_deg': heading_info['heading_deg'],
+            'heading_source': heading_info['heading_source'],
         }
+        for key in ('heading_raw_deg', 'heading_offset_deg',
+                    'imu_heading_offset_deg', 'imu_offset_source'):
+            if key in heading_info:
+                pose[key] = heading_info[key]
+
+        if self.imu_heading_estimator is not None:
+            est_status = self.imu_heading_estimator.status()
+            pose['imu_heading_calibration'] = {
+                'sample_count': est_status['sample_count'],
+                'window_size': est_status['window_size'],
+                'min_samples': est_status['min_samples'],
+                'ready': est_status['ready'],
+                'live_offset_deg': est_status['live_offset_deg'],
+                'last_reject_reason': est_status['last_reject_reason'],
+            }
+        return pose
 
     def _get_vehicle_footprint_response(self):
         """Erstellt die Antwort für Fahrzeuggeometrie/Footprint."""
