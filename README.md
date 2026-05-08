@@ -47,6 +47,22 @@ This project implements a complete autonomous UGV system featuring:
     [ Browser-Client ]
 ```
 
+### Physical Vehicle Layout
+
+- **Vehicle length**: approx. **115 cm**
+- **Vehicle width incl. wheels**: approx. **79 cm**
+- **Vehicle height without mast**: approx. **60 cm**
+- **Additional mast height incl. enclosure**: approx. **70 cm**
+- **Overall height with mast**: approx. **130 cm**
+- **Payload / ride-on capability**: the platform is large and robust enough that **one person can ride on it**
+
+**Sensor placement:**
+- **Mast position**: rear left on the vehicle
+- **Primary GPS antenna**: mounted on the mast, rear left, at approx. **130 cm** height
+- **Secondary GPS antenna**: mounted rear right directly on the housing at approx. **60 cm** height
+- **Distance between GPS antennas**: approx. **51 cm**
+- **IMU position**: mounted at the top of the mast
+
 ### Software Stack
 
 **Pi Zero 2W (Sensor Hub):**
@@ -133,6 +149,19 @@ python3 web_app.py
 ```
 
 ## 📋 Hardware Configuration
+
+### Vehicle Geometry / Sensor Placement
+
+- **Length**: approx. **115 cm**
+- **Width incl. wheels**: approx. **79 cm**
+- **Height without mast**: approx. **60 cm**
+- **Mast incl. enclosure**: additional approx. **70 cm**
+- **Mast location**: **rear left**
+- **Upper GPS antenna**: rear left on mast, approx. **130 cm** above ground
+- **Lower GPS antenna**: rear right on housing, approx. **60 cm** above ground
+- **GPS antenna baseline**: approx. **51 cm**
+- **IMU**: mounted on top of the mast
+- **Ride-on capability**: one person can ride on the vehicle
 
 ### Sensor Hub (Orange Pi Zero 2W)
 - **MCU**: Allwinner H616
