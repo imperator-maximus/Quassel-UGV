@@ -39,6 +39,31 @@ class WitMotionHandlerTests(unittest.TestCase):
         self.assertTrue(data['is_calibrated'])
         self.assertFalse(motion['zupt_enabled'])
 
+    def test_stationary_detection_accepts_tilted_rest_pose(self):
+        imu = WitMotionUSBIMU(port='COM_TEST', baudrate=9600)
+
+        imu._process_bytes(build_frame(0x51, [300, -200, 2015, 2500]))
+        imu._process_bytes(build_frame(0x52, [3, -4, 2, 2500]))
+        imu._process_bytes(build_frame(0x53, [255, -692, 4024, 0]))
+
+        motion = imu.get_motion_status()
+        orientation = imu.get_orientation()
+
+        self.assertTrue(imu.get_data()['is_calibrated'])
+        self.assertTrue(motion['is_stationary'])
+        self.assertTrue(orientation['is_stationary'])
+
+    def test_stationary_detection_marks_rotation_as_moving(self):
+        imu = WitMotionUSBIMU(port='COM_TEST', baudrate=9600)
+
+        imu._process_bytes(build_frame(0x51, [0, 0, 16384, 2500]))
+        imu._process_bytes(build_frame(0x52, [0, 0, 82, 2500]))
+        imu._process_bytes(build_frame(0x53, [0, 0, 4096, 0]))
+
+        motion = imu.get_motion_status()
+
+        self.assertFalse(motion['is_stationary'])
+
     def test_invalid_checksum_is_ignored(self):
         imu = WitMotionUSBIMU(port='COM_TEST', baudrate=9600)
         frame = bytearray(build_frame(0x53, [0, 0, 0, 0]))

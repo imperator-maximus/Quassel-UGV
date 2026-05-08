@@ -2,6 +2,7 @@
 """IMU-Handler für den WitMotion USB-Sensor."""
 
 import logging
+import math
 import struct
 import threading
 import time
@@ -37,6 +38,9 @@ class WitMotionUSBIMU:
     ACCEL_RANGE_G = 16.0
     GYRO_RANGE_DPS = 2000.0
     ANGLE_RANGE_DEG = 180.0
+    GRAVITY_MPS2 = 9.81
+    STATIONARY_GYRO_THRESHOLD_DPS = 1.0
+    STATIONARY_ACCEL_DELTA_THRESHOLD = 1.2
 
     def __init__(self, port: str, baudrate: int = 9600, timeout: float = 1.0, sample_rate: int = 100):
         self.port = port
@@ -162,12 +166,21 @@ class WitMotionUSBIMU:
             self.raw_mag['z'] = float(d3)
 
         self.is_calibrated = self.REQUIRED_FRAMES.issubset(self._frames_seen)
+        accel_magnitude = math.sqrt(
+            self.raw_accel['x'] ** 2 +
+            self.raw_accel['y'] ** 2 +
+            self.raw_accel['z'] ** 2
+        )
+        gyro_is_quiet = (
+            abs(self.raw_gyro['x']) < self.STATIONARY_GYRO_THRESHOLD_DPS and
+            abs(self.raw_gyro['y']) < self.STATIONARY_GYRO_THRESHOLD_DPS and
+            abs(self.raw_gyro['z']) < self.STATIONARY_GYRO_THRESHOLD_DPS
+        )
+        accel_is_gravity_only = abs(accel_magnitude - self.GRAVITY_MPS2) < self.STATIONARY_ACCEL_DELTA_THRESHOLD
         self.is_stationary = (
-            abs(self.raw_gyro['x']) < 1.0 and
-            abs(self.raw_gyro['y']) < 1.0 and
-            abs(self.raw_gyro['z']) < 1.0 and
-            abs(self.raw_accel['x']) < 0.5 and
-            abs(self.raw_accel['y']) < 0.5
+            self.is_calibrated and
+            gyro_is_quiet and
+            accel_is_gravity_only
         )
 
     def get_data(self) -> Dict:
@@ -201,13 +214,19 @@ class WitMotionUSBIMU:
     def get_motion_status(self) -> Dict:
         """Gibt einfachen Bewegungsstatus für UI/API zurück."""
         with self.lock:
+            accel_magnitude = math.sqrt(
+                self.raw_accel['x'] ** 2 +
+                self.raw_accel['y'] ** 2 +
+                self.raw_accel['z'] ** 2
+            )
             return {
                 'is_stationary': self.is_stationary,
                 'gyro_bias': {'x': 0.0, 'y': 0.0, 'z': 0.0},
                 'gps_weight': 0.0,
                 'zupt_enabled': False,
-                'motion_threshold_gyro': 1.0,
-                'motion_threshold_accel': 0.5,
+                'motion_threshold_gyro': self.STATIONARY_GYRO_THRESHOLD_DPS,
+                'motion_threshold_accel': self.STATIONARY_ACCEL_DELTA_THRESHOLD,
+                'accel_magnitude': accel_magnitude,
                 'source': 'witmotion_native'
             }
 
