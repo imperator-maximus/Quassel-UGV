@@ -7,9 +7,51 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mapping import MappingRecorder
+from mapping.geometry import project_points
+from mapping.plan_types import PlanSegment
+from mapping.transition_router import TransitionRouter
 
 
 class MappingRecorderTests(unittest.TestCase):
+    @staticmethod
+    def _point_m(x_m, y_m):
+        return {"latitude": y_m / 111320.0, "longitude": x_m / 111320.0}
+
+    @classmethod
+    def _square_points_m(cls, min_x, min_y, max_x, max_y):
+        return [
+            cls._point_m(min_x, min_y),
+            cls._point_m(max_x, min_y),
+            cls._point_m(max_x, max_y),
+            cls._point_m(min_x, max_y),
+        ]
+
+    def _write_square_map(self, tmp, recorder, name, min_x, min_y, max_x, max_y):
+        payload = recorder._to_feature_collection(name, self._square_points_m(min_x, min_y, max_x, max_y))
+        (Path(tmp) / f"{name}.geojson").write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    def _assert_shapely_available(self):
+        try:
+            from shapely.geometry import LineString, Polygon
+        except ImportError:
+            self.skipTest("Shapely not installed")
+        return LineString, Polygon
+
+    def _plan_with_center_sub(self, sub_margin_m=0.25):
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = MappingRecorder(tmp, lambda: {})
+            main = self._write_square_map(tmp, recorder, "Brunnen", 0.0, 0.0, 10.0, 10.0)
+            sub = self._write_square_map(tmp, recorder, "sub_Brunnen_Mitte", 4.0, 4.0, 6.0, 6.0)
+            result = recorder.plan_contour_lanes(
+                "Brunnen",
+                cut_width_m=0.5,
+                overlap_m=0.1,
+                sub_margin_m=sub_margin_m,
+                max_ring_turn_deg=155.0,
+            )
+        return recorder, main, sub, result
+
     def test_records_points_from_flat_pose_and_saves_geojson_boundary(self):
         poses = iter([
             {"latitude": 52.0, "longitude": 10.0},
@@ -192,6 +234,93 @@ class MappingRecorderTests(unittest.TestCase):
             )
             self.assertEqual(1, len(result["exclusion_contours"]))
             self.assertEqual("sub_buffer_boundary", result["exclusion_contours"][0]["type"])
+
+    def test_planner_rings_stop_before_sub_buffer(self):
+        LineString, Polygon = self._assert_shapely_available()
+        recorder, main, sub, result = self._plan_with_center_sub(sub_margin_m=0.25)
+        self.assertTrue(result["success"])
+        main_points = recorder._boundary_points(main)
+        origin_lat = sum(point["latitude"] for point in main_points) / len(main_points)
+        origin_lon = sum(point["longitude"] for point in main_points) / len(main_points)
+        sub_poly = Polygon(project_points(recorder._boundary_points(sub), origin_lat, origin_lon)).buffer(0.25)
+        protected = sub_poly.buffer(result["parameters"]["cut_width_m"] / 2.0)
+
+        for lane in result["lanes"]:
+            line_xy = [tuple(point) for point in project_points(
+                [{"longitude": coord[0], "latitude": coord[1]} for coord in lane["coordinates"]],
+                origin_lat,
+                origin_lon,
+            )]
+            self.assertFalse(LineString(line_xy).intersects(protected))
+
+    def test_rest_lanes_do_not_cut_sub_buffer(self):
+        LineString, Polygon = self._assert_shapely_available()
+        recorder, main, sub, result = self._plan_with_center_sub(sub_margin_m=0.25)
+        self.assertTrue(result["success"])
+        self.assertGreater(result["rest_lane_count"], 0)
+        main_points = recorder._boundary_points(main)
+        origin_lat = sum(point["latitude"] for point in main_points) / len(main_points)
+        origin_lon = sum(point["longitude"] for point in main_points) / len(main_points)
+        sub_poly = Polygon(project_points(recorder._boundary_points(sub), origin_lat, origin_lon)).buffer(0.25)
+
+        for rest_lane in result["rest_lanes"]:
+            line_xy = [tuple(point) for point in project_points(
+                [{"longitude": coord[0], "latitude": coord[1]} for coord in rest_lane["coordinates"]],
+                origin_lat,
+                origin_lon,
+            )]
+            self.assertFalse(LineString(line_xy).intersects(sub_poly))
+
+    def test_transition_router_routes_around_sub(self):
+        LineString, Polygon = self._assert_shapely_available()
+        mow_area = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+        sub_union = Polygon([(4, 4), (6, 4), (6, 6), (4, 6)])
+        origin_lat = 0.0
+        origin_lon = 0.0
+        router = TransitionRouter(mow_area.difference(sub_union), sub_union, LineString, origin_lat, origin_lon)
+        meters_to_deg = 1.0 / 111320.0
+        sequence = [
+            PlanSegment(
+                type="contour",
+                segment_index=0,
+                lane_index=0,
+                coordinates=[[2.0 * meters_to_deg, 5.0 * meters_to_deg]],
+                length_m=0.0,
+            ),
+            PlanSegment(
+                type="contour",
+                segment_index=1,
+                lane_index=1,
+                coordinates=[[8.0 * meters_to_deg, 5.0 * meters_to_deg]],
+                length_m=0.0,
+            ),
+        ]
+
+        transitions = router.plan_transitions(sequence)
+
+        self.assertEqual(1, len(transitions))
+        self.assertTrue(transitions[0].safe)
+        self.assertEqual("around_sub", transitions[0].route_kind)
+        routed_xy = [tuple(point) for point in project_points(
+            [{"longitude": coord[0], "latitude": coord[1]} for coord in transitions[0].coordinates],
+            origin_lat,
+            origin_lon,
+        )]
+        self.assertFalse(LineString(routed_xy).intersects(sub_union))
+
+    def test_sub_buffer_changes_exclusion_geometry(self):
+        self._assert_shapely_available()
+        _, _, _, no_buffer = self._plan_with_center_sub(sub_margin_m=0.0)
+        _, _, _, buffered = self._plan_with_center_sub(sub_margin_m=0.25)
+
+        self.assertTrue(no_buffer["success"])
+        self.assertTrue(buffered["success"])
+        self.assertEqual(0.0, no_buffer["parameters"]["sub_margin_m"])
+        self.assertEqual(0.25, buffered["parameters"]["sub_margin_m"])
+        self.assertGreater(
+            buffered["exclusion_contours"][0]["length_m"],
+            no_buffer["exclusion_contours"][0]["length_m"],
+        )
 
 
 if __name__ == "__main__":
