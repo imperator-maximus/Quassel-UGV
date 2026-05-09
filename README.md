@@ -415,6 +415,18 @@ CI / pre-deploy: run both before any `scp` to `orangeugv` or `raspberrycan`.
 **When adding new behavior to the navigation or geometry code, extend the
 existing test files rather than creating throwaway ad-hoc scripts.**
 
+**Motor-controller deploy from Windows:**
+
+```powershell
+.\tools\deploy_motor_controller.ps1
+```
+
+The script installs local dev dependencies, runs both local test suites, uploads
+the motor-controller code to `raspberrycan`, preserves the remote `config.yaml`,
+creates a timestamped backup under `/home/nicolay/backup/`, runs the remote
+motor-controller tests, restarts `motor-controller-v2.service`, and checks `/`
+plus `/api/status`.
+
 ### System Integration Test
 ```bash
 # 1. Setup Sensor Hub (Pi Zero 2W)

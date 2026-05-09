@@ -235,6 +235,82 @@ class MappingRecorderTests(unittest.TestCase):
             self.assertEqual(1, len(result["exclusion_contours"]))
             self.assertEqual("sub_buffer_boundary", result["exclusion_contours"][0]["type"])
 
+    def test_plan_contour_lanes_api_shape_is_stable_for_ui(self):
+        self._assert_shapely_available()
+        _, _, _, result = self._plan_with_center_sub(sub_margin_m=0.25)
+
+        self.assertTrue(result["success"])
+        self.assertEqual("hybrid_contour_rest_reverse_preview", result["strategy"])
+        for key in [
+            "parameters",
+            "lane_count",
+            "rest_lane_count",
+            "transition_count",
+            "unsafe_transition_count",
+            "mow_length_m",
+            "rest_length_m",
+            "connector_length_m",
+            "total_drive_length_m",
+            "total_length_m",
+            "lanes",
+            "rest_lanes",
+            "sequence",
+            "transitions",
+            "exclusion_contours",
+            "map",
+            "subs",
+        ]:
+            self.assertIn(key, result)
+
+        self.assertEqual({
+            "cut_width_m",
+            "overlap_m",
+            "spacing_m",
+            "outer_margin_m",
+            "sub_margin_m",
+            "max_ring_turn_deg",
+        }, set(result["parameters"].keys()))
+        self.assertEqual(result["lane_count"], len(result["lanes"]))
+        self.assertEqual(result["rest_lane_count"], len(result["rest_lanes"]))
+        self.assertEqual(result["transition_count"], len(result["transitions"]))
+        self.assertEqual(result["lane_count"] + result["rest_lane_count"], len(result["sequence"]))
+        self.assertGreater(result["lane_count"], 0)
+        self.assertGreater(result["rest_lane_count"], 0)
+        self.assertGreater(result["transition_count"], 0)
+
+        lane = result["lanes"][0]
+        self.assertEqual("contour", lane["type"])
+        for key in ["segment_index", "lane_index", "coordinates", "length_m", "max_turn_angle_deg"]:
+            self.assertIn(key, lane)
+        self.assertGreaterEqual(len(lane["coordinates"]), 4)
+
+        rest_lane = result["rest_lanes"][0]
+        self.assertEqual("rest_lane", rest_lane["type"])
+        for key in ["segment_index", "rest_index", "rest_group", "direction", "coordinates", "length_m"]:
+            self.assertIn(key, rest_lane)
+        self.assertIn(rest_lane["direction"], ["forward", "reverse"])
+
+        transition = result["transitions"][0]
+        self.assertEqual("transition", transition["type"])
+        for key in [
+            "transition_index",
+            "from_segment_index",
+            "to_segment_index",
+            "from_type",
+            "to_type",
+            "safe",
+            "reason",
+            "route_kind",
+            "coordinates",
+            "length_m",
+        ]:
+            self.assertIn(key, transition)
+
+        contour = result["exclusion_contours"][0]
+        self.assertEqual("sub_buffer_boundary", contour["type"])
+        self.assertIn("coordinates", contour)
+        self.assertIn("length_m", contour)
+
     def test_planner_rings_stop_before_sub_buffer(self):
         LineString, Polygon = self._assert_shapely_available()
         recorder, main, sub, result = self._plan_with_center_sub(sub_margin_m=0.25)
