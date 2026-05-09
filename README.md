@@ -379,6 +379,38 @@ UGV ESP32CAN/
 
 ## 🧪 Testing and Validation
 
+### Unit Tests
+
+The repository ships with hardware-independent unit tests that cover the
+non-trivial math and state machines on both Pis. They run in well under a second
+and **must be kept green**; they are the regression safety net for the
+navigation pipeline. Do not delete them.
+
+**Location and coverage:**
+
+| Test file | Covers |
+|-----------|--------|
+| `sensor_hub/tests/test_vehicle_geometry.py` | Lever-arm correction (`correct_to_vehicle_center`): rotates the antenna offset by the current heading and translates the GPS fix to the vehicle center. A sign error here desyncs the map marker, the CAN telemetry pose, and the navigation distance calculation. |
+| `sensor_hub/tests/test_telemetry_payload.py` | Heading source priority in the CAN/HTTP payload: dual-GNSS heading wins over the IMU fallback, `heading_source` field reports `dual_gnss` / `imu_fallback`, and the raw GPS heading stays available under `gps.heading` for diagnostics. |
+| `raspberry_pi/motor_controller/tests/test_navigation_controller.py` | `NavigationController` end-to-end: bearing/heading-error wrapping, 30%-joystick limit, CAN telemetry pose ingestion, geofence stop, watchdog stop, `nav_*` command dispatch, **acceptance-radius arrival**, and the **overshoot detector** (waypoint counts as reached when the minimum distance was within `2 × acceptance_radius_m` and grows again for ≥2 consecutive samples). The overshoot test is the regression guard against the endless-pivot bug that occurs when GPS noise + drivetrain inertia keep the vehicle just outside the acceptance circle. |
+
+**Running the suite (from repo root):**
+
+```bash
+# Sensor-Hub tests
+python -m unittest discover -s sensor_hub/tests -v
+
+# Motor-Controller tests
+python -m unittest discover -s raspberry_pi/motor_controller/tests -v
+```
+
+Both suites are pure-Python (no GPIO, no CAN, no GPS), so they run on any
+developer machine — including Windows. CI / pre-deploy: run both before any
+`scp` to `orangeugv` or `raspberrycan`.
+
+**When adding new behavior to the navigation or geometry code, extend the
+existing test files rather than creating throwaway ad-hoc scripts.**
+
 ### System Integration Test
 ```bash
 # 1. Setup Sensor Hub (Pi Zero 2W)
