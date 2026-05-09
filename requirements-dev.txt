@@ -1,0 +1,6 @@
+# Development/test dependencies that are safe to install on Windows.
+#
+# Use this before pre-deploy test runs from the repository root:
+#   python -m pip install -r requirements-dev.txt
+PyYAML>=6.0
+shapely>=2.0

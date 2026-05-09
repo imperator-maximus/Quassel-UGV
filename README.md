@@ -397,6 +397,9 @@ navigation pipeline. Do not delete them.
 **Running the suite (from repo root):**
 
 ```bash
+# One-time local test setup, including Windows-safe geometry dependencies
+python -m pip install -r requirements-dev.txt
+
 # Sensor-Hub tests
 python -m unittest discover -s sensor_hub/tests -v
 
@@ -405,8 +408,9 @@ python -m unittest discover -s raspberry_pi/motor_controller/tests -v
 ```
 
 Both suites are pure-Python (no GPIO, no CAN, no GPS), so they run on any
-developer machine — including Windows. CI / pre-deploy: run both before any
-`scp` to `orangeugv` or `raspberrycan`.
+developer machine — including Windows. `shapely` is included in the dev
+requirements so the mowing-lane geometry tests run instead of being skipped.
+CI / pre-deploy: run both before any `scp` to `orangeugv` or `raspberrycan`.
 
 **When adding new behavior to the navigation or geometry code, extend the
 existing test files rather than creating throwaway ad-hoc scripts.**
