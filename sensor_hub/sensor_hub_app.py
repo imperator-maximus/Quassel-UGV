@@ -70,6 +70,7 @@ class SensorHubApp:
         self.can_sender_thread = None
         self.can_receiver_thread = None
         self.last_nav_waypoints = []
+        self.last_nav_mode = 'goto'
         self.last_nav_command = None
         self.last_nav_command_time = None
         self.last_nav_status = None
@@ -740,6 +741,7 @@ class SensorHubApp:
             if request.method == 'GET':
                 return jsonify({
                     'waypoints': list(self.last_nav_waypoints),
+                    'mode': self.last_nav_mode,
                     'last_command': self.last_nav_command,
                     'last_command_time': self.last_nav_command_time,
                 })
@@ -752,14 +754,22 @@ class SensorHubApp:
 
             data = request.get_json(silent=True) or {}
             raw = data if isinstance(data, list) else data.get('waypoints')
+            mode = 'goto' if isinstance(data, list) else data.get('mode', 'goto')
+            if str(mode).lower() not in ('goto', 'track'):
+                return jsonify({'error': 'mode muss goto oder track sein'}), 400
             try:
                 waypoints = self._validate_waypoints(raw)
             except ValueError as exc:
                 return jsonify({'error': str(exc)}), 400
 
-            ok = self._send_navigation_command({'cmd': 'nav_set_waypoints', 'waypoints': waypoints})
+            ok = self._send_navigation_command({
+                'cmd': 'nav_set_waypoints',
+                'mode': str(mode).lower(),
+                'waypoints': waypoints,
+            })
             if ok:
                 self.last_nav_waypoints = waypoints
+                self.last_nav_mode = str(mode).lower()
             return jsonify({'success': ok, 'waypoints': waypoints}), (200 if ok else 503)
 
         @self.app.route('/api/navigation/start', methods=['POST', 'OPTIONS'])
@@ -876,4 +886,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

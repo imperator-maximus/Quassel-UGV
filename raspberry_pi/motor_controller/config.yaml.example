@@ -64,6 +64,7 @@ navigation:
   acceptance_radius_m: 0.25    # Wegpunkt erreicht (Skid-Steer-Limit + RTK-Rauschen)
   slowdown_radius_m: 0.5       # Vor Ziel abbremsen, Throttle skaliert linear bis 0
   turn_kp: 0.02                # Joystick-X pro Grad Heading-Fehler
+  track_lookahead_m: 0.8       # Pure-Pursuit Lookahead für Track-Polyline Testmodus
   min_inner_wheel_speed: 0.50  # Innen-Rad-Garantie: kurveninneres Rad rollt mind.
                                # mit 50% von max_joystick vorwärts (≈75 μs über Neutral,
                                # sicher außerhalb der ESC-Totzone). Anti-Pivot, schont Rasen.

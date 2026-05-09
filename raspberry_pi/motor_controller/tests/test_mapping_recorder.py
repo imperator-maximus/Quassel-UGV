@@ -147,6 +147,52 @@ class MappingRecorderTests(unittest.TestCase):
         self.assertGreater(result["area"]["gross_m2"], result["area"]["net_m2"])
         self.assertGreater(result["area"]["excluded_m2"], 0.0)
 
+    def test_plan_contour_lanes_requires_or_uses_shapely(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = MappingRecorder(tmp, lambda: {})
+            main = recorder._to_feature_collection("Brunnen", [
+                {"latitude": 0.0, "longitude": 0.0},
+                {"latitude": 0.0, "longitude": 0.00004},
+                {"latitude": 0.00004, "longitude": 0.00004},
+                {"latitude": 0.00004, "longitude": 0.0},
+            ])
+            sub = recorder._to_feature_collection("sub_Brunnen_Mitte", [
+                {"latitude": 0.000015, "longitude": 0.000015},
+                {"latitude": 0.000015, "longitude": 0.000025},
+                {"latitude": 0.000025, "longitude": 0.000025},
+                {"latitude": 0.000025, "longitude": 0.000015},
+            ])
+            (Path(tmp) / "Brunnen.geojson").write_text(json.dumps(main), encoding="utf-8")
+            (Path(tmp) / "sub_Brunnen_Mitte.geojson").write_text(json.dumps(sub), encoding="utf-8")
+
+            result = recorder.plan_contour_lanes(
+                "Brunnen",
+                cut_width_m=0.5,
+                overlap_m=0.1,
+                sub_margin_m=0.1,
+            )
+
+        try:
+            import shapely  # noqa: F401
+        except ImportError:
+            self.assertFalse(result["success"])
+            self.assertIn("Shapely", result["error"])
+        else:
+            self.assertTrue(result["success"])
+            self.assertGreater(result["lane_count"], 0)
+            self.assertGreater(result["total_length_m"], 0.0)
+            self.assertIn("spacing_m", result["parameters"])
+            self.assertIn("max_ring_turn_deg", result["parameters"])
+            self.assertIn("coordinates", result["lanes"][0])
+            self.assertIn("sequence", result)
+            self.assertGreaterEqual(result["total_drive_length_m"], result["mow_length_m"])
+            self.assertEqual(
+                result["connector_count"],
+                len([segment for segment in result["sequence"] if segment["type"] == "connector"]),
+            )
+            self.assertEqual(1, len(result["exclusion_contours"]))
+            self.assertEqual("sub_buffer_boundary", result["exclusion_contours"][0]["type"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,7 @@ class NavConfig:
     acceptance_radius_m: float = 0.10
     slowdown_radius_m: float = 0.5
     turn_kp: float = 0.02
+    track_lookahead_m: float = 0.8
     min_inner_wheel_speed: float = 0.15
 
 
@@ -324,6 +325,79 @@ class NavigationControllerTests(unittest.TestCase):
         controller.on_navigation_command({'cmd': 'nav_stop'})
         controller.shutdown()
         self.assertFalse(controller.get_status()['running'])
+
+    def test_track_mode_generates_near_zero_turn_when_on_line(self):
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig(track_lookahead_m=1.0))
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.001},
+        ], mode='track')
+        controller.start()
+        try:
+            controller.on_pose_update({'latitude': 52.0, 'longitude': 10.0001, 'heading_deg': 90.0})
+            x, y, _ = motor.commands[-1]
+        finally:
+            controller.shutdown()
+
+        self.assertAlmostEqual(x, 0.0, delta=0.03)
+        self.assertGreater(y, 0.0)
+        self.assertEqual(controller.get_status()['mode'], 'track')
+
+    def test_track_mode_turns_back_toward_polyline_when_offset(self):
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig(track_lookahead_m=1.0, min_inner_wheel_speed=0.0))
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.001},
+        ], mode='track')
+        controller.start()
+        try:
+            # Fahrzeug steht nördlich der Ost-West-Linie und fährt nach Osten:
+            # Lookahead-Punkt liegt rechts/vorne-unten, also positiver Turn
+            # in der bestehenden Joystick-X-Konvention.
+            controller.on_pose_update({'latitude': 52.000003, 'longitude': 10.0001, 'heading_deg': 90.0})
+            x, _, _ = motor.commands[-1]
+        finally:
+            controller.shutdown()
+
+        self.assertGreater(x, 0.0)
+
+    def test_track_mode_completes_after_end_projection(self):
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig(track_lookahead_m=1.0))
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.0001},
+        ], mode='track')
+        controller.start()
+        try:
+            controller.on_pose_update({'latitude': 52.0, 'longitude': 10.00012, 'heading_deg': 90.0})
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertEqual(status['state'], 'completed')
+        self.assertFalse(status['running'])
+
+    def test_nav_set_waypoints_accepts_track_mode(self):
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+
+        result = controller.on_navigation_command({
+            'cmd': 'nav_set_waypoints',
+            'mode': 'track',
+            'lookahead_m': 1.2,
+            'waypoints': [
+                {'latitude': 52.0, 'longitude': 10.0},
+                {'latitude': 52.0, 'longitude': 10.001},
+            ],
+        })
+
+        self.assertTrue(result['ok'])
+        status = controller.get_status()
+        self.assertEqual(status['mode'], 'track')
+        self.assertAlmostEqual(status['limits']['track_lookahead_m'], 1.2)
 
 
 if __name__ == '__main__':

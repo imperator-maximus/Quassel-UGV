@@ -244,7 +244,11 @@ class WebServer:
             if raw_waypoints is None:
                 return jsonify({'error': 'POST erwartet {"waypoints": [...]}' }), 400
             try:
-                waypoints = self.navigation.set_waypoints(raw_waypoints)
+                waypoints = self.navigation.set_waypoints(
+                    raw_waypoints,
+                    mode=data.get('mode', 'goto') if isinstance(data, dict) else 'goto',
+                    lookahead_m=data.get('lookahead_m') if isinstance(data, dict) else None,
+                )
             except ValueError as e:
                 return jsonify({'error': str(e)}), 400
             return jsonify({'success': True, 'waypoints': waypoints, **self.navigation.get_status()})
@@ -372,6 +376,26 @@ class WebServer:
                 return jsonify({'error': 'Mapping deaktiviert'}), 503
             try:
                 result = self.mapping.analyze_map_with_subs(map_name)
+            except ValueError as exc:
+                result = {'success': False, 'error': str(exc)}
+            return jsonify(result), 200 if result.get('success') else 400
+
+        @self.app.route('/api/mapping/maps/<map_name>/plan', methods=['GET', 'OPTIONS'])
+        def api_mapping_map_plan(map_name):
+            """Erzeugt eine erste Bahn-Vorschau, ohne Fahrbefehle zu senden."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            try:
+                result = self.mapping.plan_contour_lanes(
+                    map_name,
+                    cut_width_m=request.args.get('cut_width_m', 0.45),
+                    overlap_m=request.args.get('overlap_m', 0.10),
+                    outer_margin_m=request.args.get('outer_margin_m', 0.0),
+                    sub_margin_m=request.args.get('sub_margin_m', 0.25),
+                    max_ring_turn_deg=request.args.get('max_ring_turn_deg', 155.0),
+                )
             except ValueError as exc:
                 result = {'success': False, 'error': str(exc)}
             return jsonify(result), 200 if result.get('success') else 400

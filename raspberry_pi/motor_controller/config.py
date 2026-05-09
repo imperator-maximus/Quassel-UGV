@@ -89,6 +89,7 @@ class NavigationConfig:
     acceptance_radius_m: float = 0.25
     slowdown_radius_m: float = 0.5
     turn_kp: float = 0.02
+    track_lookahead_m: float = 0.8
     # Innen-Rad-Garantie gegen reine Pivots: untere Schranke der Vorwärts-
     # Geschwindigkeit des inneren (kurveninneren) Skid-Rads, ausgedrückt
     # als Bruchteil von ``max_joystick``. 0.0 = legacy (Pivot erlaubt),
@@ -245,6 +246,7 @@ class Config:
                 'acceptance_radius_m': self.navigation.acceptance_radius_m,
                 'slowdown_radius_m': self.navigation.slowdown_radius_m,
                 'turn_kp': self.navigation.turn_kp,
+                'track_lookahead_m': self.navigation.track_lookahead_m,
                 'min_inner_wheel_speed': self.navigation.min_inner_wheel_speed
             },
             'mapping': {

@@ -847,6 +847,42 @@
             line-height: 1.4;
         }
 
+        .planner-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .planner-field {
+            display: grid;
+            gap: 4px;
+            color: #d4af37;
+            font-size: 0.86em;
+            font-weight: bold;
+        }
+
+        .planner-field input {
+            width: 100%;
+            padding: 8px 10px;
+            border-radius: 8px;
+            border: 1px solid rgba(212, 175, 55, 0.45);
+            background: rgba(0, 0, 0, 0.25);
+            color: #f5f5dc;
+            font-family: Consolas, monospace;
+        }
+
+        .planner-progress {
+            display: grid;
+            gap: 6px;
+            color: #d4af37;
+            font-size: 0.9em;
+            font-weight: bold;
+        }
+
+        .planner-progress input {
+            width: 100%;
+        }
+
         .point-item.active {
             background: rgba(212, 175, 55, 0.22);
             color: #ffd700;
@@ -995,6 +1031,34 @@
                             <div class="area-row"><span>Netto</span><strong>-- m²</strong></div>
                             <div class="sub-list" id="subMapList">Keine Hauptkarte geladen</div>
                         </div>
+                        <div class="area-summary">
+                            <div class="planner-grid">
+                                <label class="planner-field">Schnittbreite m
+                                    <input id="plannerCutWidth" type="number" min="0.1" max="2.0" step="0.05" value="0.45">
+                                </label>
+                                <label class="planner-field">Überlappung m
+                                    <input id="plannerOverlap" type="number" min="0" max="1.0" step="0.05" value="0.10">
+                                </label>
+                                <label class="planner-field">Außenpuffer m
+                                    <input id="plannerOuterMargin" type="number" min="0" max="2.0" step="0.05" value="0.00">
+                                </label>
+                                <label class="planner-field">Sub-Puffer m
+                                    <input id="plannerSubMargin" type="number" min="0" max="2.0" step="0.05" value="0.25">
+                                </label>
+                                <label class="planner-field">Ring-Knick max °
+                                    <input id="plannerMaxRingTurn" type="number" min="45" max="179" step="5" value="155">
+                                </label>
+                            </div>
+                            <div class="map-row">
+                                <button class="mapping-btn primary" onclick="generateLanePreview()">Bahnen anzeigen</button>
+                                <button class="mapping-btn" onclick="clearLanePreview()">Bahnen ausblenden</button>
+                            </div>
+                            <label class="planner-progress">Abfahrposition: <span id="laneProgressValue">0,0%</span>
+                                <input id="laneProgressSlider" type="range" min="0" max="100" step="0.1" value="0" oninput="updateLaneProgress(Number(this.value))">
+                                <span class="sub-list" id="laneProgressDetail">0 m / 0 m</span>
+                            </label>
+                            <div class="sub-list" id="plannerStatus">Noch keine Bahnen berechnet</div>
+                        </div>
                         <div class="point-list" id="pointList"></div>
                     </div>
                     <div class="map-canvas-panel">
@@ -1102,6 +1166,12 @@
         let boundaryLine = null;
         let boundaryMarkers = [];
         let subMapLayers = [];
+        let lanePreviewLayers = [];
+        let lanePreviewLaneLayers = [];
+        let lanePreviewRestLayers = [];
+        let lanePreviewConnectorLayers = [];
+        let lanePreviewPlan = null;
+        let laneProgressMarker = null;
         let selectedPointIndex = null;
         let manualPointDragIndex = null;
 
@@ -1665,6 +1735,7 @@
             boundaryMarkers = [];
             subMapLayers.forEach(layer => layer.remove());
             subMapLayers = [];
+            clearLanePreview();
             if (boundaryLine) boundaryLine.remove();
             boundaryLine = null;
             renderPointList();
@@ -1674,6 +1745,320 @@
 
         function setMapEditorStatus(message) {
             document.getElementById('mapEditorStatus').textContent = message;
+        }
+
+        function plannerNumber(id) {
+            return Number(document.getElementById(id).value || 0);
+        }
+
+        function generateLanePreview() {
+            if (!activeMapName) {
+                setPlannerStatus('Keine Hauptkarte geladen');
+                return;
+            }
+            const params = new URLSearchParams({
+                cut_width_m: plannerNumber('plannerCutWidth'),
+                overlap_m: plannerNumber('plannerOverlap'),
+                outer_margin_m: plannerNumber('plannerOuterMargin'),
+                sub_margin_m: plannerNumber('plannerSubMargin'),
+                max_ring_turn_deg: plannerNumber('plannerMaxRingTurn')
+            });
+            setPlannerStatus('Bahnen werden berechnet...');
+            fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan?${params}`)
+                .then(response => response.json().then(data => ({ok: response.ok, data})))
+                .then(result => {
+                    if (!result.ok || result.data.success === false) {
+                        clearLanePreview(false);
+                        setPlannerStatus(result.data.error || 'Bahnenplanung fehlgeschlagen');
+                        return;
+                    }
+                    renderLanePreview(result.data);
+                })
+                .catch(error => {
+                    clearLanePreview(false);
+                    setPlannerStatus(error.message);
+                });
+        }
+
+        function renderLanePreview(plan) {
+            clearLanePreview(false);
+            lanePreviewPlan = plan;
+            const lanes = plan.lanes || [];
+            lanes.forEach(lane => {
+                const latLngs = (lane.coordinates || []).map(coord => [coord[1], coord[0]]);
+                if (latLngs.length < 2) return;
+                const layer = L.polyline(latLngs, {
+                    color: '#ffe66d',
+                    weight: 2,
+                    opacity: 0.95,
+                }).addTo(mapEditor);
+                layer.bindTooltip(`${lane.lane_index + 1}: ${lane.length_m} m`);
+                lanePreviewLayers.push(layer);
+                lanePreviewLaneLayers[lane.lane_index || 0] = layer;
+            });
+            (plan.rest_lanes || []).forEach(restLane => {
+                const latLngs = (restLane.coordinates || []).map(coord => [coord[1], coord[0]]);
+                if (latLngs.length < 2) return;
+                const reverse = restLane.direction === 'reverse';
+                const layer = L.polyline(latLngs, {
+                    color: reverse ? '#7fdcff' : '#9fffe0',
+                    weight: 3,
+                    opacity: 0.95,
+                    dashArray: reverse ? '8 6' : null,
+                }).addTo(mapEditor);
+                layer.bindTooltip(`Restbahn ${restLane.rest_index + 1} · ${reverse ? 'rückwärts' : 'vorwärts'} · ${restLane.length_m} m`);
+                lanePreviewLayers.push(layer);
+                lanePreviewRestLayers[restLane.rest_index || 0] = layer;
+            });
+            (plan.sequence || []).filter(segment => segment.type === 'connector').forEach(connector => {
+                const latLngs = (connector.coordinates || []).map(coord => [coord[1], coord[0]]);
+                if (latLngs.length < 2) return;
+                const layer = L.polyline(latLngs, {
+                    color: '#e8f7ff',
+                    weight: 4,
+                    opacity: 0.95,
+                    dashArray: '10 7'
+                }).addTo(mapEditor);
+                layer.bindTooltip(`Übergang ${connector.from_lane_index + 1} → ${connector.to_lane_index + 1}: ${connector.length_m} m`);
+                lanePreviewLayers.push(layer);
+                lanePreviewConnectorLayers[connector.segment_index || 0] = layer;
+            });
+            (plan.transitions || []).forEach(transition => {
+                const latLngs = (transition.coordinates || []).map(coord => [coord[1], coord[0]]);
+                if (latLngs.length < 2 || transition.length_m < 0.05) return;
+                const safe = transition.safe === true;
+                const reason = safe ? 'ok' : (transition.reason === 'sub_zone' ? 'Sub-Zone' : 'außerhalb Mähfläche');
+                if (safe) {
+                    const routed = transition.route_kind === 'around_sub';
+                    const layer = L.polyline(latLngs, {
+                        color: routed ? '#ffffff' : '#ffffff',
+                        weight: routed ? 4 : 3,
+                        opacity: routed ? 0.9 : 0.65,
+                        dashArray: routed ? '12 5' : '6 8',
+                    }).addTo(mapEditor);
+                    const label = routed ? 'geroutet um Sub' : 'ok';
+                    layer.bindTooltip(`Übergang ${transition.transition_index + 1} · ${label} · ${transition.length_m} m`);
+                    lanePreviewLayers.push(layer);
+                    return;
+                }
+                latLngs.forEach((latLng, endpointIndex) => {
+                    const marker = L.circleMarker(latLng, {
+                        radius: 6,
+                        color: '#ff2f7d',
+                        weight: 3,
+                        fillColor: endpointIndex === 0 ? '#ff2f7d' : '#ffffff',
+                        fillOpacity: 0.9,
+                    }).addTo(mapEditor);
+                    marker.bindTooltip(`Unsicherer Sequenzsprung ${transition.transition_index + 1} · ${reason} · ${transition.length_m} m`);
+                    lanePreviewLayers.push(marker);
+                });
+            });
+            (plan.exclusion_contours || []).forEach(contour => {
+                const latLngs = (contour.coordinates || []).map(coord => [coord[1], coord[0]]);
+                if (latLngs.length < 2) return;
+                const layer = L.polyline(latLngs, {
+                    color: '#ff8a4a',
+                    weight: 3,
+                    opacity: 0.95,
+                    dashArray: '4 6'
+                }).addTo(mapEditor);
+                layer.bindTooltip(`Sub-Pufferkontur: ${contour.length_m} m`);
+                lanePreviewLayers.push(layer);
+            });
+            updateLaneProgress(0);
+            const unsafe = plan.unsafe_transition_count || 0;
+            const transitionText = unsafe > 0
+                ? `${unsafe} unsichere Übergänge`
+                : `${plan.transition_count || 0} geprüfte Übergänge ok`;
+            setPlannerStatus(`${plan.lane_count} Ringe · ${plan.rest_lane_count || 0} Restbahnen · ${transitionText} · ${formatArea(plan.mow_length_m || 0)} m Ringfahrt · ${formatArea(plan.rest_length_m || 0)} m Restfläche`);
+        }
+
+        function clearLanePreview(resetStatus = true) {
+            lanePreviewLayers.forEach(layer => layer.remove());
+            lanePreviewLayers = [];
+            lanePreviewLaneLayers = [];
+            lanePreviewRestLayers = [];
+            lanePreviewConnectorLayers = [];
+            lanePreviewPlan = null;
+            if (laneProgressMarker) {
+                laneProgressMarker.remove();
+                laneProgressMarker = null;
+            }
+            const slider = document.getElementById('laneProgressSlider');
+            if (slider) slider.value = 0;
+            const value = document.getElementById('laneProgressValue');
+            if (value) value.textContent = '0,0%';
+            const detail = document.getElementById('laneProgressDetail');
+            if (detail) detail.textContent = '0 m / 0 m';
+            if (resetStatus) {
+                setPlannerStatus('Noch keine Bahnen berechnet');
+            }
+        }
+
+        function updateLaneProgress(percent) {
+            const value = Math.max(0, Math.min(100, Number(percent || 0)));
+            document.getElementById('laneProgressValue').textContent = `${value.toFixed(1).replace('.', ',')}%`;
+            const slider = document.getElementById('laneProgressSlider');
+            if (slider && Number(slider.value) !== value) slider.value = value;
+            if (!lanePreviewPlan || !mapEditor) return;
+            const position = pointAtPlanProgress(lanePreviewPlan, value / 100);
+            if (!position) return;
+            highlightSequenceSegment(position);
+            if (!laneProgressMarker) {
+                laneProgressMarker = L.circleMarker([position.lat, position.lng], {
+                    radius: 9,
+                    color: '#000',
+                    weight: 2,
+                    fillColor: '#ff00ff',
+                    fillOpacity: 1.0,
+                }).addTo(mapEditor);
+            } else {
+                laneProgressMarker.setLatLng([position.lat, position.lng]);
+            }
+            const travelled = formatArea(position.travelledM || 0);
+            const total = formatArea(position.totalM || 0);
+            const laneTravelled = formatArea(position.laneTravelledM || 0);
+            const laneLength = formatArea(position.laneLengthM || 0);
+            const detail = document.getElementById('laneProgressDetail');
+            if (detail) {
+                if (position.segmentType === 'connector') {
+                    detail.textContent = `${travelled} m / ${total} m · Übergang ${position.fromLaneIndex + 1} → ${position.toLaneIndex + 1}: ${laneTravelled} m / ${laneLength} m`;
+                } else if (position.segmentType === 'rest_lane') {
+                    detail.textContent = `${travelled} m / ${total} m · Restbahn ${position.restIndex + 1} ${position.direction === 'reverse' ? 'rückwärts' : 'vorwärts'}: ${laneTravelled} m / ${laneLength} m`;
+                } else {
+                    detail.textContent = `${travelled} m / ${total} m · Ring ${position.laneIndex + 1}: ${laneTravelled} m / ${laneLength} m`;
+                }
+            }
+            let tooltipPrefix = `Ring ${position.laneIndex + 1}`;
+            if (position.segmentType === 'connector') {
+                tooltipPrefix = `Übergang ${position.fromLaneIndex + 1} → ${position.toLaneIndex + 1}`;
+            } else if (position.segmentType === 'rest_lane') {
+                tooltipPrefix = `Restbahn ${position.restIndex + 1} · ${position.direction === 'reverse' ? 'rückwärts' : 'vorwärts'}`;
+            }
+            laneProgressMarker.bindTooltip(`${tooltipPrefix} · ${value.toFixed(1).replace('.', ',')}%`, {permanent: false});
+        }
+
+        function pointAtPlanProgress(plan, fraction) {
+            const sequence = ((plan.sequence && plan.sequence.length) ? plan.sequence : (plan.lanes || []))
+                .filter(segment => (segment.coordinates || []).length >= 2);
+            if (!sequence.length) return null;
+            const total = sequence.reduce((sum, segment) => sum + Number(segment.length_m || 0), 0);
+            if (total <= 0) {
+                const first = sequence[0].coordinates[0];
+                return {lat: first[1], lng: first[0], laneIndex: 0, segmentType: sequence[0].type || 'contour', segmentIndex: sequence[0].segment_index || 0, travelledM: 0, totalM: 0, laneTravelledM: 0, laneLengthM: 0};
+            }
+            const target = total * Math.max(0, Math.min(1, fraction));
+            let remaining = target;
+            for (const segment of sequence) {
+                const segmentLength = Number(segment.length_m || 0);
+                if (remaining <= segmentLength || segment === sequence[sequence.length - 1]) {
+                    return pointAtLineDistance(segment.coordinates, remaining, segment, target, total, segmentLength);
+                }
+                remaining -= segmentLength;
+            }
+            const lastSegment = sequence[sequence.length - 1];
+            const lastPoint = lastSegment.coordinates[lastSegment.coordinates.length - 1];
+            return {
+                lat: lastPoint[1],
+                lng: lastPoint[0],
+                laneIndex: lastSegment.lane_index || sequence.length - 1,
+                fromLaneIndex: lastSegment.from_lane_index || 0,
+                toLaneIndex: lastSegment.to_lane_index || 0,
+                segmentType: lastSegment.type || 'contour',
+                segmentIndex: lastSegment.segment_index || sequence.length - 1,
+                travelledM: total,
+                totalM: total,
+                laneTravelledM: Number(lastSegment.length_m || 0),
+                laneLengthM: Number(lastSegment.length_m || 0)
+            };
+        }
+
+        function pointAtLineDistance(coords, distanceM, segment, travelledM = distanceM, totalM = 0, laneLengthM = 0) {
+            if (!coords.length) return null;
+            const segmentInfo = {
+                laneIndex: segment.lane_index || 0,
+                restIndex: segment.rest_index || 0,
+                direction: segment.direction || 'forward',
+                fromLaneIndex: segment.from_lane_index || 0,
+                toLaneIndex: segment.to_lane_index || 0,
+                segmentType: segment.type || 'contour',
+                segmentIndex: segment.segment_index || 0,
+            };
+            if (distanceM <= 0 || coords.length === 1) {
+                return {lat: coords[0][1], lng: coords[0][0], ...segmentInfo, travelledM, totalM, laneTravelledM: 0, laneLengthM};
+            }
+            let remaining = distanceM;
+            for (let i = 0; i < coords.length - 1; i += 1) {
+                const a = coords[i];
+                const b = coords[i + 1];
+                const segment = distanceLatLngM(a, b);
+                if (remaining <= segment) {
+                    const t = segment <= 0 ? 0 : remaining / segment;
+                    return {
+                        lat: a[1] + (b[1] - a[1]) * t,
+                        lng: a[0] + (b[0] - a[0]) * t,
+                        ...segmentInfo,
+                        travelledM,
+                        totalM,
+                        laneTravelledM: distanceM,
+                        laneLengthM
+                    };
+                }
+                remaining -= segment;
+            }
+            const last = coords[coords.length - 1];
+            return {lat: last[1], lng: last[0], ...segmentInfo, travelledM, totalM, laneTravelledM: distanceM, laneLengthM};
+        }
+
+        function highlightSequenceSegment(position) {
+            lanePreviewLaneLayers.forEach((layer, index) => {
+                if (!layer) return;
+                const active = position.segmentType !== 'connector' && index === position.laneIndex;
+                layer.setStyle({
+                    color: active ? '#fff3a3' : '#ffe66d',
+                    weight: active ? 5 : 2,
+                    opacity: active ? 1.0 : 0.82
+                });
+                if (active) layer.bringToFront();
+            });
+            lanePreviewConnectorLayers.forEach((layer, index) => {
+                if (!layer) return;
+                const active = position.segmentType === 'connector' && index === position.segmentIndex;
+                layer.setStyle({
+                    color: active ? '#ffffff' : '#e8f7ff',
+                    weight: active ? 6 : 4,
+                    opacity: active ? 1.0 : 0.75,
+                    dashArray: '10 7'
+                });
+                if (active) layer.bringToFront();
+            });
+            lanePreviewRestLayers.forEach((layer, index) => {
+                if (!layer) return;
+                const active = position.segmentType === 'rest_lane' && index === position.restIndex;
+                const reverse = layer.options.dashArray;
+                layer.setStyle({
+                    color: active ? '#ffffff' : (reverse ? '#7fdcff' : '#9fffe0'),
+                    weight: active ? 6 : 3,
+                    opacity: active ? 1.0 : 0.85,
+                    dashArray: reverse ? '8 6' : null,
+                });
+                if (active) layer.bringToFront();
+            });
+            if (laneProgressMarker) laneProgressMarker.bringToFront();
+        }
+
+        function distanceLatLngM(a, b) {
+            const lat1 = a[1] * Math.PI / 180;
+            const lat2 = b[1] * Math.PI / 180;
+            const dLat = lat2 - lat1;
+            const dLon = (b[0] - a[0]) * Math.PI / 180;
+            const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+            return 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+        }
+
+        function setPlannerStatus(message) {
+            const el = document.getElementById('plannerStatus');
+            if (el) el.textContent = message;
         }
 
         function loadMapAnalysis(name) {

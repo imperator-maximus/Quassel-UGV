@@ -45,6 +45,8 @@ class NavigationController:
         self._stop_event = threading.Event()
         self._watchdog_thread: Optional[threading.Thread] = None
         self._waypoints: List[Waypoint] = []
+        self._mode = 'goto'
+        self._track_lookahead_m = float(getattr(config, 'track_lookahead_m', 0.8))
         self._active_index = 0
         self._running = False
         self._state = 'idle'
@@ -73,6 +75,7 @@ class NavigationController:
         with self._lock:
             payload = {
                 'state': self._state,
+                'mode': self._mode,
                 'running': self._running,
                 'active_index': self._active_index,
                 'total': len(self._waypoints),
@@ -83,13 +86,32 @@ class NavigationController:
         except Exception as exc:
             self.logger.warning('State-Callback Fehler: %s', exc)
 
-    def set_waypoints(self, raw_waypoints: Iterable[Dict[str, float]]) -> List[Dict[str, float]]:
+    def set_waypoints(
+        self,
+        raw_waypoints: Iterable[Dict[str, float]],
+        mode: str = 'goto',
+        lookahead_m: Optional[float] = None,
+    ) -> List[Dict[str, float]]:
         waypoints = [self._parse_waypoint(item) for item in raw_waypoints]
         if not waypoints:
             raise ValueError('Mindestens ein Wegpunkt ist erforderlich')
+        mode = self._parse_mode(mode)
+        if mode == 'track' and len(waypoints) < 2:
+            raise ValueError('Track-Modus benötigt mindestens zwei Wegpunkte')
+        if lookahead_m is None:
+            lookahead = float(getattr(self.config, 'track_lookahead_m', self._track_lookahead_m))
+        else:
+            try:
+                lookahead = float(lookahead_m)
+            except (TypeError, ValueError):
+                raise ValueError('lookahead_m muss eine Zahl sein')
+        if lookahead <= 0.0:
+            raise ValueError('lookahead_m muss > 0 sein')
 
         with self._lock:
             self._waypoints = waypoints
+            self._mode = mode
+            self._track_lookahead_m = lookahead
             self._active_index = 0
             self._running = False
             self._state = 'ready'
@@ -106,6 +128,7 @@ class NavigationController:
         self.stop(reason='cleared')
         with self._lock:
             self._waypoints = []
+            self._mode = 'goto'
             self._active_index = 0
             self._state = 'idle'
             self._last_error = None
@@ -130,7 +153,7 @@ class NavigationController:
 
         if started:
             self._ensure_watchdog()
-            self.logger.info('🧭 Navigation gestartet (%d Wegpunkte)', len(self._waypoints))
+            self.logger.info('🧭 Navigation gestartet (%s, %d Wegpunkte)', self._mode, len(self._waypoints))
         self._emit_state()
         return started
 
@@ -166,7 +189,11 @@ class NavigationController:
         cmd = payload.get('cmd')
         try:
             if cmd == 'nav_set_waypoints':
-                waypoints = self.set_waypoints(payload.get('waypoints') or [])
+                waypoints = self.set_waypoints(
+                    payload.get('waypoints') or [],
+                    mode=payload.get('mode', 'goto'),
+                    lookahead_m=payload.get('lookahead_m'),
+                )
                 return {'ok': True, 'waypoints': waypoints}
             if cmd == 'nav_clear':
                 self.clear_waypoints()
@@ -187,6 +214,7 @@ class NavigationController:
             return {
                 'running': self._running,
                 'state': self._state,
+                'mode': self._mode,
                 'waypoints': [wp.as_dict() for wp in self._waypoints],
                 'active_index': self._active_index,
                 'active_waypoint': active,
@@ -199,6 +227,7 @@ class NavigationController:
                     'watchdog_timeout_s': self.config.watchdog_timeout_s,
                     'geofence_radius_m': self.config.geofence_radius_m,
                     'max_joystick': self.config.max_joystick,
+                    'track_lookahead_m': self._track_lookahead_m,
                 },
             }
 
@@ -247,11 +276,16 @@ class NavigationController:
             if not self._running or not self._waypoints:
                 return
             first = self._waypoints[0]
+            mode = self._mode
             target = self._waypoints[self._active_index]
 
         if self.distance_m(first, current) > float(self.config.geofence_radius_m):
             self.stop(reason='geofence')
             self._set_error('Geofence überschritten')
+            return
+
+        if mode == 'track':
+            self._handle_track_pose(current, heading, now)
             return
 
         distance = self.distance_m(current, target)
@@ -322,6 +356,126 @@ class NavigationController:
             self.logger.info('✅ Navigation abgeschlossen')
         self._emit_state()
         return completed
+
+    def _handle_track_pose(self, current: Waypoint, heading: float, now: float) -> None:
+        with self._lock:
+            waypoints = list(self._waypoints)
+            lookahead = self._track_lookahead_m
+
+        target, progress_m, remaining_m, segment_index, raw_t, cross_track_m = self._pure_pursuit_target(
+            current,
+            waypoints,
+            lookahead,
+        )
+
+        distance_to_end = self.distance_m(current, waypoints[-1])
+        if distance_to_end <= float(self.config.acceptance_radius_m) or (segment_index >= len(waypoints) - 2 and raw_t >= 1.0):
+            self._complete_track()
+            return
+
+        bearing = self.bearing_deg(current, target)
+        error = self.heading_error_deg(bearing, heading)
+        x, y = self._calculate_command(error, max(remaining_m, lookahead))
+        self._send_command(x, y)
+
+        with self._lock:
+            self._active_index = min(segment_index, max(0, len(self._waypoints) - 1))
+
+        if now - self._last_debug_log >= 1.0:
+            self._last_debug_log = now
+            self.logger.info(
+                '🧭 track: seg=%d prog=%.2fm rem=%.2fm xtrack=%.2fm target=(%.7f,%.7f) hdg=%.1f° err=%.1f° → x=%.3f y=%.3f',
+                segment_index, progress_m, remaining_m, cross_track_m,
+                target.latitude, target.longitude, heading, error, x, y,
+            )
+
+    def _complete_track(self) -> None:
+        with self._lock:
+            self._running = False
+            self._state = 'completed'
+            self._active_index = max(0, len(self._waypoints) - 1)
+            self._last_command = {'x': 0.0, 'y': 0.0}
+        self._neutral_with_ramping()
+        self.logger.info('✅ Track-Navigation abgeschlossen')
+        self._emit_state()
+
+    @classmethod
+    def _pure_pursuit_target(
+        cls,
+        current: Waypoint,
+        waypoints: List[Waypoint],
+        lookahead_m: float,
+    ) -> Tuple[Waypoint, float, float, int, float, float]:
+        origin = waypoints[0]
+        path_xy = [cls._to_local_xy(wp, origin) for wp in waypoints]
+        current_xy = cls._to_local_xy(current, origin)
+        lengths = [0.0]
+        total = 0.0
+        for index in range(len(path_xy) - 1):
+            total += cls._distance_xy(path_xy[index], path_xy[index + 1])
+            lengths.append(total)
+
+        best = None
+        for index in range(len(path_xy) - 1):
+            a = path_xy[index]
+            b = path_xy[index + 1]
+            ab = (b[0] - a[0], b[1] - a[1])
+            seg_len_sq = ab[0] * ab[0] + ab[1] * ab[1]
+            if seg_len_sq <= 1e-9:
+                continue
+            ap = (current_xy[0] - a[0], current_xy[1] - a[1])
+            raw_t = (ap[0] * ab[0] + ap[1] * ab[1]) / seg_len_sq
+            t = cls._clamp(raw_t, 0.0, 1.0)
+            proj = (a[0] + ab[0] * t, a[1] + ab[1] * t)
+            dist = cls._distance_xy(current_xy, proj)
+            progress = lengths[index] + math.sqrt(seg_len_sq) * t
+            candidate = (dist, progress, index, raw_t)
+            if best is None or candidate[0] < best[0]:
+                best = candidate
+
+        if best is None:
+            return waypoints[-1], 0.0, 0.0, 0, 0.0, 0.0
+
+        cross_track, progress, segment_index, raw_t = best
+        target_progress = min(total, progress + lookahead_m)
+        target_xy = cls._point_at_progress(path_xy, lengths, target_progress)
+        target = cls._from_local_xy(target_xy, origin)
+        return target, progress, max(0.0, total - progress), segment_index, raw_t, cross_track
+
+    @classmethod
+    def _point_at_progress(cls, path_xy: List[Tuple[float, float]], lengths: List[float], progress: float) -> Tuple[float, float]:
+        if progress <= 0.0:
+            return path_xy[0]
+        if progress >= lengths[-1]:
+            return path_xy[-1]
+        for index in range(len(path_xy) - 1):
+            start = lengths[index]
+            end = lengths[index + 1]
+            if progress <= end:
+                span = end - start
+                t = 0.0 if span <= 1e-9 else (progress - start) / span
+                a = path_xy[index]
+                b = path_xy[index + 1]
+                return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+        return path_xy[-1]
+
+    @staticmethod
+    def _to_local_xy(point: Waypoint, origin: Waypoint) -> Tuple[float, float]:
+        lat0 = math.radians(origin.latitude)
+        x = math.radians(point.longitude - origin.longitude) * 6371000.0 * math.cos(lat0)
+        y = math.radians(point.latitude - origin.latitude) * 6371000.0
+        return x, y
+
+    @staticmethod
+    def _from_local_xy(point: Tuple[float, float], origin: Waypoint) -> Waypoint:
+        lat0 = math.radians(origin.latitude)
+        lat = origin.latitude + math.degrees(point[1] / 6371000.0)
+        lon = origin.longitude + math.degrees(point[0] / (6371000.0 * math.cos(lat0)))
+        return Waypoint(lat, lon)
+
+    @staticmethod
+    def _distance_xy(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+        return math.hypot(b[0] - a[0], b[1] - a[1])
 
     def _calculate_command(self, heading_error: float, distance: float) -> Tuple[float, float]:
         limit = min(0.30, max(0.0, float(self.config.max_joystick)))
@@ -407,6 +561,13 @@ class NavigationController:
         if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
             raise ValueError('Wegpunkt-Koordinaten außerhalb gültiger Grenzen')
         return Waypoint(lat_f, lon_f)
+
+    @staticmethod
+    def _parse_mode(mode: str) -> str:
+        parsed = str(mode or 'goto').strip().lower()
+        if parsed not in ('goto', 'track'):
+            raise ValueError('Navigationsmodus muss goto oder track sein')
+        return parsed
 
     @staticmethod
     def _parse_pose(pose: Dict[str, Any]) -> Tuple[float, float, float]:

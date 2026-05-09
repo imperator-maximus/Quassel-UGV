@@ -279,6 +279,13 @@
             gap: 8px;
         }
 
+        .nav-mode-controls {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin: 10px 0;
+        }
+
         .waypoint-actions button, .waypoint-remove {
             background: linear-gradient(135deg, #d4af37 0%, #ffd700 100%);
             color: #000;
@@ -287,6 +294,22 @@
             padding: 8px;
             font-weight: bold;
             cursor: pointer;
+        }
+
+        .nav-mode-controls button {
+            background: rgba(0, 0, 0, 0.25);
+            color: #d4af37;
+            border: 1px solid rgba(212, 175, 55, 0.35);
+            border-radius: 5px;
+            padding: 8px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .nav-mode-controls button.active {
+            background: linear-gradient(135deg, #2d5016 0%, #4a7c59 100%);
+            color: #ffd700;
+            border-color: rgba(255, 215, 0, 0.85);
         }
 
         .waypoint-remove { padding: 3px 7px; }
@@ -538,6 +561,10 @@
                         <div class="coordinate-label">📍 Wegpunkte</div>
                         <div class="vehicle-map-note">Klick in die Karte fügt einen Wegpunkt hinzu.</div>
                         <ol id="waypoint-list" class="waypoint-list"></ol>
+                        <div class="nav-mode-controls">
+                            <button type="button" id="nav-mode-goto" class="active" onclick="setNavigationMode('goto')">Goto</button>
+                            <button type="button" id="nav-mode-track" onclick="setNavigationMode('track')">Track</button>
+                        </div>
                         <div class="waypoint-actions">
                             <button type="button" onclick="saveWaypoints()">Speichern</button>
                             <button type="button" onclick="clearWaypoints()">Leeren</button>
@@ -1002,6 +1029,7 @@
         let mapCenterDone = false;
         let mapWaypointLayer = null;
         let navigationWaypoints = [];
+        let navigationMode = 'goto';
 
         function initVehicleMap() {
             if (mapInstance) return;
@@ -1072,6 +1100,15 @@
             renderWaypoints();
         }
 
+        function setNavigationMode(mode) {
+            navigationMode = mode === 'track' ? 'track' : 'goto';
+            const gotoBtn = document.getElementById('nav-mode-goto');
+            const trackBtn = document.getElementById('nav-mode-track');
+            if (gotoBtn) gotoBtn.classList.toggle('active', navigationMode === 'goto');
+            if (trackBtn) trackBtn.classList.toggle('active', navigationMode === 'track');
+            renderWaypoints();
+        }
+
         function removeWaypoint(index) {
             navigationWaypoints.splice(index, 1);
             renderWaypoints();
@@ -1106,10 +1143,15 @@
                     L.marker(ll).bindTooltip(`WP ${index + 1}`).addTo(mapWaypointLayer);
                 });
                 if (latLngs.length > 1) {
-                    L.polyline(latLngs, { color: '#ff6b6b', weight: 3, dashArray: '8 6' }).addTo(mapWaypointLayer);
+                    L.polyline(latLngs, {
+                        color: navigationMode === 'track' ? '#4dd0e1' : '#ff6b6b',
+                        weight: 3,
+                        dashArray: navigationMode === 'track' ? null : '8 6'
+                    }).addTo(mapWaypointLayer);
                 }
             }
-            setWaypointStatus(navigationWaypoints.length ? `${navigationWaypoints.length} Wegpunkte lokal.` : 'Noch keine Wegpunkte.');
+            const modeLabel = navigationMode === 'track' ? 'Track/Pure Pursuit' : 'Goto';
+            setWaypointStatus(navigationWaypoints.length ? `${navigationWaypoints.length} Wegpunkte lokal (${modeLabel}).` : 'Noch keine Wegpunkte.');
         }
 
         function setWaypointStatus(message) {
@@ -1131,7 +1173,7 @@
             switch (state) {
                 case 'running':
                     return total > 0
-                        ? `🧭 Navigation läuft – Wegpunkt ${Math.min(idx + 1, total)}/${total}`
+                        ? `🧭 Navigation läuft (${status.mode || 'goto'}) – Wegpunkt ${Math.min(idx + 1, total)}/${total}`
                         : '🧭 Navigation läuft';
                 case 'completed':
                     return '✅ Navigation abgeschlossen';
@@ -1187,8 +1229,8 @@
             }
             navigationRequest('/api/navigation/waypoints', {
                 method: 'POST',
-                body: JSON.stringify({ waypoints: navigationWaypoints }),
-            }).then(() => setWaypointStatus('Wegpunkte über CAN gesendet.'))
+                body: JSON.stringify({ waypoints: navigationWaypoints, mode: navigationMode }),
+            }).then(() => setWaypointStatus(`Wegpunkte über CAN gesendet (${navigationMode}).`))
               .catch(error => setWaypointStatus(`Speichern fehlgeschlagen: ${error.message}`));
         }
 
@@ -1447,4 +1489,3 @@
     </script>
 </body>
 </html>
-
