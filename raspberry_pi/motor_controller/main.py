@@ -192,6 +192,8 @@ class MotorControllerApp:
         # CAN Handler -> Navigation-Befehle vom Sensor-Hub
         if self.navigation:
             self.can.set_navigation_command_callback(self.navigation.on_navigation_command)
+            # Navigation -> Sensor-Hub: State-Updates für UI-Feedback
+            self.navigation.set_state_callback(self._on_navigation_state)
 
     def _on_sensor_data(self, data: dict):
         """Verteilt eingehende Sensor-Hub-Telemetrie auf Logging und Navigation."""
@@ -199,6 +201,15 @@ class MotorControllerApp:
             self.logger.info(f"📡 Sensor-Daten: {data}")
         if self.navigation:
             self.navigation.on_pose_update(data)
+
+    def _on_navigation_state(self, payload: dict):
+        """Sendet Navigation-State über CAN an den Sensor-Hub (UI-Feedback)."""
+        if not self.can:
+            return
+        try:
+            self.can.send_command('nav_status', payload)
+        except Exception as exc:
+            self.logger.debug(f"nav_status Send fehlgeschlagen: {exc}")
     
     def start(self):
         """Startet alle Komponenten"""

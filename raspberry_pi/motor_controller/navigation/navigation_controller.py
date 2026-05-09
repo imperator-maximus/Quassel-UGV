@@ -33,6 +33,14 @@ class NavigationController:
         self.config = config
         self.safety = safety_monitor
 
+        # Skid-Steer-PWM-Verhältnis turn_factor/forward_factor: aus dem
+        # MotorControl-PWM-Config lesen (Fallback 0.6 = 300/500), wird in
+        # _calculate_command für die Innen-Rad-Garantie gebraucht.
+        pwm_cfg = getattr(motor_control, 'pwm_config', None)
+        ff = float(getattr(pwm_cfg, 'forward_factor', 500.0) or 500.0)
+        tf = float(getattr(pwm_cfg, 'turn_factor', 300.0))
+        self._turn_to_forward_ratio = tf / ff if ff > 0 else 0.6
+
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._watchdog_thread: Optional[threading.Thread] = None
@@ -51,6 +59,30 @@ class NavigationController:
         self._waypoint_min_distance: Optional[float] = None
         self._waypoint_overshoot_count = 0
 
+        # State-Feedback an Sensor-Hub/UI: feuert bei jedem Übergang.
+        self._state_callback: Optional[Any] = None
+
+    def set_state_callback(self, callback) -> None:
+        """Registriert Callback für State-Änderungen (idle/ready/running/completed/stopped/error)."""
+        self._state_callback = callback
+
+    def _emit_state(self) -> None:
+        cb = self._state_callback
+        if cb is None:
+            return
+        with self._lock:
+            payload = {
+                'state': self._state,
+                'running': self._running,
+                'active_index': self._active_index,
+                'total': len(self._waypoints),
+                'last_error': self._last_error,
+            }
+        try:
+            cb(payload)
+        except Exception as exc:
+            self.logger.warning('State-Callback Fehler: %s', exc)
+
     def set_waypoints(self, raw_waypoints: Iterable[Dict[str, float]]) -> List[Dict[str, float]]:
         waypoints = [self._parse_waypoint(item) for item in raw_waypoints]
         if not waypoints:
@@ -67,6 +99,7 @@ class NavigationController:
             self._waypoint_overshoot_count = 0
 
         self._neutral_with_ramping()
+        self._emit_state()
         return [wp.as_dict() for wp in waypoints]
 
     def clear_waypoints(self) -> None:
@@ -78,23 +111,28 @@ class NavigationController:
             self._last_error = None
             self._waypoint_min_distance = None
             self._waypoint_overshoot_count = 0
+        self._emit_state()
 
     def start(self) -> bool:
         with self._lock:
             if not self._waypoints:
                 self._last_error = 'Keine Wegpunkte gesetzt'
-                return False
-            self._running = True
-            self._state = 'running'
-            self._active_index = min(self._active_index, len(self._waypoints) - 1)
-            self._last_pose_time = time.time()
-            self._last_error = None
-            self._waypoint_min_distance = None
-            self._waypoint_overshoot_count = 0
+                started = False
+            else:
+                self._running = True
+                self._state = 'running'
+                self._active_index = min(self._active_index, len(self._waypoints) - 1)
+                self._last_pose_time = time.time()
+                self._last_error = None
+                self._waypoint_min_distance = None
+                self._waypoint_overshoot_count = 0
+                started = True
 
-        self._ensure_watchdog()
-        self.logger.info('🧭 Navigation gestartet (%d Wegpunkte)', len(self._waypoints))
-        return True
+        if started:
+            self._ensure_watchdog()
+            self.logger.info('🧭 Navigation gestartet (%d Wegpunkte)', len(self._waypoints))
+        self._emit_state()
+        return started
 
     def stop(self, reason: str = 'stopped') -> None:
         with self._lock:
@@ -107,6 +145,7 @@ class NavigationController:
         self._neutral_with_ramping()
         if was_running:
             self.logger.info('🛑 Navigation gestoppt: %s', reason)
+            self._emit_state()
 
     def shutdown(self) -> None:
         self.stop(reason='shutdown')
@@ -224,13 +263,15 @@ class NavigationController:
             distance = self.distance_m(current, target)
 
         # Overshoot-Detection: wenn das Fahrzeug schon nahe am Wegpunkt war
-        # (innerhalb 2x Acceptance bzw. min. 0.5 m) und die Distanz danach
-        # mehrere Samples in Folge wieder wächst, wurde der Wegpunkt physisch
-        # passiert. Das löst den Endlos-Pivot-Modus auf, der entsteht, wenn
-        # der reale Mindestabstand wegen GPS-Rauschen / Drivetrain-Trägheit
-        # knapp über dem Acceptance-Radius liegt.
+        # (innerhalb 3x Acceptance bzw. min. 1.5 m — deckt auch tangentiale
+        # Streiftreffer mit dem Roll-Bogen-Wenderadius ab) und die Distanz
+        # danach mehrere Samples in Folge wieder wächst, wurde der Wegpunkt
+        # physisch passiert. Das löst den Endlos-Pivot/Orbit-Modus auf, der
+        # entsteht, wenn der reale Mindestabstand wegen GPS-Rauschen,
+        # Drivetrain-Trägheit oder breitem Wenderadius knapp über dem
+        # Acceptance-Radius liegt.
         acceptance = float(self.config.acceptance_radius_m)
-        engagement_radius = max(2.0 * acceptance, 0.5)
+        engagement_radius = max(3.0 * acceptance, 1.5)
         jitter_tolerance = 0.03  # 3 cm gegen RTK-Rauschen
         if self._waypoint_min_distance is None or distance < self._waypoint_min_distance:
             self._waypoint_min_distance = distance
@@ -279,14 +320,44 @@ class NavigationController:
         if completed:
             self._neutral_with_ramping()
             self.logger.info('✅ Navigation abgeschlossen')
+        self._emit_state()
         return completed
 
     def _calculate_command(self, heading_error: float, distance: float) -> Tuple[float, float]:
         limit = min(0.30, max(0.0, float(self.config.max_joystick)))
-        turn = self._clamp(heading_error * float(self.config.turn_kp), -limit, limit)
-        heading_factor = max(0.0, 1.0 - abs(heading_error) / 90.0)
         distance_factor = self._clamp(distance / float(self.config.slowdown_radius_m), 0.0, 1.0)
+
+        # Heading-proportionaler Turn, in der Slowdown-Zone proportional
+        # heruntergeskaliert (sonst würde die Innen-Rad-Garantie unten den
+        # Vorwärts-Anteil am WP wieder hochziehen und das Fahrzeug rasen lassen).
+        turn = self._clamp(heading_error * float(self.config.turn_kp), -limit, limit) * distance_factor
+        heading_factor = max(0.0, 1.0 - abs(heading_error) / 90.0)
         forward = limit * heading_factor * distance_factor
+
+        # Innen-Rad-Garantie (anti-Pivot): das kurveninnere Skid-Rad darf
+        # nicht rückwärts laufen (Scrubbing). PWM-Mix:
+        #   inner = neutral + (y - |x| · turn_factor/forward_factor) · forward_factor
+        # Der No-Reverse-Schutz (forward ≥ |turn|·ratio) gilt IMMER. Der
+        # zusätzliche Roll-Floor (min_inner·limit·distance_factor), der das
+        # Innen-Rad aktiv aus der ESC-Totzone holt, wird mit heading_factor
+        # skaliert: bei großem Heading-Fehler (>90°) wird der Floor auf 0
+        # zurückgenommen, sodass der Wenderadius schrumpft (Innen-Rad ruht
+        # in Totzone, kein Scrubbing weil torque klein bleibt) und das
+        # Fahrzeug Wegpunkte mit großen Bearing-Sprüngen einkreisen kann.
+        # Im Sättigungsfall wird turn proportional zurückgenommen, damit
+        # forward das Limit nicht sprengt.
+        min_inner = self._clamp(float(getattr(self.config, 'min_inner_wheel_speed', 0.0)), 0.0, 1.0)
+        if min_inner > 0.0:
+            ratio = self._turn_to_forward_ratio
+            inner_floor = min_inner * limit * distance_factor * heading_factor
+            required_forward = inner_floor + abs(turn) * ratio
+            if required_forward <= limit:
+                forward = max(forward, required_forward)
+            else:
+                forward = limit
+                if ratio > 0.0:
+                    max_turn = max(0.0, (limit - inner_floor) / ratio)
+                    turn = self._clamp(turn, -max_turn, max_turn)
         return turn, self._clamp(forward, 0.0, limit)
 
     def _send_command(self, x: float, y: float) -> None:
@@ -320,6 +391,7 @@ class NavigationController:
         with self._lock:
             self._last_error = message
         self.logger.warning(message)
+        self._emit_state()
 
     @staticmethod
     def _parse_waypoint(item: Dict[str, float]) -> Waypoint:

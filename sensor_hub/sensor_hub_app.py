@@ -72,6 +72,8 @@ class SensorHubApp:
         self.last_nav_waypoints = []
         self.last_nav_command = None
         self.last_nav_command_time = None
+        self.last_nav_status = None
+        self.last_nav_status_time = None
         self.app = Flask(__name__, template_folder='templates')
         self.vehicle_geometry = None
         self.vehicle_footprint_local = []
@@ -567,6 +569,22 @@ class SensorHubApp:
             logger.warning("🔄 Restart-Befehl empfangen")
             threading.Thread(target=self._restart_service_async, daemon=True).start()
 
+        elif cmd == 'nav_status':
+            self.last_nav_status = {
+                'state': data.get('state'),
+                'running': bool(data.get('running')),
+                'active_index': data.get('active_index'),
+                'total': data.get('total'),
+                'last_error': data.get('last_error'),
+            }
+            self.last_nav_status_time = round(time.time(), 3)
+            logger.info(
+                "🧭 Nav-Status empfangen: %s (idx=%s/%s)",
+                self.last_nav_status['state'],
+                self.last_nav_status['active_index'],
+                self.last_nav_status['total'],
+            )
+
         else:
             logger.debug(f"📡 Unbekannter CAN-Befehl: {cmd}")
 
@@ -757,6 +775,14 @@ class SensorHubApp:
                 return ('', 204)
             ok = self._send_navigation_command({'cmd': 'nav_stop'})
             return jsonify({'success': ok}), (200 if ok else 503)
+
+        @self.app.route('/api/navigation/status', methods=['GET'])
+        def api_navigation_status():
+            """Letzter über CAN gemeldeter Navigations-State des Motor-Controllers."""
+            return jsonify({
+                'status': self.last_nav_status,
+                'status_time': self.last_nav_status_time,
+            })
 
     def _send_navigation_command(self, payload):
         """Sendet einen Navigations-Befehl als JSON-Frame über CAN an den Motor-Controller."""

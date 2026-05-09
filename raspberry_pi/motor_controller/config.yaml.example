@@ -61,9 +61,12 @@ navigation:
   watchdog_timeout_s: 1.0      # Stop wenn keine CAN-Pose >1s
   geofence_radius_m: 50.0      # Um ersten Wegpunkt
   max_joystick: 0.30           # Max. 30% Joystick-Skala
-  acceptance_radius_m: 0.10    # Wegpunkt erreicht (cm-Präzision mit RTK FIXED)
+  acceptance_radius_m: 0.25    # Wegpunkt erreicht (Skid-Steer-Limit + RTK-Rauschen)
   slowdown_radius_m: 0.5       # Vor Ziel abbremsen, Throttle skaliert linear bis 0
   turn_kp: 0.02                # Joystick-X pro Grad Heading-Fehler
+  min_inner_wheel_speed: 0.50  # Innen-Rad-Garantie: kurveninneres Rad rollt mind.
+                               # mit 50% von max_joystick vorwärts (≈75 μs über Neutral,
+                               # sicher außerhalb der ESC-Totzone). Anti-Pivot, schont Rasen.
 
 # Web-Interface-Konfiguration
 web:

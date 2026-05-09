@@ -392,7 +392,7 @@ navigation pipeline. Do not delete them.
 |-----------|--------|
 | `sensor_hub/tests/test_vehicle_geometry.py` | Lever-arm correction (`correct_to_vehicle_center`): rotates the antenna offset by the current heading and translates the GPS fix to the vehicle center. A sign error here desyncs the map marker, the CAN telemetry pose, and the navigation distance calculation. |
 | `sensor_hub/tests/test_telemetry_payload.py` | Heading source priority in the CAN/HTTP payload: dual-GNSS heading wins over the IMU fallback, `heading_source` field reports `dual_gnss` / `imu_fallback`, and the raw GPS heading stays available under `gps.heading` for diagnostics. |
-| `raspberry_pi/motor_controller/tests/test_navigation_controller.py` | `NavigationController` end-to-end: bearing/heading-error wrapping, 30%-joystick limit, CAN telemetry pose ingestion, geofence stop, watchdog stop, `nav_*` command dispatch, **acceptance-radius arrival**, and the **overshoot detector** (waypoint counts as reached when the minimum distance was within `2 × acceptance_radius_m` and grows again for ≥2 consecutive samples). The overshoot test is the regression guard against the endless-pivot bug that occurs when GPS noise + drivetrain inertia keep the vehicle just outside the acceptance circle. |
+| `raspberry_pi/motor_controller/tests/test_navigation_controller.py` | `NavigationController` end-to-end: bearing/heading-error wrapping, 30%-joystick limit, CAN telemetry pose ingestion, geofence stop, watchdog stop, `nav_*` command dispatch, **acceptance-radius arrival**, the **overshoot detector** (waypoint counts as reached when the minimum distance was within `engagement_radius = max(3 × acceptance_radius_m, 1.5 m)` and grows again for ≥2 consecutive samples — including a tangential grazing-pass case), and the **inner-wheel-speed guarantee** (anti-pivot floor scaled by `heading_factor = max(0, 1 − |err|/90°)`: at moderate errors the inner wheel rolls forward out of the ESC dead-zone; at ≥90° the floor collapses to 0 so the robot can pivot tightly without scrubbing; the `forward ≥ |turn|·ratio` no-reverse guard always holds). The overshoot test is the regression guard against the endless-pivot bug that occurs when GPS noise + drivetrain inertia keep the vehicle just outside the acceptance circle. |
 
 **Running the suite (from repo root):**
 
@@ -486,6 +486,47 @@ CAN_BITRATE = 1000000            # 1 Mbps for motor control
 UPDATE_RATE = 50                 # Hz (20ms updates)
 WEBSOCKET_TIMEOUT = 30           # Seconds
 ```
+
+### Navigation Tuning (`raspberry_pi/motor_controller/config.yaml`)
+
+```yaml
+navigation:
+  max_joystick: 0.30           # Hard cap on joystick magnitude (30 % scale)
+  acceptance_radius_m: 0.25    # Waypoint reached when distance ≤ this value
+  slowdown_radius_m: 0.5       # Linear throttle ramp-down toward 0 inside this radius
+  turn_kp: 0.02                # Joystick-X per degree of heading error
+  min_inner_wheel_speed: 0.50  # Anti-pivot inner-wheel guarantee (fraction of max_joystick)
+```
+
+**`acceptance_radius_m` (0.25 m)** — primary arrival criterion. Tightened from the
+RTK-theoretical 10 cm to 25 cm to account for skid-steer drift + drivetrain inertia.
+Combined with the overshoot detector (see below) the robot reliably terminates the
+final waypoint instead of orbiting it.
+
+**Overshoot detector (implicit)** — derived in code as
+`engagement_radius = max(3 × acceptance_radius_m, 1.5 m)`. Once the vehicle has
+been within this radius and the distance to the target grows again for ≥2
+consecutive samples (with a 3 cm jitter tolerance against RTK noise), the
+waypoint is counted as reached even if the acceptance circle was never entered.
+This is the regression-guarded fix for the endless-pivot bug.
+
+**`min_inner_wheel_speed` (0.50)** — anti-pivot guarantee. The inner (turn-side)
+wheel must roll forward with at least `min_inner_wheel_speed × max_joystick`,
+which puts the inner ESC ~75 µs above neutral, safely outside the dead-zone.
+The robot then drives an arc instead of pivoting in place, which prevents
+ground tearing on grass. The floor is scaled by
+`heading_factor = max(0, 1 − |heading_error| / 90°)`: at small/moderate errors
+the floor is fully active (smooth arc); at ≥90° error the floor collapses to 0
+so the robot can pivot tightly without scrubbing while the always-on
+`forward ≥ |turn| · ratio` guard still prevents the inner wheel from running
+in reverse. Set to `0.0` to restore legacy pivot behaviour.
+
+**CAN navigation feedback (`nav_status`)** — the motor controller emits a
+`nav_status` CAN command on every state change (`idle`, `running`, `completed`,
+`stopped`, `error`) with `{state, running, active_index, total, last_error}`.
+The sensor hub stores the last payload and exposes it as
+`GET /api/navigation/status`; the Web-UI polls it every 2 s and translates the
+state into a localized status line (e.g. *✅ Navigation abgeschlossen*).
 
 ### Service Configuration (`sensor-hub.service`)
 ```ini

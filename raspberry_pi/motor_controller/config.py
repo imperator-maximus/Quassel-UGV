@@ -89,6 +89,15 @@ class NavigationConfig:
     acceptance_radius_m: float = 0.25
     slowdown_radius_m: float = 0.5
     turn_kp: float = 0.02
+    # Innen-Rad-Garantie gegen reine Pivots: untere Schranke der Vorwärts-
+    # Geschwindigkeit des inneren (kurveninneren) Skid-Rads, ausgedrückt
+    # als Bruchteil von ``max_joystick``. 0.0 = legacy (Pivot erlaubt),
+    # 0.50 = inneres Rad rollt mit mind. 50% des max. Joystick-Levels →
+    # PWM-Offset typisch 75 μs über Neutral, sicher außerhalb der ESC-
+    # Totzone (~±50 μs). Fahrzeug fährt einen mittleren Bogen statt zu
+    # pivotieren, schont Rasen. Skaliert in der Slowdown-Zone proportional
+    # mit ``distance_factor``.
+    min_inner_wheel_speed: float = 0.50
 
 
 @dataclass
@@ -224,7 +233,8 @@ class Config:
                 'max_joystick': self.navigation.max_joystick,
                 'acceptance_radius_m': self.navigation.acceptance_radius_m,
                 'slowdown_radius_m': self.navigation.slowdown_radius_m,
-                'turn_kp': self.navigation.turn_kp
+                'turn_kp': self.navigation.turn_kp,
+                'min_inner_wheel_speed': self.navigation.min_inner_wheel_speed
             },
             'web': {
                 'enabled': self.web.enabled,

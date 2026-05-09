@@ -1117,6 +1117,58 @@
             if (status) status.textContent = message;
         }
 
+        // Letzter vom Motor-Controller gemeldeter Nav-State; durch Live-Daten
+        // gewinnt die Anzeige gegenüber statischen Bestätigungstexten der
+        // Buttons (Start/Stop/Speichern setzen weiter sofort eine Meldung,
+        // werden aber spätestens beim nächsten Poll von echten Daten ersetzt).
+        let lastNavStatusTime = null;
+
+        function describeNavStatus(status) {
+            if (!status || !status.state) return null;
+            const state = status.state;
+            const idx = Number.isFinite(status.active_index) ? status.active_index : 0;
+            const total = Number.isFinite(status.total) ? status.total : 0;
+            switch (state) {
+                case 'running':
+                    return total > 0
+                        ? `🧭 Navigation läuft – Wegpunkt ${Math.min(idx + 1, total)}/${total}`
+                        : '🧭 Navigation läuft';
+                case 'completed':
+                    return '✅ Navigation abgeschlossen';
+                case 'stopped':
+                    return '🛑 Navigation gestoppt';
+                case 'cleared':
+                    return '🧹 Wegpunkte gelöscht';
+                case 'shutdown':
+                    return '🛑 Motor-Controller heruntergefahren';
+                case 'geofence':
+                    return '🛑 Geofence überschritten';
+                case 'watchdog':
+                    return '🛑 Pose-Watchdog ausgelöst';
+                case 'ready':
+                    return total > 0 ? `📍 ${total} Wegpunkte bereit` : '📍 Bereit';
+                case 'idle':
+                    return '⏸ Navigation idle';
+                default:
+                    return `Navigation: ${state}`;
+            }
+        }
+
+        function updateNavigationStatus() {
+            fetchJson(`${API_BASE}/navigation/status`)
+                .then(data => {
+                    if (!data || data.status_time == null) return;
+                    if (data.status_time === lastNavStatusTime) return;
+                    lastNavStatusTime = data.status_time;
+                    const text = describeNavStatus(data.status);
+                    if (text) {
+                        const err = data.status && data.status.last_error;
+                        setWaypointStatus(err ? `${text} – Fehler: ${err}` : text);
+                    }
+                })
+                .catch(() => { /* Netzwerk-/Polling-Fehler bewusst ignorieren */ });
+        }
+
         function navigationRequest(path, options = {}) {
             return fetch(path, {
                 ...options,
@@ -1387,9 +1439,11 @@
 
         // Initial update
         updateStatus();
+        updateNavigationStatus();
 
         // Periodisches Update
         setInterval(updateStatus, UPDATE_INTERVAL);
+        setInterval(updateNavigationStatus, UPDATE_INTERVAL);
     </script>
 </body>
 </html>
