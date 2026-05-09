@@ -6,6 +6,7 @@ REST API + WebSocket für UGV-Steuerung
 
 import logging
 import threading
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -84,10 +85,12 @@ class WebServer:
     def _init_flask(self):
         """Initialisiert Flask-App mit Socket.IO"""
         try:
+            template_folder = self._resolve_web_path(self.config.template_folder)
+            static_folder = self._resolve_web_path(self.config.static_folder)
             self.app = Flask(
                 __name__,
-                template_folder=self.config.template_folder,
-                static_folder=self.config.static_folder
+                template_folder=str(template_folder),
+                static_folder=str(static_folder)
             )
             self.app.config['SECRET_KEY'] = self.config.secret_key
 
@@ -121,6 +124,13 @@ class WebServer:
             self.logger.error(f"❌ Flask-Initialisierung fehlgeschlagen: {e}")
             self.flask_available = False
             self.socketio_available = False
+
+    @staticmethod
+    def _resolve_web_path(path: str) -> Path:
+        folder = Path(path).expanduser()
+        if folder.is_absolute():
+            return folder
+        return Path.cwd() / folder
     
     def _setup_routes(self):
         """Definiert Flask-Routen"""
