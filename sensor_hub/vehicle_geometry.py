@@ -1,8 +1,12 @@
 """Lädt und verarbeitet statische Fahrzeuggeometrie für UI/Diagnose."""
 
 import json
+import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+
+METERS_PER_DEG_LAT = 111320.0
 
 
 def _normalize_heading_deg(value: float) -> float:
@@ -195,3 +199,74 @@ def build_visual_markers_local(geometry: Dict[str, Any]) -> Dict[str, Dict[str, 
             'point_local_m': resolve_visual_marker_local(geometry, item),
         }
     return markers
+
+
+def gps_primary_offset_m(geometry: Dict[str, Any]) -> Optional[Tuple[float, float]]:
+    """Liefert den Hebelarm der GPS-Primärantenne im Fahrzeug-Frame in Metern.
+
+    Rückgabe ``(x_forward, y_right)`` relativ zum Fahrzeugzentrum. ``None``
+    wenn die Geometrie unvollständig ist.
+    """
+    if not geometry:
+        return None
+    primary = (geometry.get('sensors') or {}).get('gps_primary')
+    if not primary:
+        return None
+    try:
+        local = resolve_visual_marker_local(geometry, primary)
+    except (TypeError, ValueError):
+        return None
+    x = local.get('x')
+    y = local.get('y')
+    if x is None or y is None:
+        return None
+    return float(x), float(y)
+
+
+def correct_to_vehicle_center(
+    antenna_latitude: float,
+    antenna_longitude: float,
+    heading_deg: Optional[float],
+    geometry: Optional[Dict[str, Any]],
+) -> Tuple[float, float]:
+    """Wandelt die Position der GPS-Primärantenne in den Fahrzeugmittelpunkt um.
+
+    Wendet den dokumentierten Hebelarm der Primärantenne auf die gemeldete
+    GPS-Position an und gibt die korrigierte Lat/Lon zurück. Ohne gültiges
+    Heading oder vollständige Geometrie wird die Eingabe unverändert
+    zurückgegeben.
+
+    Konvention (vehicle_geometry.json reference_frame):
+        - Fahrzeug-x = vorwärts, Fahrzeug-y = rechts
+        - Heading in Kompassgrad (0° = Nord, im Uhrzeigersinn).
+    """
+    if heading_deg is None or geometry is None:
+        return antenna_latitude, antenna_longitude
+
+    offset = gps_primary_offset_m(geometry)
+    if offset is None:
+        return antenna_latitude, antenna_longitude
+
+    ant_x_v, ant_y_v = offset
+    if abs(ant_x_v) < 1e-9 and abs(ant_y_v) < 1e-9:
+        return antenna_latitude, antenna_longitude
+
+    try:
+        heading_rad = math.radians(float(heading_deg))
+        lat_f = float(antenna_latitude)
+        lon_f = float(antenna_longitude)
+    except (TypeError, ValueError):
+        return antenna_latitude, antenna_longitude
+
+    cos_h = math.cos(heading_rad)
+    sin_h = math.sin(heading_rad)
+    delta_north_m = ant_x_v * cos_h - ant_y_v * sin_h
+    delta_east_m = ant_x_v * sin_h + ant_y_v * cos_h
+
+    meters_per_deg_lon = METERS_PER_DEG_LAT * math.cos(math.radians(lat_f))
+    if meters_per_deg_lon < 1.0:
+        return antenna_latitude, antenna_longitude
+
+    center_lat = lat_f - delta_north_m / METERS_PER_DEG_LAT
+    center_lon = lon_f - delta_east_m / meters_per_deg_lon
+    return center_lat, center_lon

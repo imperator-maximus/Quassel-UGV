@@ -19,6 +19,7 @@ from .hardware.safety_monitor import SafetyMonitor
 from .communication.can_handler import CANHandler
 from .control.motor_control import MotorControl
 from .control.joystick_handler import JoystickHandler
+from .navigation.navigation_controller import NavigationController
 from .web.web_server import WebServer
 
 
@@ -45,6 +46,7 @@ class MotorControllerApp:
         self.can: CANHandler = None
         self.motor: MotorControl = None
         self.joystick: JoystickHandler = None
+        self.navigation: NavigationController = None
         self.web: WebServer = None
         
         # Shutdown-Flag
@@ -140,6 +142,15 @@ class MotorControllerApp:
             # Joystick-Handler
             self.logger.info("Initialisiere Joystick-Handler...")
             self.joystick = JoystickHandler(self.motor, self.safety)
+
+            # Navigation
+            if self.config.navigation.enabled:
+                self.logger.info("Initialisiere Navigation...")
+                self.navigation = NavigationController(
+                    self.motor,
+                    self.config.navigation,
+                    safety_monitor=self.safety
+                )
             
             # Web-Server
             if self.config.web.enabled:
@@ -149,7 +160,8 @@ class MotorControllerApp:
                     self.motor,
                     self.joystick,
                     self.can,
-                    self.gpio
+                    self.gpio,
+                    self.navigation
                 )
                 # Hardware-Referenzen setzen
                 self.web.set_hardware_refs(
@@ -173,15 +185,20 @@ class MotorControllerApp:
         """Verbindet Callbacks zwischen Komponenten"""
         # Safety Monitor -> Motor Control (Emergency Stop)
         self.safety.set_emergency_stop_callback(self.motor.emergency_stop)
-        
-        # CAN Handler -> Sensor Data Logging
-        if self.config.monitor:
-            self.can.set_sensor_data_callback(self._log_sensor_data)
-    
-    def _log_sensor_data(self, data: dict):
-        """Callback für Sensor-Daten-Logging"""
-        if not self.config.quiet:
+
+        # CAN Handler -> Sensor Data (Logging + Navigation-Pose)
+        self.can.set_sensor_data_callback(self._on_sensor_data)
+
+        # CAN Handler -> Navigation-Befehle vom Sensor-Hub
+        if self.navigation:
+            self.can.set_navigation_command_callback(self.navigation.on_navigation_command)
+
+    def _on_sensor_data(self, data: dict):
+        """Verteilt eingehende Sensor-Hub-Telemetrie auf Logging und Navigation."""
+        if self.config.monitor and not self.config.quiet:
             self.logger.info(f"📡 Sensor-Daten: {data}")
+        if self.navigation:
+            self.navigation.on_pose_update(data)
     
     def start(self):
         """Startet alle Komponenten"""
@@ -235,6 +252,11 @@ class MotorControllerApp:
             if self.web:
                 self.logger.info("Stoppe Web-Server...")
                 self.web.cleanup()
+
+            # Navigation stoppen
+            if self.navigation:
+                self.logger.info("Stoppe Navigation...")
+                self.navigation.shutdown()
             
             # Safety-Watchdog stoppen
             if self.safety:

@@ -22,7 +22,7 @@ from ntrip_client import NTRIPClient
 from gps_ntrip_bridge import GPSNTRIPBridge
 from can_protocol import CANProtocol
 from telemetry_payload import build_status_payload, build_telemetry_payload, serialize_can_payload
-from vehicle_geometry import build_local_footprint, build_visual_markers_local, load_vehicle_geometry, select_heading_for_visualization
+from vehicle_geometry import build_local_footprint, build_visual_markers_local, correct_to_vehicle_center, load_vehicle_geometry, select_heading_for_visualization
 from imu_heading_calibration import ImuHeadingOffsetEstimator
 
 # Logging konfigurieren
@@ -33,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Flask imports
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 import threading
 
 # CAN imports
@@ -69,6 +69,9 @@ class SensorHubApp:
         )
         self.can_sender_thread = None
         self.can_receiver_thread = None
+        self.last_nav_waypoints = []
+        self.last_nav_command = None
+        self.last_nav_command_time = None
         self.app = Flask(__name__, template_folder='templates')
         self.vehicle_geometry = None
         self.vehicle_footprint_local = []
@@ -306,7 +309,47 @@ class SensorHubApp:
             imu_data = self.imu.get_data()
             orientation = self._get_orientation()
 
-        return build_telemetry_payload(gps_status=gps_status, orientation=orientation, imu_data=imu_data)
+        heading_info = self._compute_heading_info(gps_status, orientation)
+        gps_status_for_payload = self._apply_lever_arm_correction(gps_status, heading_info)
+        return build_telemetry_payload(
+            gps_status=gps_status_for_payload,
+            orientation=orientation,
+            imu_data=imu_data,
+            heading_info=heading_info,
+        )
+
+    def _apply_lever_arm_correction(self, gps_status, heading_info):
+        """Erzeugt eine Kopie von ``gps_status`` mit lat/lon am Fahrzeugzentrum.
+
+        Wendet den Hebelarm der GPS-Primärantenne an, sofern Geometrie und ein
+        verlässliches Heading vorliegen. Lässt ``gps_status`` unverändert,
+        wenn keine Korrektur möglich ist.
+        """
+        if not gps_status:
+            return gps_status
+        heading_source = (heading_info or {}).get('heading_source')
+        if heading_source in (None, '', 'unknown'):
+            return gps_status
+        heading_deg = (heading_info or {}).get('heading_deg')
+        if heading_deg is None:
+            return gps_status
+        try:
+            ant_lat = float(gps_status.get('latitude'))
+            ant_lon = float(gps_status.get('longitude'))
+        except (TypeError, ValueError):
+            return gps_status
+        center_lat, center_lon = correct_to_vehicle_center(
+            antenna_latitude=ant_lat,
+            antenna_longitude=ant_lon,
+            heading_deg=heading_deg,
+            geometry=self.vehicle_geometry,
+        )
+        if center_lat == ant_lat and center_lon == ant_lon:
+            return gps_status
+        corrected = dict(gps_status)
+        corrected['latitude'] = center_lat
+        corrected['longitude'] = center_lon
+        return corrected
 
     def _get_orientation(self):
         """Liefert Orientierung direkt vom WitMotion-Treiber."""
@@ -325,13 +368,14 @@ class SensorHubApp:
 
         return None
 
-    def _get_vehicle_pose(self):
-        """Liefert aktuelle Pose für Visualisierung/Diagnose."""
-        gps_status = self.gps.get_status() if self.gps else None
-        orientation = self._get_orientation() if self.imu and self.imu.connected else None
-        latitude = gps_status.get('latitude') if gps_status else None
-        longitude = gps_status.get('longitude') if gps_status else None
+    def _compute_heading_info(self, gps_status, orientation):
+        """Berechnet die korrigierte Heading inkl. Offsets (zentral für Pose+CAN).
 
+        Aktualisiert bei verfügbarem dual-Antenna-GPS auch den
+        IMU-Live-Offset-Estimator und liefert das Ergebnis von
+        :func:`select_heading_for_visualization`. GPS-Heading hat Vorrang vor
+        IMU-Yaw.
+        """
         gnss_cfg = (self.vehicle_geometry or {}).get('gnss', {}) if self.vehicle_geometry else {}
         try:
             gps_heading_offset = float(gnss_cfg.get('heading_offset_deg', 0.0))
@@ -386,13 +430,23 @@ class SensorHubApp:
             imu_offset_deg = 0.0
             imu_offset_source = 'none'
 
-        heading_info = select_heading_for_visualization(
+        return select_heading_for_visualization(
             gps_status=gps_status,
             orientation=orientation,
             gps_heading_offset_deg=gps_heading_offset,
             imu_heading_offset_deg=imu_offset_deg,
             imu_offset_source=imu_offset_source,
         )
+
+    def _get_vehicle_pose(self):
+        """Liefert aktuelle Pose für Visualisierung/Diagnose."""
+        gps_status = self.gps.get_status() if self.gps else None
+        orientation = self._get_orientation() if self.imu and self.imu.connected else None
+
+        heading_info = self._compute_heading_info(gps_status, orientation)
+        corrected_gps = self._apply_lever_arm_correction(gps_status, heading_info)
+        latitude = corrected_gps.get('latitude') if corrected_gps else None
+        longitude = corrected_gps.get('longitude') if corrected_gps else None
 
         pose = {
             'latitude': latitude,
@@ -658,6 +712,88 @@ class SensorHubApp:
                 return jsonify({'error': 'IMU Bewegungsstatus nicht verfügbar'}), 503
 
             return jsonify(motion_status)
+
+        @self.app.route('/api/navigation/waypoints', methods=['GET', 'POST', 'DELETE', 'OPTIONS'])
+        def api_navigation_waypoints():
+            """Wegpunkte für die Motor-Controller-Navigation (Forward via CAN)."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+
+            if request.method == 'GET':
+                return jsonify({
+                    'waypoints': list(self.last_nav_waypoints),
+                    'last_command': self.last_nav_command,
+                    'last_command_time': self.last_nav_command_time,
+                })
+
+            if request.method == 'DELETE':
+                ok = self._send_navigation_command({'cmd': 'nav_clear'})
+                if ok:
+                    self.last_nav_waypoints = []
+                return jsonify({'success': ok, 'waypoints': []}), (200 if ok else 503)
+
+            data = request.get_json(silent=True) or {}
+            raw = data if isinstance(data, list) else data.get('waypoints')
+            try:
+                waypoints = self._validate_waypoints(raw)
+            except ValueError as exc:
+                return jsonify({'error': str(exc)}), 400
+
+            ok = self._send_navigation_command({'cmd': 'nav_set_waypoints', 'waypoints': waypoints})
+            if ok:
+                self.last_nav_waypoints = waypoints
+            return jsonify({'success': ok, 'waypoints': waypoints}), (200 if ok else 503)
+
+        @self.app.route('/api/navigation/start', methods=['POST', 'OPTIONS'])
+        def api_navigation_start():
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            ok = self._send_navigation_command({'cmd': 'nav_start'})
+            return jsonify({'success': ok}), (200 if ok else 503)
+
+        @self.app.route('/api/navigation/stop', methods=['POST', 'OPTIONS'])
+        def api_navigation_stop():
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            ok = self._send_navigation_command({'cmd': 'nav_stop'})
+            return jsonify({'success': ok}), (200 if ok else 503)
+
+    def _send_navigation_command(self, payload):
+        """Sendet einen Navigations-Befehl als JSON-Frame über CAN an den Motor-Controller."""
+        if not self.can_bus:
+            logger.warning("⚠️  Nav-Befehl ohne CAN-Bus verworfen: %s", payload.get('cmd'))
+            return False
+        try:
+            json_str = serialize_can_payload(payload)
+        except Exception as exc:
+            logger.error(f"❌ Nav-Payload konnte nicht serialisiert werden: {exc}")
+            return False
+        ok = self._send_can_json(json_str)
+        if ok:
+            self.last_nav_command = payload.get('cmd')
+            self.last_nav_command_time = round(time.time(), 3)
+            logger.info("📤 Nav-Befehl über CAN gesendet: %s", self.last_nav_command)
+        return ok
+
+    @staticmethod
+    def _validate_waypoints(raw):
+        if not isinstance(raw, list) or not raw:
+            raise ValueError('Mindestens ein Wegpunkt {latitude, longitude} erforderlich')
+        cleaned = []
+        for index, item in enumerate(raw):
+            if not isinstance(item, dict):
+                raise ValueError(f'Wegpunkt {index + 1} muss ein Objekt sein')
+            lat = item.get('latitude', item.get('lat'))
+            lon = item.get('longitude', item.get('lon', item.get('lng')))
+            try:
+                lat_f = float(lat)
+                lon_f = float(lon)
+            except (TypeError, ValueError):
+                raise ValueError(f'Wegpunkt {index + 1} benötigt latitude/longitude')
+            if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
+                raise ValueError(f'Wegpunkt {index + 1} außerhalb gültiger Grenzen')
+            cleaned.append({'latitude': round(lat_f, 7), 'longitude': round(lon_f, 7)})
+        return cleaned
 
     @staticmethod
     def _resolve_device_path(path_pattern: str) -> str:

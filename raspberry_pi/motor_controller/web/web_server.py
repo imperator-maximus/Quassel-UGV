@@ -27,7 +27,7 @@ class WebServer:
     - Light/Mower-Steuerung
     """
     
-    def __init__(self, config, motor_control, joystick_handler, can_handler, gpio_controller):
+    def __init__(self, config, motor_control, joystick_handler, can_handler, gpio_controller, navigation_controller=None):
         """
         Initialisiert Web-Server
         
@@ -44,6 +44,7 @@ class WebServer:
         self.joystick = joystick_handler
         self.can = can_handler
         self.gpio = gpio_controller
+        self.navigation = navigation_controller
         
         # Flask-App
         self.flask_available = FLASK_AVAILABLE
@@ -89,6 +90,13 @@ class WebServer:
             )
             self.app.config['SECRET_KEY'] = self.config.secret_key
 
+            @self.app.after_request
+            def add_cors_headers(response):
+                response.headers['Access-Control-Allow-Origin'] = '*'
+                response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+                response.headers['Access-Control-Allow-Methods'] = 'GET,POST,DELETE,OPTIONS'
+                return response
+
             # Socket.IO initialisieren
             if self.socketio_available:
                 self.socketio = SocketIO(
@@ -129,6 +137,7 @@ class WebServer:
                 'motor_status': self.motor.get_status(),
                 'joystick_status': self.joystick.get_status(),
                 'sensor_data': self.can.get_sensor_data(),
+                'navigation_status': self.navigation.get_status() if self.navigation else {'state': 'disabled'},
                 'light_state': self.light_state,
                 'mower_state': self.mower_state,
                 'mower_speed': self.pwm_controller.get_mower_speed() if self.pwm_controller else 0
@@ -215,6 +224,52 @@ class WebServer:
             success = self.can.restart_sensor_hub()
             return jsonify({'success': success})
 
+        @self.app.route('/api/navigation/waypoints', methods=['GET', 'POST', 'DELETE', 'OPTIONS'])
+        def api_navigation_waypoints():
+            """Setzt, liefert oder löscht Wegpunkte."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.navigation:
+                return jsonify({'error': 'Navigation deaktiviert'}), 503
+
+            if request.method == 'GET':
+                return jsonify(self.navigation.get_status())
+
+            if request.method == 'DELETE':
+                self.navigation.clear_waypoints()
+                return jsonify({'success': True, **self.navigation.get_status()})
+
+            data = request.get_json(silent=True) or {}
+            raw_waypoints = data if isinstance(data, list) else data.get('waypoints')
+            if raw_waypoints is None:
+                return jsonify({'error': 'POST erwartet {"waypoints": [...]}' }), 400
+            try:
+                waypoints = self.navigation.set_waypoints(raw_waypoints)
+            except ValueError as e:
+                return jsonify({'error': str(e)}), 400
+            return jsonify({'success': True, 'waypoints': waypoints, **self.navigation.get_status()})
+
+        @self.app.route('/api/navigation/start', methods=['POST', 'OPTIONS'])
+        def api_navigation_start():
+            """Startet die Wegpunktnavigation."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.navigation:
+                return jsonify({'error': 'Navigation deaktiviert'}), 503
+            if not self.navigation.start():
+                return jsonify({'success': False, **self.navigation.get_status()}), 400
+            return jsonify({'success': True, **self.navigation.get_status()})
+
+        @self.app.route('/api/navigation/stop', methods=['POST', 'OPTIONS'])
+        def api_navigation_stop():
+            """Stoppt die Wegpunktnavigation."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.navigation:
+                return jsonify({'error': 'Navigation deaktiviert'}), 503
+            self.navigation.stop()
+            return jsonify({'success': True, **self.navigation.get_status()})
+
     def _setup_socketio_events(self):
         """Definiert Socket.IO Event-Handler"""
         if not self.socketio:
@@ -272,6 +327,7 @@ class WebServer:
             'joystick_status': self.joystick.get_status(),
             'joystick_enabled': self.joystick.get_status().get('enabled', False),
             'sensor_data': self.can.get_sensor_data(),
+            'navigation_status': self.navigation.get_status() if self.navigation else {'state': 'disabled'},
             'light_state': self.light_state,
             'light_enabled': self.light_config.enabled if self.light_config else False,
             'mower_state': self.mower_state,

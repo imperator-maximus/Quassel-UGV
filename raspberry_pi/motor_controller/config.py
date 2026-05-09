@@ -76,6 +76,22 @@ class CANConfig:
 
 
 @dataclass
+class NavigationConfig:
+    """Autonome Wegpunktnavigation (S1-Bearing-Hold).
+
+    Pose-Daten kommen ausschließlich über den CAN-Telemetrie-Stream vom
+    Sensor-Hub. Kein HTTP-Polling, keine Sensor-Hub-URL erforderlich.
+    """
+    enabled: bool = True
+    watchdog_timeout_s: float = 1.0
+    geofence_radius_m: float = 50.0
+    max_joystick: float = 0.30
+    acceptance_radius_m: float = 0.25
+    slowdown_radius_m: float = 0.5
+    turn_kp: float = 0.02
+
+
+@dataclass
 class WebConfig:
     """Web-Interface-Konfiguration"""
     enabled: bool = False
@@ -106,6 +122,7 @@ class Config:
     light: LightConfig = field(default_factory=LightConfig)
     mower: MowerConfig = field(default_factory=MowerConfig)
     can: CANConfig = field(default_factory=CANConfig)
+    navigation: NavigationConfig = field(default_factory=NavigationConfig)
     web: WebConfig = field(default_factory=WebConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     
@@ -140,6 +157,8 @@ class Config:
             config.mower = MowerConfig(**data['mower'])
         if 'can' in data:
             config.can = CANConfig(**data['can'])
+        if 'navigation' in data:
+            config.navigation = NavigationConfig(**data['navigation'])
         if 'web' in data:
             config.web = WebConfig(**data['web'])
         if 'logging' in data:
@@ -197,6 +216,15 @@ class Config:
                 'sensor_hub_id': self.can.sensor_hub_id,
                 'max_frame_size': self.can.max_frame_size,
                 'frame_timeout': self.can.frame_timeout
+            },
+            'navigation': {
+                'enabled': self.navigation.enabled,
+                'watchdog_timeout_s': self.navigation.watchdog_timeout_s,
+                'geofence_radius_m': self.navigation.geofence_radius_m,
+                'max_joystick': self.navigation.max_joystick,
+                'acceptance_radius_m': self.navigation.acceptance_radius_m,
+                'slowdown_radius_m': self.navigation.slowdown_radius_m,
+                'turn_kp': self.navigation.turn_kp
             },
             'web': {
                 'enabled': self.web.enabled,

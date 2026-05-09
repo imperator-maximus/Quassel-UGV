@@ -4,7 +4,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from vehicle_geometry import build_local_footprint, build_visual_markers_local, load_vehicle_geometry, select_heading_for_visualization
+import math
+
+from vehicle_geometry import (
+    METERS_PER_DEG_LAT,
+    build_local_footprint,
+    build_visual_markers_local,
+    correct_to_vehicle_center,
+    gps_primary_offset_m,
+    load_vehicle_geometry,
+    select_heading_for_visualization,
+)
 
 
 class VehicleGeometryTests(unittest.TestCase):
@@ -134,6 +144,81 @@ class VehicleGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(selection['heading_deg'], 22.5)
         self.assertEqual(selection['heading_source'], 'witmotion_native_fallback')
         self.assertEqual(selection.get('imu_offset_source'), 'none')
+
+    def test_gps_primary_offset_uses_default_geometry(self):
+        offset = gps_primary_offset_m(load_vehicle_geometry())
+
+        self.assertIsNotNone(offset)
+        # length=1.15, rear_inset=0.10 → x = -(0.575 - 0.10) = -0.475
+        # width=0.79,  side_inset=0.14 → y = +(0.395 - 0.14) = +0.255 (rear_right)
+        self.assertAlmostEqual(offset[0], -0.475, places=3)
+        self.assertAlmostEqual(offset[1], +0.255, places=3)
+
+    def test_correct_to_vehicle_center_heading_north_moves_lever_to_north(self):
+        # Heading 0° (Nord): Antenne hinten-rechts → Zentrum liegt 0.475 m
+        # nördlich und 0.255 m westlich der Antenne.
+        geometry = load_vehicle_geometry()
+        center_lat, center_lon = correct_to_vehicle_center(
+            antenna_latitude=53.33231900,
+            antenna_longitude=11.07874300,
+            heading_deg=0.0,
+            geometry=geometry,
+        )
+
+        delta_lat_m = (center_lat - 53.33231900) * METERS_PER_DEG_LAT
+        delta_lon_m = (center_lon - 11.07874300) * (
+            METERS_PER_DEG_LAT * math.cos(math.radians(53.33231900))
+        )
+        self.assertAlmostEqual(delta_lat_m, +0.475, places=2)
+        self.assertAlmostEqual(delta_lon_m, -0.255, places=2)
+
+    def test_correct_to_vehicle_center_heading_east_swaps_axes(self):
+        # Heading 90° (Ost): Fahrzeug-vorwärts zeigt nach Osten, Fahrzeug-rechts
+        # zeigt nach Süden. Antenne hinten-rechts (-0.475, +0.255) → Zentrum
+        # liegt 0.255 m nördlich und 0.475 m östlich.
+        geometry = load_vehicle_geometry()
+        center_lat, center_lon = correct_to_vehicle_center(
+            antenna_latitude=53.0,
+            antenna_longitude=11.0,
+            heading_deg=90.0,
+            geometry=geometry,
+        )
+        delta_lat_m = (center_lat - 53.0) * METERS_PER_DEG_LAT
+        delta_lon_m = (center_lon - 11.0) * (METERS_PER_DEG_LAT * math.cos(math.radians(53.0)))
+        self.assertAlmostEqual(delta_lat_m, +0.255, places=2)
+        self.assertAlmostEqual(delta_lon_m, +0.475, places=2)
+
+    def test_correct_to_vehicle_center_returns_input_without_heading(self):
+        center = correct_to_vehicle_center(
+            antenna_latitude=53.0,
+            antenna_longitude=11.0,
+            heading_deg=None,
+            geometry=load_vehicle_geometry(),
+        )
+        self.assertEqual(center, (53.0, 11.0))
+
+    def test_correct_to_vehicle_center_returns_input_without_geometry(self):
+        center = correct_to_vehicle_center(
+            antenna_latitude=53.0,
+            antenna_longitude=11.0,
+            heading_deg=42.0,
+            geometry=None,
+        )
+        self.assertEqual(center, (53.0, 11.0))
+
+    def test_correct_to_vehicle_center_lever_arm_magnitude_is_invariant(self):
+        # Drehung darf die Distanz Antenne ↔ Fahrzeugzentrum nicht ändern.
+        geometry = load_vehicle_geometry()
+        ant_lat, ant_lon = 53.33, 11.08
+        magnitudes = []
+        for hdg in (0.0, 45.0, 137.0, 209.0, 307.0):
+            c_lat, c_lon = correct_to_vehicle_center(ant_lat, ant_lon, hdg, geometry)
+            d_lat_m = (c_lat - ant_lat) * METERS_PER_DEG_LAT
+            d_lon_m = (c_lon - ant_lon) * (METERS_PER_DEG_LAT * math.cos(math.radians(ant_lat)))
+            magnitudes.append(math.hypot(d_lat_m, d_lon_m))
+        expected = math.hypot(0.475, 0.255)  # ≈ 0.539 m
+        for m in magnitudes:
+            self.assertAlmostEqual(m, expected, places=2)
 
 
 if __name__ == '__main__':

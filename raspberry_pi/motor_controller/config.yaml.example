@@ -54,6 +54,17 @@ can:
   max_frame_size: 6           # Bytes Nutzdaten pro Frame
   frame_timeout: 1.0          # Sekunden
 
+# Navigation (S1 Bearing-Hold Wegpunkt-Controller)
+# Pose kommt ausschließlich über CAN-Telemetrie vom Sensor-Hub.
+navigation:
+  enabled: true
+  watchdog_timeout_s: 1.0      # Stop wenn keine CAN-Pose >1s
+  geofence_radius_m: 50.0      # Um ersten Wegpunkt
+  max_joystick: 0.30           # Max. 30% Joystick-Skala
+  acceptance_radius_m: 0.10    # Wegpunkt erreicht (cm-Präzision mit RTK FIXED)
+  slowdown_radius_m: 0.5       # Vor Ziel abbremsen, Throttle skaliert linear bis 0
+  turn_kp: 0.02                # Joystick-X pro Grad Heading-Fehler
+
 # Web-Interface-Konfiguration
 web:
   enabled: true

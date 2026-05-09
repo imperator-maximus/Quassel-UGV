@@ -234,12 +234,72 @@
             margin-bottom: 10px;
         }
 
+        .waypoint-map-layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 280px;
+            gap: 15px;
+        }
+
         #vehicle-map {
             height: 480px;
             width: 100%;
             border-radius: 8px;
             background: rgba(12, 24, 8, 0.9);
             border: 1px solid rgba(212, 175, 55, 0.25);
+        }
+
+        .waypoint-sidebar {
+            background: rgba(0, 0, 0, 0.30);
+            border: 1px solid rgba(212, 175, 55, 0.25);
+            border-radius: 8px;
+            padding: 12px;
+            min-height: 480px;
+        }
+
+        .waypoint-list {
+            list-style: none;
+            margin: 10px 0;
+            max-height: 260px;
+            overflow-y: auto;
+        }
+
+        .waypoint-list li {
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(212, 175, 55, 0.15);
+            font-family: 'Courier New', monospace;
+            font-size: 0.86em;
+        }
+
+        .waypoint-actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .waypoint-actions button, .waypoint-remove {
+            background: linear-gradient(135deg, #d4af37 0%, #ffd700 100%);
+            color: #000;
+            border: none;
+            border-radius: 5px;
+            padding: 8px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .waypoint-remove { padding: 3px 7px; }
+
+        .waypoint-status {
+            margin-top: 10px;
+            color: #d4af37;
+            font-size: 0.85em;
+        }
+
+        @media (max-width: 900px) {
+            .waypoint-map-layout { grid-template-columns: 1fr; }
+            .waypoint-sidebar { min-height: auto; }
         }
 
         .vehicle-map-note {
@@ -472,9 +532,23 @@
 
             <div class="vehicle-map-panel">
                 <div class="coordinate-label">🗺️ Karte (Heading-Verifikation)</div>
-                <div id="vehicle-map"></div>
+                <div class="waypoint-map-layout">
+                    <div id="vehicle-map"></div>
+                    <div class="waypoint-sidebar">
+                        <div class="coordinate-label">📍 Wegpunkte</div>
+                        <div class="vehicle-map-note">Klick in die Karte fügt einen Wegpunkt hinzu.</div>
+                        <ol id="waypoint-list" class="waypoint-list"></ol>
+                        <div class="waypoint-actions">
+                            <button type="button" onclick="saveWaypoints()">Speichern</button>
+                            <button type="button" onclick="clearWaypoints()">Leeren</button>
+                            <button type="button" onclick="startNavigation()">Start</button>
+                            <button type="button" onclick="stopNavigation()">Stop</button>
+                        </div>
+                        <div id="waypoint-status" class="waypoint-status">Noch keine Wegpunkte.</div>
+                    </div>
+                </div>
                 <div class="vehicle-map-note">
-                    Layer oben rechts: Satellit (Bing) ↔ Satellit (Esri) ↔ Straßenkarte (OSM). Fahrzeug-Outline und Antennen maßstabsgetreu.
+                    Layer oben rechts: Satellit (Bing) ↔ Satellit (Esri) ↔ Straßenkarte (OSM) ↔ Wegpunkte.
                 </div>
             </div>
 
@@ -926,6 +1000,8 @@
         let mapHeadingArrow = null;
         let mapAntennaMarkers = { gps_primary: null, gps_secondary: null };
         let mapCenterDone = false;
+        let mapWaypointLayer = null;
+        let navigationWaypoints = [];
 
         function initVehicleMap() {
             if (mapInstance) return;
@@ -977,15 +1053,103 @@
                 maxZoom: 23,
                 layers: [bingAerial],
             });
+            mapWaypointLayer = L.layerGroup().addTo(mapInstance);
             L.control.layers(
                 {
                     'Satellit (Bing)': bingAerial,
                     'Satellit (Esri)': esriSat,
                     'Straßenkarte (OSM)': osm,
                 },
-                null,
+                { 'Wegpunkte': mapWaypointLayer },
                 { position: 'topright', collapsed: false }
             ).addTo(mapInstance);
+            mapInstance.on('click', event => addWaypoint(event.latlng.lat, event.latlng.lng));
+            renderWaypoints();
+        }
+
+        function addWaypoint(lat, lng) {
+            navigationWaypoints.push({ latitude: lat, longitude: lng });
+            renderWaypoints();
+        }
+
+        function removeWaypoint(index) {
+            navigationWaypoints.splice(index, 1);
+            renderWaypoints();
+        }
+
+        function clearWaypoints() {
+            navigationWaypoints = [];
+            renderWaypoints();
+            navigationRequest('/api/navigation/waypoints', { method: 'DELETE' })
+                .catch(error => setWaypointStatus(`Lokal geleert, Pi nicht erreichbar: ${error.message}`));
+        }
+
+        function renderWaypoints() {
+            const list = document.getElementById('waypoint-list');
+            if (list) {
+                list.innerHTML = '';
+                navigationWaypoints.forEach((wp, index) => {
+                    const item = document.createElement('li');
+                    item.innerHTML = `<span>${index + 1}: ${wp.latitude.toFixed(6)}, ${wp.longitude.toFixed(6)}</span>`;
+                    const btn = document.createElement('button');
+                    btn.className = 'waypoint-remove';
+                    btn.textContent = '×';
+                    btn.onclick = () => removeWaypoint(index);
+                    item.appendChild(btn);
+                    list.appendChild(item);
+                });
+            }
+            if (mapWaypointLayer && typeof L !== 'undefined') {
+                mapWaypointLayer.clearLayers();
+                const latLngs = navigationWaypoints.map(wp => [wp.latitude, wp.longitude]);
+                latLngs.forEach((ll, index) => {
+                    L.marker(ll).bindTooltip(`WP ${index + 1}`).addTo(mapWaypointLayer);
+                });
+                if (latLngs.length > 1) {
+                    L.polyline(latLngs, { color: '#ff6b6b', weight: 3, dashArray: '8 6' }).addTo(mapWaypointLayer);
+                }
+            }
+            setWaypointStatus(navigationWaypoints.length ? `${navigationWaypoints.length} Wegpunkte lokal.` : 'Noch keine Wegpunkte.');
+        }
+
+        function setWaypointStatus(message) {
+            const status = document.getElementById('waypoint-status');
+            if (status) status.textContent = message;
+        }
+
+        function navigationRequest(path, options = {}) {
+            return fetch(path, {
+                ...options,
+                headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+            }).then(async response => {
+                const payload = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+                return payload;
+            });
+        }
+
+        function saveWaypoints() {
+            if (!navigationWaypoints.length) {
+                setWaypointStatus('Keine Wegpunkte zum Speichern.');
+                return;
+            }
+            navigationRequest('/api/navigation/waypoints', {
+                method: 'POST',
+                body: JSON.stringify({ waypoints: navigationWaypoints }),
+            }).then(() => setWaypointStatus('Wegpunkte über CAN gesendet.'))
+              .catch(error => setWaypointStatus(`Speichern fehlgeschlagen: ${error.message}`));
+        }
+
+        function startNavigation() {
+            navigationRequest('/api/navigation/start', { method: 'POST' })
+                .then(() => setWaypointStatus('Navigation gestartet.'))
+                .catch(error => setWaypointStatus(`Start fehlgeschlagen: ${error.message}`));
+        }
+
+        function stopNavigation() {
+            navigationRequest('/api/navigation/stop', { method: 'POST' })
+                .then(() => setWaypointStatus('Navigation gestoppt.'))
+                .catch(error => setWaypointStatus(`Stop fehlgeschlagen: ${error.message}`));
         }
 
         function localToLatLon(local, headingDeg, lat, lon) {

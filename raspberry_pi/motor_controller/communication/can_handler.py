@@ -58,7 +58,8 @@ class CANHandler:
         
         # Callbacks
         self.sensor_data_callback: Optional[Callable] = None
-        
+        self.navigation_command_callback: Optional[Callable] = None
+
         if self.can_available:
             self._init_can_bus()
     
@@ -157,14 +158,27 @@ class CANHandler:
     
     def _process_sensor_data(self, data: Dict[str, Any]):
         """
-        Verarbeitet Sensor-Daten vom Sensor Hub (Thread-Safe)
-        
-        Args:
-            data: Sensor-Daten als Dictionary
+        Verarbeitet Daten vom Sensor Hub (Thread-Safe).
+
+        Trennt zwischen Telemetrie und Navigations-Befehlen anhand des
+        ``cmd``-Feldes: ``cmd``-Strings die mit ``nav_`` beginnen werden an den
+        ``navigation_command_callback`` weitergereicht und nicht in den
+        Telemetrie-Cache geschrieben.
         """
+        cmd = data.get('cmd') if isinstance(data, dict) else None
+        if isinstance(cmd, str) and cmd.startswith('nav_'):
+            if self.navigation_command_callback:
+                try:
+                    self.navigation_command_callback(data)
+                except Exception as e:
+                    self.logger.error(f"❌ Navigation-Command Callback Fehler: {e}")
+            else:
+                self.logger.debug(f"📡 Nav-Command ohne Listener verworfen: {cmd}")
+            return
+
         with self._sensor_data_lock:
             self._sensor_data = data
-        
+
         # Callback aufrufen
         if self.sensor_data_callback:
             try:
@@ -246,11 +260,21 @@ class CANHandler:
     def set_sensor_data_callback(self, callback: Callable):
         """
         Setzt Callback für Sensor-Daten
-        
+
         Args:
             callback: Funktion die bei neuen Sensor-Daten aufgerufen wird
         """
         self.sensor_data_callback = callback
+
+    def set_navigation_command_callback(self, callback: Callable):
+        """
+        Setzt Callback für Navigations-Befehle vom Sensor-Hub.
+
+        Args:
+            callback: Funktion die bei eingehenden ``cmd: 'nav_*'``-Payloads
+                gerufen wird (z. B. ``nav_set_waypoints``, ``nav_start``).
+        """
+        self.navigation_command_callback = callback
     
     def get_status(self) -> Dict[str, Any]:
         """
