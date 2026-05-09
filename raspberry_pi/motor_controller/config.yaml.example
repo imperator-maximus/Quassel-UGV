@@ -68,6 +68,12 @@ navigation:
                                # mit 50% von max_joystick vorwärts (≈75 μs über Neutral,
                                # sicher außerhalb der ESC-Totzone). Anti-Pivot, schont Rasen.
 
+# Drive-around Kartierung
+mapping:
+  enabled: true
+  maps_dir: /home/nicolay/raspberrycan/maps  # GeoJSON FeatureCollections
+  min_point_distance_m: 0.25        # Mindestabstand zwischen aufgezeichneten Punkten
+
 # Web-Interface-Konfiguration
 web:
   enabled: true
@@ -89,4 +95,3 @@ logging:
 # Allgemeine Einstellungen
 quiet: false
 monitor: true
-

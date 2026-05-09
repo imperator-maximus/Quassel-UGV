@@ -4,7 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>👑 Quassel UGV Controller 👑</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <style>
         * {
             margin: 0;
@@ -53,6 +55,7 @@
             justify-content: center;
             gap: 15px;
             align-items: center;
+            flex-wrap: wrap;
         }
 
         .info-toggle-btn {
@@ -187,6 +190,16 @@
             gap: 20px;
         }
 
+        .screen {
+            display: none;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .screen.active {
+            display: flex;
+        }
+
         .control-section {
             background: linear-gradient(135deg, rgba(212, 175, 55, 0.1) 0%, rgba(45, 80, 22, 0.15) 100%);
             border-radius: 20px;
@@ -206,12 +219,6 @@
             font-family: 'Georgia', 'Times New Roman', serif;
         }
 
-        .emergency-controls {
-            display: flex;
-            gap: 20px;
-            justify-content: center;
-        }
-
         .btn {
             padding: 12px 20px;
             border: none;
@@ -224,28 +231,6 @@
             letter-spacing: 1px;
             min-width: 100px;
             font-family: 'Georgia', 'Times New Roman', serif;
-        }
-
-        .btn-emergency {
-            background: linear-gradient(45deg, #8b4513, #a0522d);
-            color: #ffd700;
-            box-shadow: 0 4px 15px rgba(139, 69, 19, 0.5);
-            border: 2px solid rgba(212, 175, 55, 0.4);
-        }
-
-        .btn-emergency:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(139, 69, 19, 0.7);
-        }
-
-        .btn-emergency.active {
-            background: linear-gradient(45deg, #2d5016, #4a7c59);
-            box-shadow: 0 4px 15px rgba(45, 80, 22, 0.6);
-            border: 2px solid rgba(212, 175, 55, 0.6);
-        }
-
-        .btn-emergency.active:hover {
-            box-shadow: 0 6px 20px rgba(45, 80, 22, 0.8);
         }
 
         .info-grid {
@@ -324,10 +309,6 @@
             .status-bar {
                 flex-direction: column;
                 gap: 10px;
-            }
-            
-            .emergency-controls {
-                flex-direction: column;
             }
             
             .btn {
@@ -420,12 +401,6 @@
             background: #ffd700;
             cursor: pointer;
             border: 2px solid #d4af37;
-        }
-
-        /* Joystick nur anzeigen wenn CAN aktiv */
-        .joystick-disabled {
-            opacity: 0.3;
-            pointer-events: none;
         }
 
         /* Touch-optimierte Buttons */
@@ -644,6 +619,249 @@
         .info-value {
             color: #d4af37;
         }
+
+        .mapping-controls {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .mapping-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: center;
+        }
+
+        .mapping-btn {
+            padding: 11px 16px;
+            border-radius: 12px;
+            border: 2px solid rgba(212, 175, 55, 0.45);
+            background: rgba(45, 80, 22, 0.45);
+            color: #ffd700;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            font-weight: bold;
+            cursor: pointer;
+            min-width: 120px;
+        }
+
+        .mapping-btn.primary {
+            background: rgba(34, 139, 34, 0.55);
+            border-color: rgba(144, 238, 144, 0.7);
+            color: #d8ffd8;
+        }
+
+        .mapping-btn.danger {
+            background: rgba(139, 69, 19, 0.55);
+            border-color: rgba(205, 133, 63, 0.8);
+            color: #ffd9b3;
+        }
+
+        .mapping-btn:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+
+        .mapping-save-row {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .mapping-input {
+            min-width: 220px;
+            padding: 11px 14px;
+            border-radius: 10px;
+            border: 2px solid rgba(212, 175, 55, 0.45);
+            background: rgba(0, 0, 0, 0.25);
+            color: #f5f5dc;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            font-size: 1em;
+        }
+
+        .mapping-status-line {
+            text-align: center;
+            color: #f5f5dc;
+            font-weight: bold;
+        }
+
+        .mapping-points {
+            max-height: 170px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid rgba(212, 175, 55, 0.25);
+            border-radius: 10px;
+            padding: 10px;
+            font-family: Consolas, monospace;
+            font-size: 0.9em;
+            color: #d8ffd8;
+        }
+
+        .mapping-error {
+            min-height: 1.2em;
+            text-align: center;
+            color: #ffb199;
+            font-weight: bold;
+        }
+
+        .nav-toggle-btn {
+            padding: 8px 16px;
+            background: linear-gradient(45deg, rgba(212, 175, 55, 0.3), rgba(212, 175, 55, 0.5));
+            border: 2px solid rgba(212, 175, 55, 0.6);
+            border-radius: 20px;
+            color: #ffd700;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            font-weight: bold;
+            font-size: 0.9em;
+            cursor: pointer;
+        }
+
+        .nav-toggle-btn.active {
+            background: linear-gradient(45deg, rgba(34, 139, 34, 0.55), rgba(34, 139, 34, 0.75));
+            border-color: rgba(144, 238, 144, 0.8);
+            color: #d8ffd8;
+        }
+
+        .map-manager {
+            display: grid;
+            grid-template-columns: 320px minmax(0, 1fr);
+            gap: 18px;
+            min-height: 720px;
+        }
+
+        .map-sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .map-canvas-panel {
+            min-height: 720px;
+            border: 2px solid rgba(212, 175, 55, 0.35);
+            border-radius: 8px;
+            overflow: hidden;
+            background: rgba(0, 0, 0, 0.25);
+        }
+
+        #mapEditor {
+            height: 100%;
+            min-height: 720px;
+            width: 100%;
+        }
+
+        .map-select {
+            width: 100%;
+            padding: 11px 14px;
+            border-radius: 10px;
+            border: 2px solid rgba(212, 175, 55, 0.45);
+            background: rgba(0, 0, 0, 0.25);
+            color: #f5f5dc;
+            font-family: 'Georgia', 'Times New Roman', serif;
+            font-size: 1em;
+        }
+
+        .map-row {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .map-row .mapping-btn {
+            flex: 1 1 120px;
+            min-width: 0;
+        }
+
+        .map-row .map-select {
+            flex: 2 1 220px;
+        }
+
+        .map-editor-status {
+            padding: 10px;
+            min-height: 42px;
+            border: 1px solid rgba(212, 175, 55, 0.25);
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.22);
+            color: #f5f5dc;
+            font-weight: bold;
+        }
+
+        .point-list {
+            max-height: 360px;
+            overflow-y: auto;
+            border: 1px solid rgba(212, 175, 55, 0.25);
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.22);
+            padding: 8px;
+        }
+
+        .point-item {
+            display: grid;
+            grid-template-columns: 34px 1fr;
+            gap: 8px;
+            padding: 8px;
+            border-radius: 6px;
+            cursor: pointer;
+            color: #d8ffd8;
+            font-family: Consolas, monospace;
+            font-size: 0.85em;
+        }
+
+        .map-toggle-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #f5f5dc;
+            font-weight: bold;
+        }
+
+        .map-toggle-row input {
+            width: 18px;
+            height: 18px;
+        }
+
+        .area-summary {
+            display: grid;
+            gap: 8px;
+            padding: 10px;
+            border: 1px solid rgba(212, 175, 55, 0.25);
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.22);
+            color: #f5f5dc;
+        }
+
+        .area-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .area-row strong {
+            color: #ffd700;
+        }
+
+        .sub-list {
+            color: #ffb199;
+            font-size: 0.9em;
+            line-height: 1.4;
+        }
+
+        .point-item.active {
+            background: rgba(212, 175, 55, 0.22);
+            color: #ffd700;
+        }
+
+        @media (max-width: 900px) {
+            .map-manager {
+                grid-template-columns: 1fr;
+            }
+
+            #mapEditor,
+            .map-canvas-panel {
+                min-height: 520px;
+            }
+        }
     </style>
 </head>
 <body>
@@ -652,6 +870,8 @@
     <div class="header">
         <h1>👑 Quassel UGV 👑</h1>
         <div class="header-controls">
+            <button class="nav-toggle-btn active" id="controlScreenBtn" onclick="showScreen('control')">Steuerung</button>
+            <button class="nav-toggle-btn" id="mapsScreenBtn" onclick="showScreen('maps')">Karten</button>
             <button class="info-toggle-btn" onclick="toggleStatusInfo()">📊 Info</button>
             <button class="light-toggle-btn" id="lightToggleBtn" onclick="toggleLight()">💡 Licht</button>
             <button class="mower-toggle-btn" id="mowerToggleBtn" onclick="openMowerModal()">🌾 Mäher</button>
@@ -681,14 +901,7 @@
     </div>
 
     <div class="main-content">
-        <div class="control-section">
-            <div class="emergency-controls">
-                <button class="btn btn-emergency" id="canToggleBtn" onclick="toggleCAN()">
-                    <span id="canToggleText">CAN STOPPEN</span>
-                </button>
-            </div>
-        </div>
-
+        <div class="screen active" id="controlScreen">
         <!-- Phase 2: Virtueller Joystick -->
         <div class="control-section" id="joystickSection">
             <div class="joystick-container">
@@ -703,6 +916,28 @@
                         <input type="range" id="speedSlider" min="10" max="100" value="100" step="5">
                     </div>
                 </div>
+            </div>
+        </div>
+
+        <div class="control-section" id="mappingSection">
+            <div class="section-title">Drive-around Kartierung</div>
+            <div class="mapping-controls">
+                <div class="mapping-status-line">
+                    <span id="mappingRecording">Bereit</span> ·
+                    <span id="mappingPointCount">0</span> Punkte
+                </div>
+                <div class="mapping-actions">
+                    <button class="mapping-btn primary" id="mappingStartBtn" onclick="startMapping()">Start</button>
+                    <button class="mapping-btn primary" id="mappingPointBtn" onclick="addMappingPoint()">Punkt setzen</button>
+                    <button class="mapping-btn" id="mappingStopBtn" onclick="stopMapping()">Stop</button>
+                    <button class="mapping-btn danger" id="mappingClearBtn" onclick="clearMapping()">Leeren</button>
+                </div>
+                <div class="mapping-save-row">
+                    <input class="mapping-input" id="mappingName" type="text" placeholder="kartenname">
+                    <button class="mapping-btn primary" id="mappingSaveBtn" onclick="saveMapping()">Speichern</button>
+                </div>
+                <div class="mapping-error" id="mappingError"></div>
+                <div class="mapping-points" id="mappingPoints">Noch keine Punkte</div>
             </div>
         </div>
 
@@ -724,6 +959,47 @@
                 <div class="info-card">
                     <div class="info-label">Verbindung</div>
                     <div class="info-value" id="connectionTime">--</div>
+                </div>
+            </div>
+        </div>
+        </div>
+
+        <div class="screen" id="mapsScreen">
+            <div class="control-section">
+                <div class="section-title">Kartenverwaltung</div>
+                <div class="map-manager">
+                    <div class="map-sidebar">
+                        <div class="map-row">
+                            <select class="map-select" id="mapSelect" onchange="loadSelectedMap()">
+                                <option value="">Keine Karte gewählt</option>
+                            </select>
+                            <button class="mapping-btn" onclick="renameSelectedMap()">Umbenennen</button>
+                            <button class="mapping-btn danger" onclick="deleteSelectedMap()">Löschen</button>
+                        </div>
+                        <label class="map-toggle-row">
+                            <input type="checkbox" id="mainMapsOnlyToggle" onchange="toggleMainMapsOnly()" checked>
+                            <span>Hauptkarten anzeigen und Sub-Flächen abziehen</span>
+                        </label>
+                        <div class="map-row">
+                            <button class="mapping-btn primary" id="osmLayerBtn" onclick="setMapBaseLayer('osm')">OSM</button>
+                            <button class="mapping-btn" id="bingLayerBtn" onclick="setMapBaseLayer('bing')">Bing Satellit</button>
+                        </div>
+                        <div class="map-row">
+                            <button class="mapping-btn danger" onclick="deleteSelectedPoint()">Punkt löschen</button>
+                            <button class="mapping-btn primary" onclick="saveEditedMap()">Änderungen speichern</button>
+                        </div>
+                        <div class="map-editor-status" id="mapEditorStatus">Keine Karte geladen</div>
+                        <div class="area-summary" id="areaSummary">
+                            <div class="area-row"><span>Brutto</span><strong>-- m²</strong></div>
+                            <div class="area-row"><span>Ausgeschlossen</span><strong>-- m²</strong></div>
+                            <div class="area-row"><span>Netto</span><strong>-- m²</strong></div>
+                            <div class="sub-list" id="subMapList">Keine Hauptkarte geladen</div>
+                        </div>
+                        <div class="point-list" id="pointList"></div>
+                    </div>
+                    <div class="map-canvas-panel">
+                        <div id="mapEditor"></div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -810,6 +1086,25 @@
         const joystickThrottleMs = 20; // Alle 20ms senden (50 Hz) - viel flüssiger!
         let joystickUpdateInterval = null;
 
+        let mappingStatus = {
+            recording: false,
+            point_count: 0,
+            points: [],
+            last_error: null
+        };
+
+        let mapEditor = null;
+        let mapLayers = {};
+        let activeBaseLayer = 'osm';
+        let activeMapName = '';
+        let activeMapPayload = null;
+        let boundaryPoints = [];
+        let boundaryLine = null;
+        let boundaryMarkers = [];
+        let subMapLayers = [];
+        let selectedPointIndex = null;
+        let manualPointDragIndex = null;
+
         // WebSocket Event-Handler
         socket.on('connect', function() {
             console.log('✅ WebSocket verbunden');
@@ -849,24 +1144,18 @@
             statusBar.classList.toggle('visible');
         }
 
-        // CAN Toggle Funktion
-        function toggleCAN() {
-            fetch('/api/can/toggle', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                }
-            })
-            .then(response => response.json())
-            .then(data => {
-                canEnabled = data.can_enabled;
-                updateCANButton();
-                // Status sofort aktualisieren
-                fetchStatus();
-            })
-            .catch(error => {
-                console.error('Fehler beim CAN Toggle:', error);
-            });
+        function showScreen(screen) {
+            document.getElementById('controlScreen').classList.toggle('active', screen === 'control');
+            document.getElementById('mapsScreen').classList.toggle('active', screen === 'maps');
+            document.getElementById('controlScreenBtn').classList.toggle('active', screen === 'control');
+            document.getElementById('mapsScreenBtn').classList.toggle('active', screen === 'maps');
+            if (screen === 'maps') {
+                initMapEditor();
+                refreshMapList();
+                setTimeout(() => {
+                    if (mapEditor) mapEditor.invalidateSize();
+                }, 120);
+            }
         }
 
         // Licht Toggle Funktion
@@ -957,20 +1246,10 @@
                 console.log('🎚️ Max Speed initial vom Server gesetzt:', maxSpeed + '%');
             }
 
-            // Joystick-Bereich aktivieren/deaktivieren (umgekehrte Logik!)
-            const joystickSection = document.getElementById('joystickSection');
-            if (data.can_enabled) {
-                joystickSection.classList.add('joystick-disabled');  // CAN aktiv → Joystick deaktiviert
-            } else {
-                joystickSection.classList.remove('joystick-disabled');  // CAN deaktiviert → Joystick aktiv
-            }
-
             // Joystick neu zeichnen falls CAN-Status geändert
             if (joystickCtx) {
                 drawJoystick();
             }
-
-            updateCANButton();
 
             // Licht-Button aktualisieren
             if (data.light_enabled !== undefined && data.light_state !== undefined) {
@@ -987,20 +1266,495 @@
             if (mowerModal.style.display === 'block' && data.mower_enabled !== undefined) {
                 updateMowerModal(data);
             }
+
+            if (data.mapping_status) {
+                updateMappingStatus(data.mapping_status);
+            }
         }
 
-        // CAN Button aktualisieren
-        function updateCANButton() {
-            const btn = document.getElementById('canToggleBtn');
-            const text = document.getElementById('canToggleText');
+        function updateMappingStatus(status) {
+            mappingStatus = status || mappingStatus;
+            const recording = !!mappingStatus.recording;
+            const points = mappingStatus.points || [];
+            document.getElementById('mappingRecording').textContent = recording ? 'Aufnahme läuft' : 'Bereit';
+            document.getElementById('mappingPointCount').textContent = mappingStatus.point_count || points.length || 0;
+            document.getElementById('mappingError').textContent = mappingStatus.last_error || '';
 
-            if (canEnabled) {
-                btn.className = 'btn btn-emergency';
-                text.textContent = 'CAN STOPPEN';
-            } else {
-                btn.className = 'btn btn-emergency active';
-                text.textContent = 'CAN STARTEN';
+            document.getElementById('mappingPointBtn').disabled = !recording;
+            document.getElementById('mappingStopBtn').disabled = !recording;
+            document.getElementById('mappingSaveBtn').disabled = points.length < 3;
+
+            const list = document.getElementById('mappingPoints');
+            if (!points.length) {
+                list.textContent = 'Noch keine Punkte';
+                return;
             }
+            list.innerHTML = points.map((p, index) => {
+                const lat = Number(p.latitude).toFixed(7);
+                const lon = Number(p.longitude).toFixed(7);
+                return `${index + 1}: ${lat}, ${lon}`;
+            }).join('<br>');
+        }
+
+        function mappingRequest(path, payload = {}) {
+            return fetch(path, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            })
+            .then(response => response.json().then(data => ({ok: response.ok, data})))
+            .then(result => {
+                updateMappingStatus(result.data);
+                if (!result.ok || result.data.success === false) {
+                    const message = result.data.error || 'Mapping-Befehl fehlgeschlagen';
+                    document.getElementById('mappingError').textContent = message;
+                }
+                return result.data;
+            })
+            .catch(error => {
+                document.getElementById('mappingError').textContent = error.message;
+            });
+        }
+
+        function startMapping() {
+            mappingRequest('/api/mapping/start', {clear: true});
+        }
+
+        function stopMapping() {
+            mappingRequest('/api/mapping/stop');
+        }
+
+        function addMappingPoint() {
+            mappingRequest('/api/mapping/point', {force: true});
+        }
+
+        function clearMapping() {
+            mappingRequest('/api/mapping/clear');
+        }
+
+        function saveMapping() {
+            const name = document.getElementById('mappingName').value.trim();
+            mappingRequest('/api/mapping/save', {name: name}).then(() => refreshMapList());
+        }
+
+        function initMapEditor() {
+            if (mapEditor || typeof L === 'undefined') return;
+
+            mapEditor = L.map('mapEditor', {
+                zoomControl: true,
+                preferCanvas: true
+            }).setView([53.332385, 11.078706], 19);
+
+            mapLayers.osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxNativeZoom: 19,
+                maxZoom: 22,
+                attribution: '&copy; OpenStreetMap'
+            });
+
+            const BingLayer = L.TileLayer.extend({
+                getTileUrl: function(coords) {
+                    const quad = tileToQuadKey(coords.x, coords.y, coords.z);
+                    const subdomain = Math.abs(coords.x + coords.y) % 4;
+                    return `https://ecn.t${subdomain}.tiles.virtualearth.net/tiles/a${quad}.jpeg?g=14328`;
+                }
+            });
+            mapLayers.bing = new BingLayer('', {
+                maxZoom: 21,
+                attribution: '&copy; Microsoft Bing'
+            });
+
+            mapLayers.osm.addTo(mapEditor);
+
+            document.addEventListener('mousemove', handleManualPointDrag);
+            document.addEventListener('mouseup', finishManualPointDrag);
+        }
+
+        function tileToQuadKey(x, y, z) {
+            let quad = '';
+            for (let i = z; i > 0; i--) {
+                let digit = 0;
+                const mask = 1 << (i - 1);
+                if ((x & mask) !== 0) digit += 1;
+                if ((y & mask) !== 0) digit += 2;
+                quad += digit.toString();
+            }
+            return quad;
+        }
+
+        function setMapBaseLayer(layerName) {
+            initMapEditor();
+            if (!mapEditor || !mapLayers[layerName]) return;
+            if (mapLayers[activeBaseLayer]) {
+                mapEditor.removeLayer(mapLayers[activeBaseLayer]);
+            }
+            activeBaseLayer = layerName;
+            mapLayers[layerName].addTo(mapEditor);
+            document.getElementById('osmLayerBtn').classList.toggle('primary', layerName === 'osm');
+            document.getElementById('bingLayerBtn').classList.toggle('primary', layerName === 'bing');
+        }
+
+        function refreshMapList() {
+            const mainOnly = document.getElementById('mainMapsOnlyToggle')?.checked;
+            const url = mainOnly ? '/api/mapping/maps?main_only=1' : '/api/mapping/maps';
+            return fetch(url)
+                .then(response => response.json())
+                .then(data => {
+                    const select = document.getElementById('mapSelect');
+                    const current = select.value || activeMapName;
+                    select.innerHTML = '<option value="">Keine Karte gewählt</option>';
+                    (data.maps || []).forEach(item => {
+                        const option = document.createElement('option');
+                        option.value = item.name;
+                        option.textContent = item.name;
+                        select.appendChild(option);
+                    });
+                    if (current && (data.maps || []).some(item => item.name === current)) {
+                        select.value = current;
+                    }
+                    return data.maps || [];
+                });
+        }
+
+        function toggleMainMapsOnly() {
+            clearMapAnalysis();
+            refreshMapList().then(() => {
+                const selected = document.getElementById('mapSelect').value;
+                if (selected) loadMap(selected);
+            });
+        }
+
+        function loadSelectedMap() {
+            const name = document.getElementById('mapSelect').value;
+            if (!name) {
+                clearMapEditor();
+                return;
+            }
+            loadMap(name);
+        }
+
+        function loadMap(name) {
+            initMapEditor();
+            return fetch(`/api/mapping/maps/${encodeURIComponent(name)}`)
+                .then(response => response.json().then(data => ({ok: response.ok, data})))
+                .then(result => {
+                    if (!result.ok || result.data.success === false) {
+                        setMapEditorStatus(result.data.error || 'Karte konnte nicht geladen werden');
+                        return;
+                    }
+                    activeMapName = result.data.name;
+                    activeMapPayload = result.data.map;
+                    boundaryPoints = boundaryPointsFromGeoJSON(activeMapPayload);
+                    selectedPointIndex = null;
+                    clearMapAnalysis();
+                    renderBoundaryEditor();
+                    setMapEditorStatus(`${activeMapName}: ${boundaryPoints.length} Punkte`);
+                    loadMapAnalysis(activeMapName);
+                });
+        }
+
+        function boundaryPointsFromGeoJSON(payload) {
+            const feature = (payload.features || []).find(item => item.properties && item.properties.type === 'boundary');
+            if (!feature || !feature.geometry || feature.geometry.type !== 'Polygon') return [];
+            const ring = (feature.geometry.coordinates || [[]])[0] || [];
+            const openRing = ring.length > 1 && sameCoordinate(ring[0], ring[ring.length - 1]) ? ring.slice(0, -1) : ring;
+            return openRing.map(coord => ({latitude: Number(coord[1]), longitude: Number(coord[0])}));
+        }
+
+        function sameCoordinate(a, b) {
+            return Array.isArray(a) && Array.isArray(b) && a[0] === b[0] && a[1] === b[1];
+        }
+
+        function renderBoundaryEditor() {
+            initMapEditor();
+            boundaryMarkers.forEach(marker => marker.remove());
+            boundaryMarkers = [];
+            if (boundaryLine) boundaryLine.remove();
+
+            const latLngs = boundaryPoints.map(point => [point.latitude, point.longitude]);
+            if (latLngs.length) {
+                boundaryLine = L.polygon(latLngs, {
+                    color: '#ffd700',
+                    weight: 3,
+                    fillColor: '#34a853',
+                    fillOpacity: 0.18
+                }).addTo(mapEditor);
+                mapEditor.fitBounds(boundaryLine.getBounds(), {padding: [35, 35], maxZoom: 21});
+            }
+
+            boundaryPoints.forEach((point, index) => {
+                const marker = L.marker([point.latitude, point.longitude], {
+                    draggable: false,
+                    bubblingMouseEvents: false,
+                    riseOnHover: true,
+                    zIndexOffset: 1000,
+                    icon: pointIcon(selectedPointIndex === index)
+                }).addTo(mapEditor);
+                marker.on('click', () => selectPoint(index, false));
+                const markerElement = marker.getElement();
+                if (markerElement) {
+                    L.DomEvent.disableClickPropagation(markerElement);
+                    L.DomEvent.disableScrollPropagation(markerElement);
+                    L.DomEvent.on(markerElement, 'mousedown', event => startManualPointDrag(event, index));
+                }
+                boundaryMarkers.push(marker);
+            });
+            renderPointList();
+        }
+
+        function startManualPointDrag(event, index) {
+            L.DomEvent.stop(event);
+            manualPointDragIndex = index;
+            selectPoint(index, false);
+            if (mapEditor && mapEditor.dragging) {
+                mapEditor.dragging.disable();
+            }
+            handleManualPointDrag(event);
+        }
+
+        function handleManualPointDrag(event) {
+            if (manualPointDragIndex === null || !mapEditor) return;
+            const latLng = mapEditor.mouseEventToLatLng(event);
+            boundaryPoints[manualPointDragIndex] = {
+                latitude: latLng.lat,
+                longitude: latLng.lng
+            };
+            const marker = boundaryMarkers[manualPointDragIndex];
+            if (marker) {
+                marker.setLatLng(latLng);
+            }
+            updateBoundaryLine();
+            renderPointList();
+        }
+
+        function finishManualPointDrag() {
+            if (manualPointDragIndex === null) return;
+            const finishedIndex = manualPointDragIndex;
+            manualPointDragIndex = null;
+            if (mapEditor && mapEditor.dragging) {
+                mapEditor.dragging.enable();
+            }
+            selectPoint(finishedIndex, false);
+            setMapEditorStatus(`${activeMapName}: Punkt verschoben, noch nicht gespeichert`);
+        }
+
+        function updateBoundaryLine() {
+            if (!boundaryLine) return;
+            boundaryLine.setLatLngs([boundaryPoints.map(point => [point.latitude, point.longitude])]);
+        }
+
+        function renderPointList() {
+            const list = document.getElementById('pointList');
+            if (!boundaryPoints.length) {
+                list.textContent = 'Keine Punkte';
+                return;
+            }
+            list.innerHTML = '';
+            boundaryPoints.forEach((point, index) => {
+                const item = document.createElement('div');
+                item.className = 'point-item' + (selectedPointIndex === index ? ' active' : '');
+                item.onclick = () => selectPoint(index, true);
+                item.innerHTML = `<span>${index + 1}</span><span>${point.latitude.toFixed(7)}, ${point.longitude.toFixed(7)}</span>`;
+                list.appendChild(item);
+            });
+        }
+
+        function selectPoint(index, panToPoint = false) {
+            selectedPointIndex = index;
+            boundaryMarkers.forEach((marker, markerIndex) => {
+                marker.setIcon(pointIcon(markerIndex === index));
+            });
+            renderPointList();
+            const point = boundaryPoints[index];
+            if (panToPoint && point && mapEditor) {
+                mapEditor.panTo([point.latitude, point.longitude]);
+            }
+        }
+
+        function deleteSelectedPoint() {
+            if (selectedPointIndex === null || selectedPointIndex < 0) {
+                setMapEditorStatus('Kein Punkt ausgewählt');
+                return;
+            }
+            if (boundaryPoints.length <= 3) {
+                setMapEditorStatus('Mindestens drei Punkte müssen bleiben');
+                return;
+            }
+            boundaryPoints.splice(selectedPointIndex, 1);
+            selectedPointIndex = null;
+            renderBoundaryEditor();
+            setMapEditorStatus(`${activeMapName}: Punkt gelöscht, noch nicht gespeichert`);
+        }
+
+        function saveEditedMap() {
+            if (!activeMapName) {
+                setMapEditorStatus('Keine Karte geladen');
+                return;
+            }
+            fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/boundary`, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({points: boundaryPoints})
+            })
+            .then(response => response.json().then(data => ({ok: response.ok, data})))
+            .then(result => {
+                if (!result.ok || result.data.success === false) {
+                    setMapEditorStatus(result.data.error || 'Speichern fehlgeschlagen');
+                    return;
+                }
+                activeMapPayload = result.data.map;
+                boundaryPoints = boundaryPointsFromGeoJSON(activeMapPayload);
+                renderBoundaryEditor();
+                setMapEditorStatus(`${activeMapName}: gespeichert`);
+                loadMapAnalysis(activeMapName);
+            });
+        }
+
+        function renameSelectedMap() {
+            const oldName = activeMapName || document.getElementById('mapSelect').value;
+            if (!oldName) {
+                setMapEditorStatus('Keine Karte gewählt');
+                return;
+            }
+            const newName = prompt('Neuer Kartenname', oldName);
+            if (!newName) return;
+            fetch(`/api/mapping/maps/${encodeURIComponent(oldName)}`, {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: newName})
+            })
+            .then(response => response.json().then(data => ({ok: response.ok, data})))
+            .then(result => {
+                if (!result.ok || result.data.success === false) {
+                    setMapEditorStatus(result.data.error || 'Umbenennen fehlgeschlagen');
+                    return;
+                }
+                activeMapName = result.data.name;
+                activeMapPayload = result.data.map;
+                refreshMapList().then(() => {
+                    document.getElementById('mapSelect').value = activeMapName;
+                    loadMap(activeMapName);
+                });
+            });
+        }
+
+        function deleteSelectedMap() {
+            const name = activeMapName || document.getElementById('mapSelect').value;
+            if (!name) {
+                setMapEditorStatus('Keine Karte gewählt');
+                return;
+            }
+            if (!confirm(`${name} löschen?`)) return;
+            fetch(`/api/mapping/maps/${encodeURIComponent(name)}`, {method: 'DELETE'})
+                .then(response => response.json().then(data => ({ok: response.ok, data})))
+                .then(result => {
+                    if (!result.ok || result.data.success === false) {
+                        setMapEditorStatus(result.data.error || 'Löschen fehlgeschlagen');
+                        return;
+                    }
+                    clearMapEditor();
+                    refreshMapList();
+                });
+        }
+
+        function clearMapEditor() {
+            activeMapName = '';
+            activeMapPayload = null;
+            boundaryPoints = [];
+            selectedPointIndex = null;
+            boundaryMarkers.forEach(marker => marker.remove());
+            boundaryMarkers = [];
+            subMapLayers.forEach(layer => layer.remove());
+            subMapLayers = [];
+            if (boundaryLine) boundaryLine.remove();
+            boundaryLine = null;
+            renderPointList();
+            clearMapAnalysis();
+            setMapEditorStatus('Keine Karte geladen');
+        }
+
+        function setMapEditorStatus(message) {
+            document.getElementById('mapEditorStatus').textContent = message;
+        }
+
+        function loadMapAnalysis(name) {
+            if (!document.getElementById('mainMapsOnlyToggle').checked || !name || name.toLowerCase().startsWith('sub_')) {
+                clearMapAnalysis();
+                return;
+            }
+            fetch(`/api/mapping/maps/${encodeURIComponent(name)}/analysis`)
+                .then(response => response.json().then(data => ({ok: response.ok, data})))
+                .then(result => {
+                    if (!result.ok || result.data.success === false) {
+                        clearMapAnalysis(result.data.error || 'Flächenanalyse fehlgeschlagen');
+                        return;
+                    }
+                    renderSubMaps(result.data.subs || []);
+                    renderAreaSummary(result.data.area || {}, result.data.subs || []);
+                });
+        }
+
+        function renderSubMaps(subs) {
+            subMapLayers.forEach(layer => layer.remove());
+            subMapLayers = [];
+            if (!mapEditor) return;
+            subs.forEach(item => {
+                const points = boundaryPointsFromGeoJSON(item.map);
+                if (!points.length) return;
+                const layer = L.polygon(points.map(point => [point.latitude, point.longitude]), {
+                    color: '#ff6b4a',
+                    weight: 2,
+                    fillColor: '#ff2d2d',
+                    fillOpacity: 0.28,
+                    dashArray: '6 6'
+                }).addTo(mapEditor);
+                layer.bindTooltip(item.name);
+                subMapLayers.push(layer);
+            });
+        }
+
+        function renderAreaSummary(area, subs) {
+            const exactText = area.exact === false ? ' (einfach)' : '';
+            document.getElementById('areaSummary').innerHTML = `
+                <div class="area-row"><span>Brutto</span><strong>${formatArea(area.gross_m2)} m²</strong></div>
+                <div class="area-row"><span>Ausgeschlossen</span><strong>${formatArea(area.excluded_m2)} m²</strong></div>
+                <div class="area-row"><span>Netto</span><strong>${formatArea(area.net_m2)} m²${exactText}</strong></div>
+                <div class="sub-list" id="subMapList">${formatSubList(area.subs || subs)}</div>
+            `;
+        }
+
+        function clearMapAnalysis(message = 'Keine Hauptkarte geladen') {
+            subMapLayers.forEach(layer => layer.remove());
+            subMapLayers = [];
+            document.getElementById('areaSummary').innerHTML = `
+                <div class="area-row"><span>Brutto</span><strong>-- m²</strong></div>
+                <div class="area-row"><span>Ausgeschlossen</span><strong>-- m²</strong></div>
+                <div class="area-row"><span>Netto</span><strong>-- m²</strong></div>
+                <div class="sub-list" id="subMapList">${message}</div>
+            `;
+        }
+
+        function formatArea(value) {
+            const number = Number(value || 0);
+            return number.toLocaleString('de-DE', {minimumFractionDigits: 1, maximumFractionDigits: 1});
+        }
+
+        function formatSubList(subs) {
+            if (!subs || !subs.length) return 'Keine Sub-Flächen gefunden';
+            return subs.map(item => `${item.name}: ${formatArea(item.area_m2)} m²`).join('<br>');
+        }
+
+        function pointIcon(active) {
+            const dotSize = active ? 18 : 14;
+            const hitSize = 40;
+            const inset = (hitSize - dotSize) / 2;
+            const fill = active ? '#ffb000' : '#34a853';
+            const border = active ? '#ffffff' : '#ffd700';
+            return L.divIcon({
+                className: '',
+                iconSize: [hitSize, hitSize],
+                iconAnchor: [hitSize / 2, hitSize / 2],
+                html: `<div style="width:${hitSize}px;height:${hitSize}px;cursor:move;touch-action:none;position:relative;"><div style="position:absolute;left:${inset}px;top:${inset}px;width:${dotSize}px;height:${dotSize}px;border-radius:50%;background:${fill};border:2px solid ${border};box-shadow:0 0 8px rgba(0,0,0,0.65);"></div></div>`
+            });
         }
 
         // Licht Button aktualisieren
@@ -1227,7 +1981,7 @@
             // Knob (beweglicher Teil)
             joystickCtx.beginPath();
             joystickCtx.arc(currentKnobPos.x, currentKnobPos.y, knobRadius, 0, 2 * Math.PI);
-            joystickCtx.fillStyle = canEnabled ? '#ff4444' : '#00ff88';  // Grün wenn CAN AUS (Joystick aktiv)
+            joystickCtx.fillStyle = '#00ff88';
             joystickCtx.fill();
             joystickCtx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
             joystickCtx.lineWidth = 2;
@@ -1253,8 +2007,6 @@
         }
 
         function startDrag(event) {
-            if (canEnabled) return;  // Joystick nur aktiv wenn CAN DEAKTIVIERT
-
             const pos = getEventPos(event);
             const distance = Math.sqrt(
                 Math.pow(pos.x - currentKnobPos.x, 2) +
@@ -1269,7 +2021,7 @@
         }
 
         function drag(event) {
-            if (!isDragging || canEnabled) return;  // Joystick nur aktiv wenn CAN DEAKTIVIERT
+            if (!isDragging) return;
 
             const pos = getEventPos(event);
             const deltaX = pos.x - joystickCenter.x;

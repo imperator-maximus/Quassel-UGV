@@ -101,6 +101,14 @@ class NavigationConfig:
 
 
 @dataclass
+class MappingConfig:
+    """Drive-around Kartierung und GeoJSON-Speicher."""
+    enabled: bool = True
+    maps_dir: str = '/home/nicolay/raspberrycan/maps'
+    min_point_distance_m: float = 0.25
+
+
+@dataclass
 class WebConfig:
     """Web-Interface-Konfiguration"""
     enabled: bool = False
@@ -132,6 +140,7 @@ class Config:
     mower: MowerConfig = field(default_factory=MowerConfig)
     can: CANConfig = field(default_factory=CANConfig)
     navigation: NavigationConfig = field(default_factory=NavigationConfig)
+    mapping: MappingConfig = field(default_factory=MappingConfig)
     web: WebConfig = field(default_factory=WebConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     
@@ -168,6 +177,8 @@ class Config:
             config.can = CANConfig(**data['can'])
         if 'navigation' in data:
             config.navigation = NavigationConfig(**data['navigation'])
+        if 'mapping' in data:
+            config.mapping = MappingConfig(**data['mapping'])
         if 'web' in data:
             config.web = WebConfig(**data['web'])
         if 'logging' in data:
@@ -236,6 +247,11 @@ class Config:
                 'turn_kp': self.navigation.turn_kp,
                 'min_inner_wheel_speed': self.navigation.min_inner_wheel_speed
             },
+            'mapping': {
+                'enabled': self.mapping.enabled,
+                'maps_dir': self.mapping.maps_dir,
+                'min_point_distance_m': self.mapping.min_point_distance_m
+            },
             'web': {
                 'enabled': self.web.enabled,
                 'host': self.web.host,
@@ -263,4 +279,3 @@ class Config:
     def default(cls) -> 'Config':
         """Erstellt Default-Konfiguration"""
         return cls()
-

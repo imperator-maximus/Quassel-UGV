@@ -20,6 +20,7 @@ from .communication.can_handler import CANHandler
 from .control.motor_control import MotorControl
 from .control.joystick_handler import JoystickHandler
 from .navigation.navigation_controller import NavigationController
+from .mapping import MappingRecorder
 from .web.web_server import WebServer
 
 
@@ -47,6 +48,7 @@ class MotorControllerApp:
         self.motor: MotorControl = None
         self.joystick: JoystickHandler = None
         self.navigation: NavigationController = None
+        self.mapping: MappingRecorder = None
         self.web: WebServer = None
         
         # Shutdown-Flag
@@ -151,6 +153,15 @@ class MotorControllerApp:
                     self.config.navigation,
                     safety_monitor=self.safety
                 )
+
+            # Drive-around Mapping
+            if self.config.mapping.enabled:
+                self.logger.info("Initialisiere Mapping...")
+                self.mapping = MappingRecorder(
+                    self.config.mapping.maps_dir,
+                    self.can.get_sensor_data,
+                    min_point_distance_m=self.config.mapping.min_point_distance_m
+                )
             
             # Web-Server
             if self.config.web.enabled:
@@ -161,7 +172,8 @@ class MotorControllerApp:
                     self.joystick,
                     self.can,
                     self.gpio,
-                    self.navigation
+                    self.navigation,
+                    self.mapping
                 )
                 # Hardware-Referenzen setzen
                 self.web.set_hardware_refs(
@@ -371,4 +383,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

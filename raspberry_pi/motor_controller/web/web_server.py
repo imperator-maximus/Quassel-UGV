@@ -27,7 +27,7 @@ class WebServer:
     - Light/Mower-Steuerung
     """
     
-    def __init__(self, config, motor_control, joystick_handler, can_handler, gpio_controller, navigation_controller=None):
+    def __init__(self, config, motor_control, joystick_handler, can_handler, gpio_controller, navigation_controller=None, mapping_recorder=None):
         """
         Initialisiert Web-Server
         
@@ -45,6 +45,7 @@ class WebServer:
         self.can = can_handler
         self.gpio = gpio_controller
         self.navigation = navigation_controller
+        self.mapping = mapping_recorder
         
         # Flask-App
         self.flask_available = FLASK_AVAILABLE
@@ -138,6 +139,7 @@ class WebServer:
                 'joystick_status': self.joystick.get_status(),
                 'sensor_data': self.can.get_sensor_data(),
                 'navigation_status': self.navigation.get_status() if self.navigation else {'state': 'disabled'},
+                'mapping_status': self.mapping.get_status() if self.mapping else {'state': 'disabled'},
                 'light_state': self.light_state,
                 'mower_state': self.mower_state,
                 'mower_speed': self.pwm_controller.get_mower_speed() if self.pwm_controller else 0
@@ -200,12 +202,10 @@ class WebServer:
         @self.app.route('/api/joystick', methods=['POST'])
         def api_joystick():
             """Verarbeitet Joystick-Input"""
-            if not self.can_enabled:
-                data = request.get_json()
-                x = data.get('x', 0.0)
-                y = data.get('y', 0.0)
-                
-                self.joystick.update(x, y)
+            data = request.get_json()
+            x = data.get('x', 0.0)
+            y = data.get('y', 0.0)
+            self.joystick.update(x, y)
             
             return jsonify({'success': True})
         
@@ -260,6 +260,122 @@ class WebServer:
                 return jsonify({'success': False, **self.navigation.get_status()}), 400
             return jsonify({'success': True, **self.navigation.get_status()})
 
+        @self.app.route('/api/mapping/status', methods=['GET', 'OPTIONS'])
+        def api_mapping_status():
+            """Gibt Drive-around Mapping-Status zurück."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            return jsonify(self.mapping.get_status())
+
+        @self.app.route('/api/mapping/start', methods=['POST', 'OPTIONS'])
+        def api_mapping_start():
+            """Startet eine Drive-around Aufnahme."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            data = request.get_json(silent=True) or {}
+            return jsonify({'success': True, **self.mapping.start(clear=data.get('clear', True))})
+
+        @self.app.route('/api/mapping/stop', methods=['POST', 'OPTIONS'])
+        def api_mapping_stop():
+            """Stoppt eine Drive-around Aufnahme."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            return jsonify({'success': True, **self.mapping.stop()})
+
+        @self.app.route('/api/mapping/point', methods=['POST', 'OPTIONS'])
+        def api_mapping_point():
+            """Speichert die aktuelle korrigierte Pose als Polygonpunkt."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            data = request.get_json(silent=True) or {}
+            result = self.mapping.add_current_point(force=bool(data.get('force', False)))
+            return jsonify(result), 200 if result.get('success') else 400
+
+        @self.app.route('/api/mapping/clear', methods=['POST', 'OPTIONS'])
+        def api_mapping_clear():
+            """Löscht die aktuelle Aufnahme im Speicher."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            return jsonify({'success': True, **self.mapping.clear()})
+
+        @self.app.route('/api/mapping/save', methods=['POST', 'OPTIONS'])
+        def api_mapping_save():
+            """Speichert die aktuelle Boundary als GeoJSON FeatureCollection."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            data = request.get_json(silent=True) or {}
+            result = self.mapping.save(data.get('name', ''))
+            return jsonify(result), 200 if result.get('success') else 400
+
+        @self.app.route('/api/mapping/maps', methods=['GET', 'OPTIONS'])
+        def api_mapping_maps():
+            """Listet gespeicherte Karten."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            main_only = str(request.args.get('main_only', '')).lower() in ('1', 'true', 'yes')
+            maps = self.mapping.list_main_maps() if main_only else self.mapping.list_maps()
+            return jsonify({'maps': maps})
+
+        @self.app.route('/api/mapping/maps/<map_name>', methods=['GET', 'DELETE', 'PATCH', 'OPTIONS'])
+        def api_mapping_map(map_name):
+            """Lädt, löscht oder benennt eine gespeicherte Karte um."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            try:
+                if request.method == 'GET':
+                    result = self.mapping.load_map(map_name)
+                elif request.method == 'DELETE':
+                    result = self.mapping.delete_map(map_name)
+                else:
+                    data = request.get_json(silent=True) or {}
+                    result = self.mapping.rename_map(map_name, data.get('name', ''))
+            except ValueError as exc:
+                result = {'success': False, 'error': str(exc)}
+            return jsonify(result), 200 if result.get('success') else 400
+
+        @self.app.route('/api/mapping/maps/<map_name>/boundary', methods=['PUT', 'OPTIONS'])
+        def api_mapping_map_boundary(map_name):
+            """Aktualisiert die Boundary-Punkte einer Karte."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            data = request.get_json(silent=True) or {}
+            try:
+                result = self.mapping.update_boundary_points(map_name, data.get('points') or [])
+            except ValueError as exc:
+                result = {'success': False, 'error': str(exc)}
+            return jsonify(result), 200 if result.get('success') else 400
+
+        @self.app.route('/api/mapping/maps/<map_name>/analysis', methods=['GET', 'OPTIONS'])
+        def api_mapping_map_analysis(map_name):
+            """Analysiert Hauptfläche plus sub_<Name>* Ausschlussflächen."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            try:
+                result = self.mapping.analyze_map_with_subs(map_name)
+            except ValueError as exc:
+                result = {'success': False, 'error': str(exc)}
+            return jsonify(result), 200 if result.get('success') else 400
+
         @self.app.route('/api/navigation/stop', methods=['POST', 'OPTIONS'])
         def api_navigation_stop():
             """Stoppt die Wegpunktnavigation."""
@@ -292,19 +408,17 @@ class WebServer:
         @self.socketio.on('joystick_update')
         def handle_joystick_update(data):
             """Joystick-Position Update"""
-            if not self.can_enabled:
-                x = data.get('x', 0.0)
-                y = data.get('y', 0.0)
-                self.joystick.update(x, y)
-                # PWM-Werte zurücksenden
-                self._emit_pwm_update()
+            x = data.get('x', 0.0)
+            y = data.get('y', 0.0)
+            self.joystick.update(x, y)
+            # PWM-Werte zurücksenden
+            self._emit_pwm_update()
 
         @self.socketio.on('joystick_release')
         def handle_joystick_release():
             """Joystick losgelassen"""
-            if not self.can_enabled:
-                self.joystick.disable()
-                self._emit_pwm_update()
+            self.joystick.disable()
+            self._emit_pwm_update()
 
         @self.socketio.on('max_speed_update')
         def handle_max_speed_update(data):
@@ -328,6 +442,7 @@ class WebServer:
             'joystick_enabled': self.joystick.get_status().get('enabled', False),
             'sensor_data': self.can.get_sensor_data(),
             'navigation_status': self.navigation.get_status() if self.navigation else {'state': 'disabled'},
+            'mapping_status': self.mapping.get_status() if self.mapping else {'state': 'disabled'},
             'light_state': self.light_state,
             'light_enabled': self.light_config.enabled if self.light_config else False,
             'mower_state': self.mower_state,
@@ -441,4 +556,3 @@ class WebServer:
     def __del__(self):
         """Destruktor - Cleanup bei Objektzerstörung"""
         self.cleanup()
-
