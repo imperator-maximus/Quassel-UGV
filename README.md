@@ -422,10 +422,10 @@ existing test files rather than creating throwaway ad-hoc scripts.**
 ```
 
 The script installs local dev dependencies, runs both local test suites, uploads
-the motor-controller code to `raspberrycan`, preserves the remote `config.yaml`,
-creates a timestamped backup under `/home/nicolay/backup/`, runs the remote
-motor-controller tests, restarts `motor-controller-v2.service`, and checks `/`
-plus `/api/status`.
+the motor-controller code, web template, and static assets to `raspberrycan`,
+preserves the remote `config.yaml`, creates a timestamped backup under
+`/home/nicolay/backup/`, runs the remote motor-controller tests, restarts
+`motor-controller-v2.service`, and checks `/` plus `/api/status`.
 
 ### System Integration Test
 ```bash

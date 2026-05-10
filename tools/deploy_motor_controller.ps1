@@ -9,8 +9,10 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $remote = "$User@$HostName"
 $remoteTmp = "/tmp/ugv_deploy_motor_controller"
+$remoteStaticTmp = "/tmp/ugv_deploy_static"
 $remoteApp = "/home/$User/motor_controller"
 $remoteTemplates = "/home/$User/templates"
+$remoteStatic = "/home/$User/static"
 
 function Invoke-Step {
     param(
@@ -37,12 +39,13 @@ if (-not $SkipTests) {
 }
 
 Invoke-Step "Prepare remote staging directory" {
-    ssh $remote "rm -rf $remoteTmp && mkdir -p $remoteTmp"
+    ssh $remote "rm -rf $remoteTmp $remoteStaticTmp && mkdir -p $remoteTmp $remoteStaticTmp"
 }
 
-Invoke-Step "Upload motor-controller package and template" {
+Invoke-Step "Upload motor-controller package, template, and static assets" {
     scp -r "raspberry_pi/motor_controller/." "${remote}:$remoteTmp/"
     scp "raspberry_pi/templates/index.html" "${remote}:$remoteTmp/index.html"
+    scp -r "raspberry_pi/static/." "${remote}:$remoteStaticTmp/"
 }
 
 $deployCommand = @"
@@ -57,7 +60,9 @@ sudo rm -f $remoteApp/index.html
 mkdir -p $remoteTemplates $remoteApp/web/templates
 cp $remoteTmp/index.html $remoteTemplates/index.html
 cp $remoteTmp/index.html $remoteApp/web/templates/index.html
-sudo chown -R ${User}:${User} $remoteApp $remoteTemplates/index.html
+mkdir -p $remoteStatic
+cp -a $remoteStaticTmp/. $remoteStatic/
+sudo chown -R ${User}:${User} $remoteApp $remoteTemplates/index.html $remoteStatic
 cd /home/$User
 python3 -m unittest discover -s motor_controller/tests -v
 sudo systemctl restart motor-controller-v2.service
