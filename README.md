@@ -427,6 +427,18 @@ preserves the remote `config.yaml`, creates a timestamped backup under
 `/home/nicolay/backup/`, runs the remote motor-controller tests, restarts
 `motor-controller-v2.service`, and checks `/` plus `/api/status`.
 
+**Mapping UI browser smoke test:**
+
+```bash
+npm install
+npm run smoke:mapping-ui
+```
+
+Set `UGV_BASE_URL=http://raspberrycan` to target another host. The smoke test
+loads the UI in Chromium, opens the Karten tab, verifies the extracted
+`mapping_editor.js` asset, checks the expected mapping globals, and fails on
+browser console errors or failed network requests.
+
 ### System Integration Test
 ```bash
 # 1. Setup Sensor Hub (Pi Zero 2W)

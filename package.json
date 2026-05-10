@@ -1,0 +1,14 @@
+{
+  "name": "ugv-esp32can",
+  "version": "1.0.0",
+  "description": "A professional autonomous UGV system with an Orange-Pi-based sensor hub, RTK-GPS positioning, WitMotion IMU orientation, CAN telemetry, and a real-time web interface.",
+  "private": true,
+  "scripts": {
+    "smoke:mapping-ui": "node tools/smoke_mapping_ui.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "devDependencies": {
+    "playwright": "^1.59.1"
+  }
+}

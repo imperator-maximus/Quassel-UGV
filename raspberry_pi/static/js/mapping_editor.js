@@ -1,6 +1,7 @@
 // Mapping editor and mowing lane preview UI.
 // Loaded as a classic script so existing inline HTML handlers can call these functions.
 
+// Shared map/editor state
 var mapEditor = null;
 var mapLayers = {};
 var activeBaseLayer = 'osm';
@@ -19,7 +20,7 @@ var laneProgressMarker = null;
 var selectedPointIndex = null;
 var manualPointDragIndex = null;
 
-
+// Map initialization and base layers
 function initMapEditor() {
     if (mapEditor || typeof L === 'undefined') return;
 
@@ -76,6 +77,7 @@ function setMapBaseLayer(layerName) {
     document.getElementById('bingLayerBtn').classList.toggle('primary', layerName === 'bing');
 }
 
+// Map list, loading, and boundary editing
 function refreshMapList() {
     const mainOnly = document.getElementById('mainMapsOnlyToggle')?.checked;
     const url = mainOnly ? '/api/mapping/maps?main_only=1' : '/api/mapping/maps';
@@ -360,6 +362,7 @@ function setMapEditorStatus(message) {
     document.getElementById('mapEditorStatus').textContent = message;
 }
 
+// Lane planner request and preview rendering
 function plannerNumber(id) {
     return Number(document.getElementById(id).value || 0);
 }
@@ -508,6 +511,7 @@ function clearLanePreview(resetStatus = true) {
     }
 }
 
+// Lane progress marker and segment highlighting
 function updateLaneProgress(percent) {
     const value = Math.max(0, Math.min(100, Number(percent || 0)));
     document.getElementById('laneProgressValue').textContent = `${value.toFixed(1).replace('.', ',')}%`;
@@ -660,6 +664,7 @@ function highlightSequenceSegment(position) {
     if (laneProgressMarker) laneProgressMarker.bringToFront();
 }
 
+// Map analysis, sub-map overlays, and formatting helpers
 function distanceLatLngM(a, b) {
     const lat1 = a[1] * Math.PI / 180;
     const lat2 = b[1] * Math.PI / 180;
@@ -754,3 +759,19 @@ function pointIcon(active) {
         html: `<div style="width:${hitSize}px;height:${hitSize}px;cursor:move;touch-action:none;position:relative;"><div style="position:absolute;left:${inset}px;top:${inset}px;width:${dotSize}px;height:${dotSize}px;border-radius:50%;background:${fill};border:2px solid ${border};box-shadow:0 0 8px rgba(0,0,0,0.65);"></div></div>`
     });
 }
+
+window.MappingEditor = {
+    initMapEditor,
+    refreshMapList,
+    loadSelectedMap,
+    loadMap,
+    clearMapEditor,
+    setMapBaseLayer,
+    saveEditedMap,
+    renameSelectedMap,
+    deleteSelectedMap,
+    deleteSelectedPoint,
+    generateLanePreview,
+    clearLanePreview,
+    updateLaneProgress,
+};
