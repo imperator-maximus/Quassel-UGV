@@ -46,6 +46,7 @@ class NavigationController:
         self._watchdog_thread: Optional[threading.Thread] = None
         self._waypoints: List[Waypoint] = []
         self._mode = 'goto'
+        self._direction = 'forward'
         self._track_lookahead_m = float(getattr(config, 'track_lookahead_m', 0.8))
         self._active_index = 0
         self._running = False
@@ -76,6 +77,7 @@ class NavigationController:
             payload = {
                 'state': self._state,
                 'mode': self._mode,
+                'direction': self._direction,
                 'running': self._running,
                 'active_index': self._active_index,
                 'total': len(self._waypoints),
@@ -91,11 +93,15 @@ class NavigationController:
         raw_waypoints: Iterable[Dict[str, float]],
         mode: str = 'goto',
         lookahead_m: Optional[float] = None,
+        direction: str = 'forward',
     ) -> List[Dict[str, float]]:
         waypoints = [self._parse_waypoint(item) for item in raw_waypoints]
         if not waypoints:
             raise ValueError('Mindestens ein Wegpunkt ist erforderlich')
         mode = self._parse_mode(mode)
+        direction = self._parse_direction(direction)
+        if direction == 'reverse' and mode != 'track':
+            raise ValueError('Rückwärtsfahrt ist nur im Track-Modus unterstützt')
         if mode == 'track' and len(waypoints) < 2:
             raise ValueError('Track-Modus benötigt mindestens zwei Wegpunkte')
         if lookahead_m is None:
@@ -111,6 +117,7 @@ class NavigationController:
         with self._lock:
             self._waypoints = waypoints
             self._mode = mode
+            self._direction = direction
             self._track_lookahead_m = lookahead
             self._active_index = 0
             self._running = False
@@ -129,6 +136,7 @@ class NavigationController:
         with self._lock:
             self._waypoints = []
             self._mode = 'goto'
+            self._direction = 'forward'
             self._active_index = 0
             self._state = 'idle'
             self._last_error = None
@@ -193,6 +201,7 @@ class NavigationController:
                     payload.get('waypoints') or [],
                     mode=payload.get('mode', 'goto'),
                     lookahead_m=payload.get('lookahead_m'),
+                    direction=payload.get('direction', 'forward'),
                 )
                 return {'ok': True, 'waypoints': waypoints}
             if cmd == 'nav_clear':
@@ -215,6 +224,7 @@ class NavigationController:
                 'running': self._running,
                 'state': self._state,
                 'mode': self._mode,
+                'direction': self._direction,
                 'waypoints': [wp.as_dict() for wp in self._waypoints],
                 'active_index': self._active_index,
                 'active_waypoint': active,
@@ -277,6 +287,7 @@ class NavigationController:
                 return
             first = self._waypoints[0]
             mode = self._mode
+            direction = self._direction
             target = self._waypoints[self._active_index]
 
         if self.distance_m(first, current) > float(self.config.geofence_radius_m):
@@ -285,7 +296,7 @@ class NavigationController:
             return
 
         if mode == 'track':
-            self._handle_track_pose(current, heading, now)
+            self._handle_track_pose(current, heading, now, direction=direction)
             return
 
         distance = self.distance_m(current, target)
@@ -357,7 +368,7 @@ class NavigationController:
         self._emit_state()
         return completed
 
-    def _handle_track_pose(self, current: Waypoint, heading: float, now: float) -> None:
+    def _handle_track_pose(self, current: Waypoint, heading: float, now: float, direction: str = 'forward') -> None:
         with self._lock:
             waypoints = list(self._waypoints)
             lookahead = self._track_lookahead_m
@@ -374,8 +385,10 @@ class NavigationController:
             return
 
         bearing = self.bearing_deg(current, target)
+        if direction == 'reverse':
+            bearing = (bearing + 180.0) % 360.0
         error = self.heading_error_deg(bearing, heading)
-        x, y = self._calculate_command(error, max(remaining_m, lookahead))
+        x, y = self._calculate_command(error, max(remaining_m, lookahead), direction=direction)
         self._send_command(x, y)
 
         with self._lock:
@@ -384,8 +397,8 @@ class NavigationController:
         if now - self._last_debug_log >= 1.0:
             self._last_debug_log = now
             self.logger.info(
-                '🧭 track: seg=%d prog=%.2fm rem=%.2fm xtrack=%.2fm target=(%.7f,%.7f) hdg=%.1f° err=%.1f° → x=%.3f y=%.3f',
-                segment_index, progress_m, remaining_m, cross_track_m,
+                '🧭 track(%s): seg=%d prog=%.2fm rem=%.2fm xtrack=%.2fm target=(%.7f,%.7f) hdg=%.1f° err=%.1f° → x=%.3f y=%.3f',
+                direction, segment_index, progress_m, remaining_m, cross_track_m,
                 target.latitude, target.longitude, heading, error, x, y,
             )
 
@@ -477,7 +490,7 @@ class NavigationController:
     def _distance_xy(a: Tuple[float, float], b: Tuple[float, float]) -> float:
         return math.hypot(b[0] - a[0], b[1] - a[1])
 
-    def _calculate_command(self, heading_error: float, distance: float) -> Tuple[float, float]:
+    def _calculate_command(self, heading_error: float, distance: float, direction: str = 'forward') -> Tuple[float, float]:
         limit = min(0.30, max(0.0, float(self.config.max_joystick)))
         distance_factor = self._clamp(distance / float(self.config.slowdown_radius_m), 0.0, 1.0)
 
@@ -501,7 +514,7 @@ class NavigationController:
         # Im Sättigungsfall wird turn proportional zurückgenommen, damit
         # forward das Limit nicht sprengt.
         min_inner = self._clamp(float(getattr(self.config, 'min_inner_wheel_speed', 0.0)), 0.0, 1.0)
-        if min_inner > 0.0:
+        if min_inner > 0.0 and direction != 'reverse':
             ratio = self._turn_to_forward_ratio
             inner_floor = min_inner * limit * distance_factor * heading_factor
             required_forward = inner_floor + abs(turn) * ratio
@@ -512,7 +525,8 @@ class NavigationController:
                 if ratio > 0.0:
                     max_turn = max(0.0, (limit - inner_floor) / ratio)
                     turn = self._clamp(turn, -max_turn, max_turn)
-        return turn, self._clamp(forward, 0.0, limit)
+        signed_forward = -forward if direction == 'reverse' else forward
+        return turn, self._clamp(signed_forward, -limit, limit)
 
     def _send_command(self, x: float, y: float) -> None:
         self.motor.set_joystick(x, y, use_ramping=False)
@@ -567,6 +581,13 @@ class NavigationController:
         parsed = str(mode or 'goto').strip().lower()
         if parsed not in ('goto', 'track'):
             raise ValueError('Navigationsmodus muss goto oder track sein')
+        return parsed
+
+    @staticmethod
+    def _parse_direction(direction: str) -> str:
+        parsed = str(direction or 'forward').strip().lower()
+        if parsed not in ('forward', 'reverse'):
+            raise ValueError('Fahrtrichtung muss forward oder reverse sein')
         return parsed
 
     @staticmethod

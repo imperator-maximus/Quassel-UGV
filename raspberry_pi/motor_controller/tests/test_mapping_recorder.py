@@ -8,7 +8,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mapping import MappingRecorder
 from mapping.geometry import project_points
+from mapping.nogo_monitor import NoGoZoneMonitor
 from mapping.plan_types import PlanSegment
+from mapping.plan_manager import MowingPlanManager
 from mapping.transition_router import TransitionRouter
 
 
@@ -397,6 +399,209 @@ class MappingRecorderTests(unittest.TestCase):
             buffered["exclusion_contours"][0]["length_m"],
             no_buffer["exclusion_contours"][0]["length_m"],
         )
+
+    def test_plan_json_save_and_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = MowingPlanManager(tmp, lambda: {"latitude": 52.0, "longitude": 10.0, "rtk_status": "RTK FIXED"})
+            plan = self._sample_plan(reverse=False, unsafe=False)
+
+            saved = manager.save_plan("Brunnen", plan)
+            loaded = manager.load_plan("Brunnen")
+
+            self.assertTrue(saved["success"])
+            self.assertTrue(Path(saved["path"]).exists())
+            self.assertTrue(loaded["success"])
+            self.assertEqual("raspberrycan.mowing_plan.v1", loaded["plan"]["schema"])
+            self.assertEqual("Brunnen", loaded["plan"]["map_name"])
+            self.assertIn("created_at", loaded["plan"])
+            self.assertEqual(plan["parameters"], loaded["plan"]["parameters"])
+            self.assertEqual(plan["lanes"], loaded["plan"]["lanes"])
+            self.assertEqual(plan["rest_lanes"], loaded["plan"]["rest_lanes"])
+            self.assertEqual(plan["sequence"], loaded["plan"]["sequence"])
+            self.assertEqual(plan["transitions"], loaded["plan"]["transitions"])
+
+    def test_unsafe_transition_blocks_execution_check(self):
+        manager = MowingPlanManager("/tmp/maps", lambda: {"latitude": 52.0, "longitude": 10.0, "rtk_status": "RTK FIXED"})
+        result = manager.check_plan("Brunnen", self._sample_plan(reverse=False, unsafe=True))
+
+        self.assertFalse(result["success"])
+        self.assertIn("Plan enthält unsichere Übergänge", result["errors"])
+        with self.assertRaises(ValueError):
+            manager.executable_segments(self._sample_plan(reverse=False, unsafe=True))
+
+    def test_reverse_segment_is_detected_and_allowed_when_supported(self):
+        manager = MowingPlanManager("/tmp/maps", lambda: {"latitude": 52.0, "longitude": 10.0, "rtk_status": "RTK FIXED"})
+        result = manager.check_plan("Brunnen", self._sample_plan(reverse=True, unsafe=False))
+
+        self.assertTrue(result["success"])
+        self.assertEqual(1, result["summary"]["reverse_segment_count"])
+        self.assertEqual("reverse", result["executable_segments"][-1]["direction"])
+
+    def test_contour_rest_and_transition_translate_to_executable_segments(self):
+        manager = MowingPlanManager("/tmp/maps", lambda: {"latitude": 52.0, "longitude": 10.0, "rtk_status": "RTK FIXED"})
+        plan = self._sample_plan(reverse=False, unsafe=False)
+
+        executable = manager.executable_segments(plan)
+
+        self.assertEqual(["positioning", "mow", "transition", "mow"], [item["type"] for item in executable])
+        self.assertEqual("goto", executable[0]["mode"])
+        self.assertEqual("track", executable[1]["mode"])
+        self.assertEqual("contour", executable[1]["source_type"])
+        self.assertEqual("forward", executable[1]["direction"])
+        self.assertEqual("track", executable[2]["mode"])
+        self.assertEqual("direct", executable[2]["route_kind"])
+        self.assertEqual("rest_lane", executable[3]["source_type"])
+        self.assertEqual("forward", executable[3]["direction"])
+
+    def test_invalid_plan_never_sets_navigation_commands(self):
+        class FakeNavigation:
+            def __init__(self):
+                self.calls = []
+
+            def set_waypoints(self, *args, **kwargs):
+                self.calls.append(("set_waypoints", args, kwargs))
+
+            def start(self):
+                self.calls.append(("start", (), {}))
+
+        navigation = FakeNavigation()
+        manager = MowingPlanManager("/tmp/maps", lambda: None)
+        result = manager.check_plan("Andere", self._sample_plan(reverse=False, unsafe=True))
+
+        self.assertFalse(result["success"])
+        self.assertEqual([], navigation.calls)
+
+    def test_plan_check_requires_rtk_fixed(self):
+        manager = MowingPlanManager("/tmp/maps", lambda: {"latitude": 52.0, "longitude": 10.0, "rtk_status": "GPS FIX"})
+        result = manager.check_plan("Brunnen", self._sample_plan(reverse=False, unsafe=False))
+
+        self.assertFalse(result["success"])
+        self.assertIn("RTK nicht verfügbar: GPS FIX", result["errors"])
+
+    def test_nogo_monitor_allows_vehicle_outside_zone(self):
+        self._assert_shapely_available()
+        monitor = NoGoZoneMonitor(self._sample_nogo_plan(), intrusion_tolerance_m=0.15)
+
+        result = monitor.check_pose(self._pose_m(-1.0, 1.0, 90.0))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("ok", result["state"])
+
+    def test_nogo_monitor_warns_when_footprint_touches_zone(self):
+        self._assert_shapely_available()
+        monitor = NoGoZoneMonitor(self._sample_nogo_plan(), intrusion_tolerance_m=0.15)
+
+        result = monitor.check_pose(self._pose_m(-0.5, 1.0, 90.0))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("warning", result["state"])
+
+    def test_nogo_monitor_stops_after_intrusion_tolerance(self):
+        self._assert_shapely_available()
+        monitor = NoGoZoneMonitor(self._sample_nogo_plan(), intrusion_tolerance_m=0.15)
+
+        result = monitor.check_pose(self._pose_m(-0.3, 1.0, 90.0))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("stop", result["state"])
+        self.assertIn("15 cm", result["reason"])
+
+    @staticmethod
+    def _sample_plan(reverse=False, unsafe=False):
+        contour = {
+            "type": "contour",
+            "segment_index": 0,
+            "lane_index": 0,
+            "coordinates": [[10.0, 52.0], [10.00001, 52.0]],
+            "length_m": 1.0,
+        }
+        rest = {
+            "type": "rest_lane",
+            "segment_index": 1,
+            "rest_index": 0,
+            "rest_group": 0,
+            "direction": "reverse" if reverse else "forward",
+            "coordinates": [[10.00002, 52.0], [10.00003, 52.0]],
+            "length_m": 1.0,
+        }
+        transition = {
+            "type": "transition",
+            "transition_index": 0,
+            "from_segment_index": 0,
+            "to_segment_index": 1,
+            "from_type": "contour",
+            "to_type": "rest_lane",
+            "safe": not unsafe,
+            "reason": "ok" if not unsafe else "sub_zone",
+            "route_kind": "direct",
+            "coordinates": [[10.00001, 52.0], [10.00002, 52.0]],
+            "length_m": 1.0,
+        }
+        return {
+            "success": True,
+            "name": "Brunnen",
+            "strategy": "hybrid_contour_rest_reverse_preview",
+            "parameters": {
+                "cut_width_m": 0.45,
+                "overlap_m": 0.1,
+                "spacing_m": 0.35,
+                "outer_margin_m": 0.0,
+                "sub_margin_m": 0.25,
+                "max_ring_turn_deg": 155.0,
+            },
+            "lane_count": 1,
+            "rest_lane_count": 1,
+            "transition_count": 1,
+            "unsafe_transition_count": 1 if unsafe else 0,
+            "total_drive_length_m": 3.0,
+            "lanes": [contour],
+            "rest_lanes": [rest],
+            "sequence": [contour, rest],
+            "transitions": [transition],
+        }
+
+    @classmethod
+    def _coord_m(cls, x_m, y_m):
+        point = cls._point_m(x_m, y_m)
+        return [point["longitude"], point["latitude"]]
+
+    @classmethod
+    def _pose_m(cls, x_m, y_m, heading_deg):
+        point = cls._point_m(x_m, y_m)
+        return {
+            "latitude": point["latitude"],
+            "longitude": point["longitude"],
+            "heading": heading_deg,
+            "rtk_status": "RTK FIXED",
+        }
+
+    @classmethod
+    def _sample_nogo_plan(cls):
+        ring = [
+            cls._coord_m(0.0, 0.0),
+            cls._coord_m(2.0, 0.0),
+            cls._coord_m(2.0, 2.0),
+            cls._coord_m(0.0, 2.0),
+            cls._coord_m(0.0, 0.0),
+        ]
+        return {
+            "name": "NoGoTest",
+            "sequence": [
+                {
+                    "type": "contour",
+                    "segment_index": 0,
+                    "coordinates": [cls._coord_m(-2.0, 1.0), cls._coord_m(-1.0, 1.0)],
+                    "length_m": 1.0,
+                }
+            ],
+            "exclusion_contours": [
+                {
+                    "type": "sub_buffer_boundary",
+                    "coordinates": ring,
+                    "length_m": 8.0,
+                }
+            ],
+        }
 
 
 if __name__ == "__main__":

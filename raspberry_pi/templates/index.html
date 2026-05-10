@@ -1033,32 +1033,30 @@
                             <div class="sub-list" id="subMapList">Keine Hauptkarte geladen</div>
                         </div>
                         <div class="area-summary">
-                            <div class="planner-grid">
-                                <label class="planner-field">Schnittbreite m
-                                    <input id="plannerCutWidth" type="number" min="0.1" max="2.0" step="0.05" value="0.45">
-                                </label>
-                                <label class="planner-field">Überlappung m
-                                    <input id="plannerOverlap" type="number" min="0" max="1.0" step="0.05" value="0.10">
-                                </label>
-                                <label class="planner-field">Außenpuffer m
-                                    <input id="plannerOuterMargin" type="number" min="0" max="2.0" step="0.05" value="0.00">
-                                </label>
-                                <label class="planner-field">Sub-Puffer m
-                                    <input id="plannerSubMargin" type="number" min="0" max="2.0" step="0.05" value="0.25">
-                                </label>
-                                <label class="planner-field">Ring-Knick max °
-                                    <input id="plannerMaxRingTurn" type="number" min="45" max="179" step="5" value="155">
-                                </label>
+                            <div class="map-row">
+                                <button class="mapping-btn primary" onclick="loadSavedPlan()">Plan laden</button>
+                                <button class="mapping-btn primary" id="planPlayBtn" onclick="playLoadedPlan()" disabled>Play</button>
+                                <button class="mapping-btn danger" onclick="stopPlanExecution()">Stop</button>
                             </div>
                             <div class="map-row">
-                                <button class="mapping-btn primary" onclick="generateLanePreview()">Bahnen anzeigen</button>
-                                <button class="mapping-btn" onclick="clearLanePreview()">Bahnen ausblenden</button>
+                                <select class="map-select" id="planSelect" onchange="selectSavedPlan()">
+                                    <option value="">Kein gespeicherter Plan</option>
+                                </select>
+                            </div>
+                            <div class="mapping-status-line">
+                                <span>RTK:</span>
+                                <strong id="planRtkStatus">unbekannt</strong>
+                            </div>
+                            <div class="mapping-status-line">
+                                <span>No-Go:</span>
+                                <strong id="planNoGoStatus">unbekannt</strong>
                             </div>
                             <label class="planner-progress">Abfahrposition: <span id="laneProgressValue">0,0%</span>
                                 <input id="laneProgressSlider" type="range" min="0" max="100" step="0.1" value="0" oninput="updateLaneProgress(Number(this.value))">
                                 <span class="sub-list" id="laneProgressDetail">0 m / 0 m</span>
                             </label>
-                            <div class="sub-list" id="plannerStatus">Noch keine Bahnen berechnet</div>
+                            <div class="sub-list" id="plannerStatus">Kein Plan geladen</div>
+                            <div class="sub-list" id="planStatus">Kein Plan geladen</div>
                         </div>
                         <div class="point-list" id="pointList"></div>
                     </div>
@@ -1205,6 +1203,7 @@
             if (screen === 'maps') {
                 initMapEditor();
                 refreshMapList();
+                refreshPlanList();
                 setTimeout(() => {
                     if (mapEditor) mapEditor.invalidateSize();
                 }, 120);
@@ -1322,6 +1321,9 @@
 
             if (data.mapping_status) {
                 updateMappingStatus(data.mapping_status);
+            }
+            if (window.MappingEditor && typeof window.MappingEditor.updateVehiclePose === 'function') {
+                window.MappingEditor.updateVehiclePose(data.sensor_data, data.navigation_status, data.plan_execution_status);
             }
         }
 

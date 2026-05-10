@@ -399,6 +399,34 @@ class NavigationControllerTests(unittest.TestCase):
         self.assertEqual(status['mode'], 'track')
         self.assertAlmostEqual(status['limits']['track_lookahead_m'], 1.2)
 
+    def test_track_mode_accepts_reverse_direction_and_drives_backward(self):
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig(track_lookahead_m=1.0, min_inner_wheel_speed=0.0))
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.001},
+        ], mode='track', direction='reverse')
+        controller.start()
+        try:
+            controller.on_pose_update({'latitude': 52.0, 'longitude': 10.0001, 'heading_deg': 270.0})
+            x, y, _ = motor.commands[-1]
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertEqual(status['direction'], 'reverse')
+        self.assertAlmostEqual(x, 0.0, delta=0.03)
+        self.assertLess(y, 0.0)
+
+    def test_reverse_direction_is_rejected_for_goto(self):
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+
+        with self.assertRaises(ValueError):
+            controller.set_waypoints([
+                {'latitude': 52.0, 'longitude': 10.0},
+            ], mode='goto', direction='reverse')
+
 
 if __name__ == '__main__':
     unittest.main()

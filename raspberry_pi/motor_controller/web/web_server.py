@@ -6,8 +6,11 @@ REST API + WebSocket für UGV-Steuerung
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Optional
+
+from ..mapping.nogo_monitor import NoGoZoneMonitor
 
 try:
     from flask import Flask, render_template, jsonify, request
@@ -65,6 +68,17 @@ class WebServer:
         self.can_enabled = True
         self.light_state = False
         self.mower_state = False
+        self._plan_lock = threading.Lock()
+        self._plan_thread: Optional[threading.Thread] = None
+        self._plan_stop_event = threading.Event()
+        self._plan_status = {
+            'running': False,
+            'state': 'idle',
+            'active_index': 0,
+            'total': 0,
+            'last_error': None,
+            'current_segment': None,
+        }
         
         if self.flask_available:
             self._init_flask()
@@ -98,7 +112,7 @@ class WebServer:
             def add_cors_headers(response):
                 response.headers['Access-Control-Allow-Origin'] = '*'
                 response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-                response.headers['Access-Control-Allow-Methods'] = 'GET,POST,DELETE,OPTIONS'
+                response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
                 return response
 
             # Socket.IO initialisieren
@@ -149,6 +163,7 @@ class WebServer:
                 'joystick_status': self.joystick.get_status(),
                 'sensor_data': self.can.get_sensor_data(),
                 'navigation_status': self.navigation.get_status() if self.navigation else {'state': 'disabled'},
+                'plan_execution_status': self.get_plan_execution_status(),
                 'mapping_status': self.mapping.get_status() if self.mapping else {'state': 'disabled'},
                 'light_state': self.light_state,
                 'mower_state': self.mower_state,
@@ -410,6 +425,80 @@ class WebServer:
                 result = {'success': False, 'error': str(exc)}
             return jsonify(result), 200 if result.get('success') else 400
 
+        @self.app.route('/api/mapping/plans', methods=['GET', 'OPTIONS'])
+        def api_mapping_plans():
+            """Listet gespeicherte Bahnpläne."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            return jsonify({'plans': self.mapping.list_plans()})
+
+        @self.app.route('/api/mapping/maps/<map_name>/plan/save', methods=['POST', 'OPTIONS'])
+        def api_mapping_map_plan_save(map_name):
+            """Speichert eine berechnete Bahnplanung, ohne Fahrbefehle zu senden."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            data = request.get_json(silent=True) or {}
+            result = self.mapping.save_plan(map_name, data.get('plan') or data)
+            return jsonify(result), 200 if result.get('success') else 400
+
+        @self.app.route('/api/mapping/maps/<map_name>/plan/load', methods=['GET', 'OPTIONS'])
+        def api_mapping_map_plan_load(map_name):
+            """Lädt einen gespeicherten Bahnplan, ohne Ausführung zu starten."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            result = self.mapping.load_plan(map_name)
+            return jsonify(result), 200 if result.get('success') else 404
+
+        @self.app.route('/api/mapping/maps/<map_name>/plan/check', methods=['POST', 'OPTIONS'])
+        def api_mapping_map_plan_check(map_name):
+            """Prüft einen gespeicherten oder übergebenen Plan vor jeder Ausführung."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            data = request.get_json(silent=True) or {}
+            plan = data.get('plan') if isinstance(data, dict) else None
+            result = self.mapping.check_plan(map_name, plan=plan)
+            return jsonify(result), 200 if result.get('success') else 400
+
+        @self.app.route('/api/mapping/maps/<map_name>/plan/nogo-check', methods=['POST', 'OPTIONS'])
+        def api_mapping_map_plan_nogo_check(map_name):
+            """Prüft die aktuelle Fahrzeugpose gegen die No-Go-Zonen eines Plans."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            data = request.get_json(silent=True) or {}
+            plan = data.get('plan') if isinstance(data, dict) else None
+            if plan is None:
+                loaded = self.mapping.load_plan(map_name)
+                if not loaded.get('success'):
+                    return jsonify(loaded), 404
+                plan = loaded.get('plan')
+            result = self.mapping.check_nogo(plan)
+            return jsonify({'success': True, 'nogo_status': result})
+
+        @self.app.route('/api/mapping/maps/<map_name>/plan/execute', methods=['POST', 'OPTIONS'])
+        def api_mapping_map_plan_execute(map_name):
+            """Ausführung ist vorbereitet, startet aber nicht ohne separate Freigabe."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            result = self.mapping.check_plan(map_name)
+            if not result.get('success'):
+                return jsonify({'success': False, 'error': 'Planprüfung fehlgeschlagen', **result}), 400
+            loaded = self.mapping.load_plan(map_name)
+            plan = loaded.get('plan') if loaded.get('success') else None
+            started = self.start_plan_execution(result.get('executable_segments', []), result.get('summary') or {}, plan)
+            return jsonify(started), 200 if started.get('success') else 409
+
         @self.app.route('/api/navigation/stop', methods=['POST', 'OPTIONS'])
         def api_navigation_stop():
             """Stoppt die Wegpunktnavigation."""
@@ -417,8 +506,142 @@ class WebServer:
                 return ('', 204)
             if not self.navigation:
                 return jsonify({'error': 'Navigation deaktiviert'}), 503
+            self.stop_plan_execution()
             self.navigation.stop()
             return jsonify({'success': True, **self.navigation.get_status()})
+
+    def start_plan_execution(self, executable_segments, summary, plan=None):
+        if not self.navigation:
+            return {'success': False, 'error': 'Navigation deaktiviert'}
+        if not executable_segments:
+            return {'success': False, 'error': 'Keine ausführbaren Segmente im Plan'}
+        with self._plan_lock:
+            if self._plan_status.get('running'):
+                return {'success': False, 'error': 'Plan-Ausführung läuft bereits'}
+            self._plan_stop_event.clear()
+            self._plan_status = {
+                'running': True,
+                'state': 'running',
+                'active_index': 0,
+                'total': len(executable_segments),
+                'last_error': None,
+                'current_segment': None,
+                'summary': summary,
+            }
+            self._plan_thread = threading.Thread(
+                target=self._run_plan_segments,
+                args=(list(executable_segments), plan),
+                daemon=True,
+            )
+            self._plan_thread.start()
+        return {'success': True, 'plan_execution_status': self.get_plan_execution_status()}
+
+    def stop_plan_execution(self):
+        self._plan_stop_event.set()
+        with self._plan_lock:
+            if self._plan_status.get('running'):
+                self._plan_status['state'] = 'stopping'
+        if self.navigation:
+            self.navigation.stop(reason='plan_stopped')
+
+    def get_plan_execution_status(self):
+        with self._plan_lock:
+            status = dict(self._plan_status)
+            if isinstance(status.get('current_segment'), dict):
+                status['current_segment'] = dict(status['current_segment'])
+            return status
+
+    def _run_plan_segments(self, executable_segments, plan):
+        try:
+            nogo_monitor = self._build_nogo_monitor(plan or {})
+            if nogo_monitor is not None:
+                initial_check = self._check_nogo(nogo_monitor)
+                if not initial_check.get('ok'):
+                    raise RuntimeError(initial_check.get('reason') or 'No-Go-Check blockiert')
+            for index, segment in enumerate(executable_segments):
+                if self._plan_stop_event.is_set():
+                    self._set_plan_status(running=False, state='stopped', active_index=index)
+                    return
+                coords = segment.get('coordinates') or []
+                waypoints = [{'longitude': coord[0], 'latitude': coord[1]} for coord in coords]
+                if not waypoints:
+                    continue
+                mode = segment.get('mode', 'goto')
+                direction = segment.get('direction', 'forward')
+                self._set_plan_status(
+                    running=True,
+                    state='running',
+                    active_index=index,
+                    current_segment={
+                        'type': segment.get('type'),
+                        'source_type': segment.get('source_type'),
+                        'mode': mode,
+                        'direction': direction,
+                        'route_kind': segment.get('route_kind'),
+                        'length_m': segment.get('length_m', 0.0),
+                    },
+                )
+                self.navigation.set_waypoints(waypoints, mode=mode, direction=direction)
+                if not self.navigation.start():
+                    raise RuntimeError(self.navigation.get_status().get('last_error') or 'Navigation konnte nicht starten')
+                if not self._wait_for_navigation_segment(nogo_monitor):
+                    return
+            self._set_plan_status(running=False, state='completed', active_index=len(executable_segments), current_segment=None)
+        except Exception as exc:
+            self.logger.error('Plan-Ausführung fehlgeschlagen: %s', exc)
+            if self.navigation:
+                self.navigation.stop(reason='plan_error')
+            self._set_plan_status(running=False, state='error', last_error=str(exc))
+
+    def _wait_for_navigation_segment(self, nogo_monitor=None):
+        while not self._plan_stop_event.is_set():
+            if not self._rtk_available():
+                message = 'RTK verloren - Plan-Ausführung gestoppt'
+                if self.navigation:
+                    self.navigation.stop(reason='rtk_lost')
+                self._set_plan_status(running=False, state='rtk_lost', last_error=message)
+                return False
+            if nogo_monitor is not None:
+                nogo = self._check_nogo(nogo_monitor)
+                if not nogo.get('ok'):
+                    message = nogo.get('reason') or 'No-Go-Zone verletzt'
+                    if self.navigation:
+                        self.navigation.stop(reason='nogo_stop')
+                    self._set_plan_status(running=False, state='nogo_stop', last_error=message, nogo_status=nogo)
+                    return False
+                self._set_plan_status(nogo_status=nogo)
+            status = self.navigation.get_status()
+            state = status.get('state')
+            if not status.get('running'):
+                if state == 'completed':
+                    return True
+                self._set_plan_status(running=False, state=state or 'stopped', last_error=status.get('last_error'))
+                return False
+            time.sleep(0.05)
+        if self.navigation:
+            self.navigation.stop(reason='plan_stopped')
+        self._set_plan_status(running=False, state='stopped')
+        return False
+
+    def _set_plan_status(self, **updates):
+        with self._plan_lock:
+            self._plan_status.update(updates)
+
+    def _rtk_available(self):
+        if not self.mapping:
+            return False
+        return self.mapping.plans.pose_rtk_ok(self.can.get_sensor_data())
+
+    def _build_nogo_monitor(self, plan):
+        try:
+            return NoGoZoneMonitor(plan)
+        except ValueError as exc:
+            self.logger.warning('No-Go-Monitor deaktiviert: %s', exc)
+            self._set_plan_status(nogo_status={'ok': True, 'state': 'disabled', 'reason': str(exc)})
+            return None
+
+    def _check_nogo(self, monitor):
+        return monitor.check_pose(self.can.get_sensor_data())
 
     def _setup_socketio_events(self):
         """Definiert Socket.IO Event-Handler"""
@@ -476,6 +699,7 @@ class WebServer:
             'joystick_enabled': self.joystick.get_status().get('enabled', False),
             'sensor_data': self.can.get_sensor_data(),
             'navigation_status': self.navigation.get_status() if self.navigation else {'state': 'disabled'},
+            'plan_execution_status': self.get_plan_execution_status(),
             'mapping_status': self.mapping.get_status() if self.mapping else {'state': 'disabled'},
             'light_state': self.light_state,
             'light_enabled': self.light_config.enabled if self.light_config else False,

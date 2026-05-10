@@ -23,6 +23,8 @@ from .geometry import (
     xy_ring_to_latlon,
 )
 from .lane_planner import LanePlanner
+from .nogo_monitor import NoGoZoneMonitor
+from .plan_manager import MowingPlanManager
 
 
 class MappingRecorder:
@@ -41,6 +43,7 @@ class MappingRecorder:
         self._recording = False
         self._points: List[Dict[str, float]] = []
         self._last_error: Optional[str] = None
+        self.plans = MowingPlanManager(self.maps_dir, pose_provider)
 
     def start(self, clear: bool = True) -> Dict[str, Any]:
         with self._lock:
@@ -228,6 +231,25 @@ class MappingRecorder:
             sub_payloads,
             self._boundary_points,
         )
+
+    def save_plan(self, name: str, plan: Dict[str, Any]) -> Dict[str, Any]:
+        return self.plans.save_plan(name, plan)
+
+    def list_plans(self) -> List[Dict[str, Any]]:
+        return self.plans.list_plans()
+
+    def load_plan(self, name: str) -> Dict[str, Any]:
+        return self.plans.load_plan(name)
+
+    def check_plan(self, name: str, plan: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return self.plans.check_plan(name, plan)
+
+    def check_nogo(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            monitor = NoGoZoneMonitor(plan)
+            return monitor.check_pose(self.pose_provider())
+        except ValueError as exc:
+            return {"ok": True, "state": "disabled", "reason": str(exc)}
 
     def get_status(self) -> Dict[str, Any]:
         # Caller may already hold the lock; use only immutable snapshots.
