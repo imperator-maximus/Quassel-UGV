@@ -388,7 +388,8 @@ function generateLanePreview() {
         overlap_m: plannerNumber('plannerOverlap'),
         outer_margin_m: plannerNumber('plannerOuterMargin'),
         sub_margin_m: plannerNumber('plannerSubMargin'),
-        max_ring_turn_deg: plannerNumber('plannerMaxRingTurn')
+        max_ring_turn_deg: plannerNumber('plannerMaxRingTurn'),
+        sub_contour_count: plannerNumber('plannerSubContourCount')
     });
     setPlannerStatus('Bahnen werden berechnet...');
     fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan?${params}`)
@@ -417,12 +418,15 @@ function renderLanePreview(plan) {
     lanes.forEach(lane => {
         const latLngs = (lane.coordinates || []).map(coord => [coord[1], coord[0]]);
         if (latLngs.length < 2) return;
+        const subContour = lane.type === 'sub_contour';
         const layer = L.polyline(latLngs, {
-            color: '#ffe66d',
-            weight: 2,
+            color: subContour ? '#ffcf5a' : '#ffe66d',
+            weight: subContour ? 3 : 2,
             opacity: 0.95,
+            dashArray: subContour ? '10 4' : null,
         }).addTo(mapEditor);
-        layer.bindTooltip(`${lane.lane_index + 1}: ${lane.length_m} m`);
+        const label = subContour ? 'Sub-Kontur' : 'Ring';
+        layer.bindTooltip(`${label} ${lane.lane_index + 1}: ${lane.length_m} m`);
         lanePreviewLayers.push(layer);
         lanePreviewLaneLayers[lane.lane_index || 0] = layer;
     });
@@ -500,7 +504,8 @@ function renderLanePreview(plan) {
     const transitionText = unsafe > 0
         ? `${unsafe} unsichere Übergänge`
         : `${plan.transition_count || 0} geprüfte Übergänge ok`;
-    setPlannerStatus(`${plan.lane_count} Ringe · ${plan.rest_lane_count || 0} Restbahnen · ${transitionText} · ${formatArea(plan.mow_length_m || 0)} m Ringfahrt · ${formatArea(plan.rest_length_m || 0)} m Restfläche`);
+    const subContours = (plan.sequence || []).filter(segment => segment.type === 'sub_contour').length;
+    setPlannerStatus(`${plan.lane_count} Ringe · ${subContours} Sub-Konturen · ${plan.rest_lane_count || 0} Restbahnen · ${transitionText} · ${formatArea(plan.mow_length_m || 0)} m Ringfahrt · ${formatArea(plan.rest_length_m || 0)} m Restfläche`);
     setPlanStatus(planSummaryText(plan));
     refreshPlanButtons();
 }
@@ -956,6 +961,8 @@ function updateLaneProgress(percent) {
             detail.textContent = `${travelled} m / ${total} m · Übergang ${position.fromLaneIndex + 1} → ${position.toLaneIndex + 1}: ${laneTravelled} m / ${laneLength} m`;
         } else if (position.segmentType === 'rest_lane') {
             detail.textContent = `${travelled} m / ${total} m · Restbahn ${position.restIndex + 1} ${position.direction === 'reverse' ? 'rückwärts' : 'vorwärts'}: ${laneTravelled} m / ${laneLength} m`;
+        } else if (position.segmentType === 'sub_contour') {
+            detail.textContent = `${travelled} m / ${total} m · Sub-Kontur ${position.laneIndex + 1}: ${laneTravelled} m / ${laneLength} m`;
         } else {
             detail.textContent = `${travelled} m / ${total} m · Ring ${position.laneIndex + 1}: ${laneTravelled} m / ${laneLength} m`;
         }
@@ -965,6 +972,8 @@ function updateLaneProgress(percent) {
         tooltipPrefix = `Übergang ${position.fromLaneIndex + 1} → ${position.toLaneIndex + 1}`;
     } else if (position.segmentType === 'rest_lane') {
         tooltipPrefix = `Restbahn ${position.restIndex + 1} · ${position.direction === 'reverse' ? 'rückwärts' : 'vorwärts'}`;
+    } else if (position.segmentType === 'sub_contour') {
+        tooltipPrefix = `Sub-Kontur ${position.laneIndex + 1}`;
     }
     laneProgressMarker.bindTooltip(`${tooltipPrefix} · ${value.toFixed(1).replace('.', ',')}%`, {permanent: false});
 }
@@ -1045,10 +1054,12 @@ function highlightSequenceSegment(position) {
     lanePreviewLaneLayers.forEach((layer, index) => {
         if (!layer) return;
         const active = position.segmentType !== 'connector' && index === position.laneIndex;
+        const subContour = lanePreviewPlan && (lanePreviewPlan.lanes || [])[index]?.type === 'sub_contour';
         layer.setStyle({
-            color: active ? '#fff3a3' : '#ffe66d',
-            weight: active ? 5 : 2,
-            opacity: active ? 1.0 : 0.82
+            color: active ? '#fff3a3' : (subContour ? '#ffcf5a' : '#ffe66d'),
+            weight: active ? 5 : (subContour ? 3 : 2),
+            opacity: active ? 1.0 : 0.82,
+            dashArray: subContour ? '10 4' : null,
         });
         if (active) layer.bringToFront();
     });

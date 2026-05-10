@@ -16,6 +16,7 @@ class PlanParameters:
     outer_margin_m: float
     sub_margin_m: float
     max_ring_turn_deg: float
+    sub_contour_count: int
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -82,7 +83,7 @@ class MowingPlan:
         return {
             "success": True,
             "name": self.name,
-            "strategy": "hybrid_contour_rest_reverse_preview",
+            "strategy": "hybrid_contour_suboffset_rest_reverse",
             "parameters": self.parameters.to_dict(),
             "lane_count": len(lanes),
             "rest_lane_count": len(rest_lanes),

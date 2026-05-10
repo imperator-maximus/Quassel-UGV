@@ -201,6 +201,7 @@ class MappingRecorder:
         outer_margin_m: float = 0.0,
         sub_margin_m: float = 0.25,
         max_ring_turn_deg: float = 155.0,
+        sub_contour_count: int = 3,
     ) -> Dict[str, Any]:
         main_path = self._map_path(name)
         if not main_path.exists():
@@ -220,6 +221,7 @@ class MappingRecorder:
                 outer_margin_m=outer_margin_m,
                 sub_margin_m=sub_margin_m,
                 max_ring_turn_deg=max_ring_turn_deg,
+                sub_contour_count=sub_contour_count,
             )
         except ValueError as exc:
             return {"success": False, "error": str(exc)}

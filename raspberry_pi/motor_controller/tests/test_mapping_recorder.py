@@ -51,6 +51,7 @@ class MappingRecorderTests(unittest.TestCase):
                 overlap_m=0.1,
                 sub_margin_m=sub_margin_m,
                 max_ring_turn_deg=155.0,
+                sub_contour_count=3,
             )
         return recorder, main, sub, result
 
@@ -227,6 +228,7 @@ class MappingRecorderTests(unittest.TestCase):
             self.assertGreater(result["total_length_m"], 0.0)
             self.assertIn("spacing_m", result["parameters"])
             self.assertIn("max_ring_turn_deg", result["parameters"])
+            self.assertIn("sub_contour_count", result["parameters"])
             self.assertIn("coordinates", result["lanes"][0])
             self.assertIn("sequence", result)
             self.assertGreaterEqual(result["total_drive_length_m"], result["mow_length_m"])
@@ -242,7 +244,7 @@ class MappingRecorderTests(unittest.TestCase):
         _, _, _, result = self._plan_with_center_sub(sub_margin_m=0.25)
 
         self.assertTrue(result["success"])
-        self.assertEqual("hybrid_contour_rest_reverse_preview", result["strategy"])
+        self.assertEqual("hybrid_contour_suboffset_rest_reverse", result["strategy"])
         for key in [
             "parameters",
             "lane_count",
@@ -271,13 +273,17 @@ class MappingRecorderTests(unittest.TestCase):
             "outer_margin_m",
             "sub_margin_m",
             "max_ring_turn_deg",
+            "sub_contour_count",
         }, set(result["parameters"].keys()))
         self.assertEqual(result["lane_count"], len(result["lanes"]))
         self.assertEqual(result["rest_lane_count"], len(result["rest_lanes"]))
         self.assertEqual(result["transition_count"], len(result["transitions"]))
         self.assertEqual(result["lane_count"] + result["rest_lane_count"], len(result["sequence"]))
         self.assertGreater(result["lane_count"], 0)
-        self.assertGreater(result["rest_lane_count"], 0)
+        self.assertGreater(
+            len([segment for segment in result["sequence"] if segment["type"] in ("contour", "sub_contour")]),
+            0,
+        )
         self.assertGreater(result["transition_count"], 0)
 
         lane = result["lanes"][0]
@@ -286,11 +292,12 @@ class MappingRecorderTests(unittest.TestCase):
             self.assertIn(key, lane)
         self.assertGreaterEqual(len(lane["coordinates"]), 4)
 
-        rest_lane = result["rest_lanes"][0]
-        self.assertEqual("rest_lane", rest_lane["type"])
-        for key in ["segment_index", "rest_index", "rest_group", "direction", "coordinates", "length_m"]:
-            self.assertIn(key, rest_lane)
-        self.assertIn(rest_lane["direction"], ["forward", "reverse"])
+        if result["rest_lanes"]:
+            rest_lane = result["rest_lanes"][0]
+            self.assertEqual("rest_lane", rest_lane["type"])
+            for key in ["segment_index", "rest_index", "rest_group", "direction", "coordinates", "length_m"]:
+                self.assertIn(key, rest_lane)
+            self.assertIn(rest_lane["direction"], ["forward", "reverse"])
 
         transition = result["transitions"][0]
         self.assertEqual("transition", transition["type"])
@@ -335,7 +342,6 @@ class MappingRecorderTests(unittest.TestCase):
         LineString, Polygon = self._assert_shapely_available()
         recorder, main, sub, result = self._plan_with_center_sub(sub_margin_m=0.25)
         self.assertTrue(result["success"])
-        self.assertGreater(result["rest_lane_count"], 0)
         main_points = recorder._boundary_points(main)
         origin_lat = sum(point["latitude"] for point in main_points) / len(main_points)
         origin_lon = sum(point["longitude"] for point in main_points) / len(main_points)
@@ -348,6 +354,81 @@ class MappingRecorderTests(unittest.TestCase):
                 origin_lon,
             )]
             self.assertFalse(LineString(line_xy).intersects(sub_poly))
+
+    def test_sub_contours_are_planned_before_rest_lanes(self):
+        LineString, Polygon = self._assert_shapely_available()
+        recorder, main, sub, result = self._plan_with_center_sub(sub_margin_m=0.25)
+
+        self.assertTrue(result["success"])
+        sub_contours = [segment for segment in result["sequence"] if segment["type"] == "sub_contour"]
+        self.assertGreater(len(sub_contours), 0)
+        rest_indices = [
+            index for index, segment in enumerate(result["sequence"])
+            if segment["type"] == "rest_lane"
+        ]
+        if rest_indices:
+            self.assertLess(result["sequence"].index(sub_contours[0]), min(rest_indices))
+
+        main_points = recorder._boundary_points(main)
+        origin_lat = sum(point["latitude"] for point in main_points) / len(main_points)
+        origin_lon = sum(point["longitude"] for point in main_points) / len(main_points)
+        sub_poly = Polygon(project_points(recorder._boundary_points(sub), origin_lat, origin_lon)).buffer(0.25)
+        protected = sub_poly.buffer(result["parameters"]["cut_width_m"] / 2.0)
+        for sub_contour in sub_contours:
+            line_xy = [tuple(point) for point in project_points(
+                [{"longitude": coord[0], "latitude": coord[1]} for coord in sub_contour["coordinates"]],
+                origin_lat,
+                origin_lon,
+            )]
+            line = LineString(line_xy)
+            self.assertFalse(line.intersects(protected))
+            self.assertGreaterEqual(sub_contour["length_m"], 2.0)
+
+    def test_sub_contour_count_is_tunable(self):
+        self._assert_shapely_available()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = MappingRecorder(tmp, lambda: {})
+            self._write_square_map(tmp, recorder, "Brunnen", 0.0, 0.0, 20.0, 20.0)
+            self._write_square_map(tmp, recorder, "sub_Brunnen_Mitte", 8.0, 8.0, 12.0, 12.0)
+
+            without_sub_contours = recorder.plan_contour_lanes(
+                "Brunnen",
+                cut_width_m=0.5,
+                overlap_m=0.1,
+                sub_margin_m=0.25,
+                sub_contour_count=0,
+            )
+            one_sub_contour = recorder.plan_contour_lanes(
+                "Brunnen",
+                cut_width_m=0.5,
+                overlap_m=0.1,
+                sub_margin_m=0.25,
+                sub_contour_count=1,
+            )
+
+        self.assertTrue(without_sub_contours["success"])
+        self.assertTrue(one_sub_contour["success"])
+        self.assertEqual(0, without_sub_contours["parameters"]["sub_contour_count"])
+        self.assertEqual(1, one_sub_contour["parameters"]["sub_contour_count"])
+        self.assertEqual(0, len([
+            segment for segment in without_sub_contours["sequence"]
+            if segment["type"] == "sub_contour"
+        ]))
+        self.assertEqual(1, len([
+            segment for segment in one_sub_contour["sequence"]
+            if segment["type"] == "sub_contour"
+        ]))
+
+    def test_planner_does_not_emit_short_rest_lanes(self):
+        self._assert_shapely_available()
+        _, _, _, result = self._plan_with_center_sub(sub_margin_m=0.25)
+
+        self.assertTrue(result["success"])
+        self.assertEqual([], [
+            segment for segment in result["rest_lanes"]
+            if segment["length_m"] < 2.0
+        ])
 
     def test_transition_router_routes_around_sub(self):
         LineString, Polygon = self._assert_shapely_available()
@@ -489,7 +570,7 @@ class MappingRecorderTests(unittest.TestCase):
         self.assertEqual("reverse", executable[-1]["direction"])
         self.assertEqual(plan["sequence"][0]["coordinates"][-1], executable[-1]["coordinates"][0])
 
-    def test_tiny_rest_lanes_are_skipped_for_execution(self):
+    def test_tiny_rest_lanes_block_legacy_plan_execution(self):
         manager = MowingPlanManager("/tmp/maps", lambda: {"latitude": 52.0, "longitude": 10.0, "rtk_status": "RTK FIXED"})
         plan = self._sample_plan(reverse=False, unsafe=False)
         tiny = dict(plan["rest_lanes"][0])
@@ -498,13 +579,10 @@ class MappingRecorderTests(unittest.TestCase):
         plan["sequence"] = [plan["lanes"][0], tiny]
 
         result = manager.check_plan("Brunnen", plan)
-        executable = manager.executable_segments(plan)
 
-        self.assertTrue(result["success"])
+        self.assertFalse(result["success"])
         self.assertEqual(1, result["summary"]["short_rest_lane_count"])
-        self.assertIn("sehr kurze Restbahn", result["warnings"][0])
-        self.assertEqual(["positioning", "mow"], [item["type"] for item in executable])
-        self.assertEqual("contour", executable[-1]["source_type"])
+        self.assertIn("sehr kurze Restbahn", result["errors"][0])
 
     def test_invalid_plan_never_sets_navigation_commands(self):
         class FakeNavigation:
@@ -606,7 +684,7 @@ class MappingRecorderTests(unittest.TestCase):
         return {
             "success": True,
             "name": "Brunnen",
-            "strategy": "hybrid_contour_rest_reverse_preview",
+            "strategy": "hybrid_contour_suboffset_rest_reverse",
             "parameters": {
                 "cut_width_m": 0.45,
                 "overlap_m": 0.1,
@@ -614,6 +692,7 @@ class MappingRecorderTests(unittest.TestCase):
                 "outer_margin_m": 0.0,
                 "sub_margin_m": 0.25,
                 "max_ring_turn_deg": 155.0,
+                "sub_contour_count": 3,
             },
             "lane_count": 1,
             "rest_lane_count": 1,

@@ -13,7 +13,7 @@ class MowingPlanManager:
     """Stores generated mowing plans and converts them into executable steps."""
 
     SCHEMA = "raspberrycan.mowing_plan.v1"
-    MIN_EXECUTABLE_REST_LANE_M = 2.0
+    MIN_PLANNED_REST_LANE_M = 2.0
 
     def __init__(self, maps_dir: str, pose_provider: Optional[Callable[[], Dict[str, Any]]] = None):
         self.maps_dir = Path(maps_dir).expanduser()
@@ -88,8 +88,8 @@ class MowingPlanManager:
         if summary["reverse_segment_count"] > 0 and not self.reverse_track_supported:
             errors.append("Plan enthält Rückwärtssegmente, Ausführung noch nicht unterstützt")
         if summary["short_rest_lane_count"] > 0:
-            warnings.append(
-                f"{summary['short_rest_lane_count']} sehr kurze Restbahn(en) werden bei der Ausführung übersprungen"
+            errors.append(
+                f"Plan enthält {summary['short_rest_lane_count']} sehr kurze Restbahn(en); bitte neu planen"
             )
 
         pose = self._current_pose()
@@ -138,7 +138,7 @@ class MowingPlanManager:
 
         sequence = [
             item for item in plan.get("sequence") or []
-            if self._coords(item) and self._is_executable_sequence_segment(item)
+            if self._coords(item)
         ]
         if start_segment_index is not None:
             try:
@@ -400,16 +400,6 @@ class MowingPlanManager:
     def _coords(segment: Dict[str, Any]) -> List[List[float]]:
         return [coord for coord in (segment.get("coordinates") or []) if isinstance(coord, list) and len(coord) >= 2]
 
-    @classmethod
-    def _is_executable_sequence_segment(cls, segment: Dict[str, Any]) -> bool:
-        if segment.get("type") != "rest_lane":
-            return True
-        try:
-            length_m = float(segment.get("length_m", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            length_m = 0.0
-        return length_m >= cls.MIN_EXECUTABLE_REST_LANE_M
-
     @staticmethod
     def _point(coord: List[float]) -> Dict[str, float]:
         return {"longitude": float(coord[0]), "latitude": float(coord[1])}
@@ -435,5 +425,13 @@ class MowingPlanManager:
     def _short_rest_lane_count(cls, plan: Dict[str, Any]) -> int:
         return len([
             item for item in plan.get("sequence") or []
-            if item.get("type") == "rest_lane" and not cls._is_executable_sequence_segment(item)
+            if item.get("type") == "rest_lane"
+            and cls._segment_length_m(item) < cls.MIN_PLANNED_REST_LANE_M
         ])
+
+    @staticmethod
+    def _segment_length_m(segment: Dict[str, Any]) -> float:
+        try:
+            return float(segment.get("length_m", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
