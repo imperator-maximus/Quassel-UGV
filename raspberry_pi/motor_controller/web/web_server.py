@@ -7,6 +7,7 @@ REST API + WebSocket für UGV-Steuerung
 import logging
 import threading
 import time
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -71,6 +72,11 @@ class WebServer:
         self._plan_lock = threading.Lock()
         self._plan_thread: Optional[threading.Thread] = None
         self._plan_stop_event = threading.Event()
+        self._plan_pause_event = threading.Event()
+        self._active_executable_segments = []
+        self._active_plan_map_name = None
+        self._active_plan_summary = {}
+        self._last_resume_save = 0.0
         self._plan_status = {
             'running': False,
             'state': 'idle',
@@ -464,7 +470,12 @@ class WebServer:
                 return jsonify({'error': 'Mapping deaktiviert'}), 503
             data = request.get_json(silent=True) or {}
             plan = data.get('plan') if isinstance(data, dict) else None
-            result = self.mapping.check_plan(map_name, plan=plan)
+            result = self.mapping.check_plan(
+                map_name,
+                plan=plan,
+                start_segment_index=data.get('start_segment_index'),
+                start_pose=self.can.get_sensor_data(),
+            )
             return jsonify(result), 200 if result.get('success') else 400
 
         @self.app.route('/api/mapping/maps/<map_name>/plan/nogo-check', methods=['POST', 'OPTIONS'])
@@ -491,13 +502,33 @@ class WebServer:
                 return ('', 204)
             if not self.mapping:
                 return jsonify({'error': 'Mapping deaktiviert'}), 503
-            result = self.mapping.check_plan(map_name)
+            data = request.get_json(silent=True) or {}
+            resume = bool(data.get('resume', False))
+            if resume:
+                resume_started = self.resume_plan_execution(map_name)
+                if resume_started.get('success'):
+                    return jsonify(resume_started), 200
+            result = self.mapping.check_plan(
+                map_name,
+                start_segment_index=data.get('start_segment_index'),
+                start_pose=self.can.get_sensor_data(),
+            )
             if not result.get('success'):
                 return jsonify({'success': False, 'error': 'Planprüfung fehlgeschlagen', **result}), 400
             loaded = self.mapping.load_plan(map_name)
             plan = loaded.get('plan') if loaded.get('success') else None
             started = self.start_plan_execution(result.get('executable_segments', []), result.get('summary') or {}, plan)
             return jsonify(started), 200 if started.get('success') else 409
+
+        @self.app.route('/api/mapping/maps/<map_name>/plan/pause', methods=['POST', 'OPTIONS'])
+        def api_mapping_map_plan_pause(map_name):
+            """Pausiert die Plan-Ausführung und hält einen Resume-Punkt."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'error': 'Mapping deaktiviert'}), 503
+            self.pause_plan_execution(reason='paused')
+            return jsonify({'success': True, 'plan_execution_status': self.get_plan_execution_status()})
 
         @self.app.route('/api/navigation/stop', methods=['POST', 'OPTIONS'])
         def api_navigation_stop():
@@ -506,7 +537,7 @@ class WebServer:
                 return ('', 204)
             if not self.navigation:
                 return jsonify({'error': 'Navigation deaktiviert'}), 503
-            self.stop_plan_execution()
+            self.stop_plan_execution(clear_resume=True)
             self.navigation.stop()
             return jsonify({'success': True, **self.navigation.get_status()})
 
@@ -519,6 +550,10 @@ class WebServer:
             if self._plan_status.get('running'):
                 return {'success': False, 'error': 'Plan-Ausführung läuft bereits'}
             self._plan_stop_event.clear()
+            self._plan_pause_event.clear()
+            self._active_executable_segments = list(executable_segments)
+            self._active_plan_map_name = summary.get('map_name')
+            self._active_plan_summary = dict(summary)
             self._plan_status = {
                 'running': True,
                 'state': 'running',
@@ -536,19 +571,42 @@ class WebServer:
             self._plan_thread.start()
         return {'success': True, 'plan_execution_status': self.get_plan_execution_status()}
 
-    def stop_plan_execution(self):
+    def resume_plan_execution(self, map_name):
+        resume = self._load_resume_state(map_name)
+        if not resume:
+            return {'success': False, 'error': 'Kein Resume-Punkt vorhanden'}
+        segments = self._resume_segments_from_state(resume)
+        return self.start_plan_execution(segments, resume.get('summary') or {'map_name': map_name}, plan=resume.get('plan'))
+
+    def pause_plan_execution(self, reason='paused'):
+        self._plan_pause_event.set()
+        self._save_resume_state(reason=reason)
+        with self._plan_lock:
+            if self._plan_status.get('running'):
+                self._plan_status['state'] = reason
+                self._plan_status['running'] = False
+        if self.navigation:
+            self.navigation.stop(reason=reason)
+
+    def stop_plan_execution(self, clear_resume=False):
         self._plan_stop_event.set()
+        self._plan_pause_event.clear()
         with self._plan_lock:
             if self._plan_status.get('running'):
                 self._plan_status['state'] = 'stopping'
         if self.navigation:
             self.navigation.stop(reason='plan_stopped')
+        if clear_resume and self._active_plan_map_name:
+            self._delete_resume_state(self._active_plan_map_name)
 
     def get_plan_execution_status(self):
         with self._plan_lock:
             status = dict(self._plan_status)
             if isinstance(status.get('current_segment'), dict):
                 status['current_segment'] = dict(status['current_segment'])
+            if self._active_plan_map_name:
+                resume_path = self._resume_path(self._active_plan_map_name)
+                status['resume_available'] = bool(resume_path and resume_path.exists())
             return status
 
     def _run_plan_segments(self, executable_segments, plan):
@@ -561,6 +619,9 @@ class WebServer:
             for index, segment in enumerate(executable_segments):
                 if self._plan_stop_event.is_set():
                     self._set_plan_status(running=False, state='stopped', active_index=index)
+                    return
+                if self._plan_pause_event.is_set():
+                    self._set_plan_status(running=False, state='paused', active_index=index)
                     return
                 coords = segment.get('coordinates') or []
                 waypoints = [{'longitude': coord[0], 'latitude': coord[1]} for coord in coords]
@@ -575,6 +636,7 @@ class WebServer:
                     current_segment={
                         'type': segment.get('type'),
                         'source_type': segment.get('source_type'),
+                        'source_index': segment.get('source_index'),
                         'mode': mode,
                         'direction': direction,
                         'route_kind': segment.get('route_kind'),
@@ -586,6 +648,8 @@ class WebServer:
                     raise RuntimeError(self.navigation.get_status().get('last_error') or 'Navigation konnte nicht starten')
                 if not self._wait_for_navigation_segment(nogo_monitor):
                     return
+            if self._active_plan_map_name:
+                self._delete_resume_state(self._active_plan_map_name)
             self._set_plan_status(running=False, state='completed', active_index=len(executable_segments), current_segment=None)
         except Exception as exc:
             self.logger.error('Plan-Ausführung fehlgeschlagen: %s', exc)
@@ -595,8 +659,15 @@ class WebServer:
 
     def _wait_for_navigation_segment(self, nogo_monitor=None):
         while not self._plan_stop_event.is_set():
+            if self._plan_pause_event.is_set():
+                self._save_resume_state(reason='paused')
+                if self.navigation:
+                    self.navigation.stop(reason='paused')
+                self._set_plan_status(running=False, state='paused')
+                return False
             if not self._rtk_available():
                 message = 'RTK verloren - Plan-Ausführung gestoppt'
+                self._save_resume_state(reason='rtk_lost')
                 if self.navigation:
                     self.navigation.stop(reason='rtk_lost')
                 self._set_plan_status(running=False, state='rtk_lost', last_error=message)
@@ -626,6 +697,9 @@ class WebServer:
     def _set_plan_status(self, **updates):
         with self._plan_lock:
             self._plan_status.update(updates)
+            should_save = bool(self._plan_status.get('running'))
+        if should_save:
+            self._save_resume_state(reason='running')
 
     def _rtk_available(self):
         if not self.mapping:
@@ -642,6 +716,121 @@ class WebServer:
 
     def _check_nogo(self, monitor):
         return monitor.check_pose(self.can.get_sensor_data())
+
+    def _resume_path(self, map_name):
+        if not self.mapping:
+            return None
+        return self.mapping.plans.plans_dir / f"{self.mapping.plans._sanitize_name(map_name)}.resume.json"
+
+    def _save_resume_state(self, reason='running'):
+        now = time.time()
+        if reason == 'running' and now - self._last_resume_save < 2.0:
+            return
+        self._last_resume_save = now
+        map_name = self._active_plan_map_name
+        if not map_name or not self._active_executable_segments:
+            return
+        status = self.get_plan_execution_status()
+        pose = self.can.get_sensor_data()
+        payload = {
+            'map_name': map_name,
+            'reason': reason,
+            'timestamp': time.time(),
+            'active_index': int(status.get('active_index') or 0),
+            'current_segment': status.get('current_segment'),
+            'pose': pose,
+            'summary': self._active_plan_summary,
+            'executable_segments': self._active_executable_segments,
+        }
+        loaded = self.mapping.load_plan(map_name) if self.mapping else {}
+        if loaded.get('success'):
+            payload['plan'] = loaded.get('plan')
+        path = self._resume_path(map_name)
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+        except Exception as exc:
+            self.logger.warning('Resume-State konnte nicht gespeichert werden: %s', exc)
+
+    def _load_resume_state(self, map_name):
+        path = self._resume_path(map_name)
+        if path is None or not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding='utf-8'))
+        except Exception as exc:
+            self.logger.warning('Resume-State konnte nicht gelesen werden: %s', exc)
+            return None
+
+    def _delete_resume_state(self, map_name):
+        path = self._resume_path(map_name)
+        if path and path.exists():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    def _resume_segments_from_state(self, resume):
+        segments = list(resume.get('executable_segments') or [])
+        active_index = max(0, int(resume.get('active_index') or 0))
+        remaining = segments[active_index:]
+        if not remaining:
+            return segments
+        pose = resume.get('pose') or {}
+        remaining[0] = self._trim_segment_from_pose(dict(remaining[0]), pose)
+        return remaining
+
+    def _trim_segment_from_pose(self, segment, pose):
+        coords = segment.get('coordinates') or []
+        if segment.get('mode') != 'track' or len(coords) < 2:
+            return segment
+        parsed = self._pose_lonlat(pose)
+        if parsed is None:
+            return segment
+        current = [parsed[0], parsed[1]]
+        best_index = self._nearest_polyline_segment(coords, current)
+        if best_index is None:
+            return segment
+        segment['coordinates'] = [current] + coords[best_index + 1:]
+        if len(segment['coordinates']) < 2:
+            segment['coordinates'] = coords
+        return segment
+
+    @staticmethod
+    def _pose_lonlat(pose):
+        if not isinstance(pose, dict):
+            return None
+        gps = pose.get('gps') if isinstance(pose.get('gps'), dict) else {}
+        lat = pose.get('latitude', pose.get('lat', gps.get('lat', gps.get('latitude'))))
+        lon = pose.get('longitude', pose.get('lon', pose.get('lng', gps.get('lon', gps.get('lng', gps.get('longitude'))))))
+        try:
+            return float(lon), float(lat)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _nearest_polyline_segment(coords, point):
+        best = None
+        px, py = point
+        for index in range(len(coords) - 1):
+            ax, ay = coords[index]
+            bx, by = coords[index + 1]
+            dx = bx - ax
+            dy = by - ay
+            denom = dx * dx + dy * dy
+            if denom <= 1e-18:
+                t = 0.0
+            else:
+                t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / denom))
+            qx = ax + dx * t
+            qy = ay + dy * t
+            dist = (px - qx) ** 2 + (py - qy) ** 2
+            candidate = (dist, index)
+            if best is None or candidate < best:
+                best = candidate
+        return None if best is None else best[1]
 
     def _setup_socketio_events(self):
         """Definiert Socket.IO Event-Handler"""

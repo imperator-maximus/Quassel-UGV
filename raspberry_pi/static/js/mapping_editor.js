@@ -22,6 +22,10 @@ var vehicleHeadingLine = null;
 var savedPlans = [];
 var loadedPlanReady = false;
 var rtkAvailable = false;
+var planUiMode = 'map';
+var activePlanName = '';
+var planIsRunning = false;
+var planResumeAvailable = false;
 var selectedPointIndex = null;
 var manualPointDragIndex = null;
 
@@ -526,6 +530,33 @@ function clearLanePreview(resetStatus = true) {
     refreshPlanButtons();
 }
 
+function saveLanePlan() {
+    if (!activeMapName || !lanePreviewPlan) {
+        setPlannerStatus('Kein berechneter Plan zum Speichern');
+        return;
+    }
+    fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan/save`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({plan: lanePreviewPlan})
+    })
+        .then(parseJsonResponse)
+        .then(result => {
+            if (!result.ok || !result.data.success) {
+                setPlannerStatus(result.data.error || 'Plan speichern fehlgeschlagen');
+                return;
+            }
+            setLoadedPlanReady(true);
+            setPlannerStatus(`Plan gespeichert · ${planSummaryText(result.data.summary || result.data.plan || lanePreviewPlan)}`);
+            refreshPlanList().then(() => {
+                const select = document.getElementById('planSelect');
+                if (select) select.value = activeMapName;
+            });
+            refreshPlanButtons();
+        })
+        .catch(error => setPlannerStatus(error.message));
+}
+
 function refreshPlanList() {
     return fetch('/api/mapping/plans')
         .then(response => response.json())
@@ -573,12 +604,16 @@ function loadSavedPlan() {
                 loadMap(mapName).then(() => {
                     renderLanePreview(result.data.plan);
                     setLoadedPlanReady(true);
+                    planResumeAvailable = savedPlans.some(plan => plan.map_name === mapName && plan.resume_available === true);
+                    enterPlanUiMode(mapName);
                     refreshPlanButtons();
                     refreshNoGoCheck(mapName, result.data.plan);
                 });
             } else {
                 renderLanePreview(result.data.plan);
                 setLoadedPlanReady(true);
+                planResumeAvailable = savedPlans.some(plan => plan.map_name === mapName && plan.resume_available === true);
+                enterPlanUiMode(mapName);
                 refreshPlanButtons();
                 refreshNoGoCheck(mapName, result.data.plan);
             }
@@ -610,10 +645,12 @@ function playLoadedPlan() {
     if (!confirm('Plan wirklich starten? Der Mäher/Fahrantrieb darf nur unter Aufsicht ausgeführt werden.')) {
         return;
     }
+    const useResume = planResumeAvailable === true;
+    const startSegmentIndex = useResume ? null : selectedStartSegmentIndex();
     fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan/check`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({plan: lanePreviewPlan})
+        body: JSON.stringify({plan: lanePreviewPlan, start_segment_index: startSegmentIndex})
     })
     .then(response => response.json().then(data => ({ok: response.ok, data})))
     .then(result => {
@@ -624,10 +661,17 @@ function playLoadedPlan() {
             setPlanStatus(`Play blockiert · ${planSummaryText(result.data.summary || lanePreviewPlan)}${detail ? ' · ' + detail : ''}`);
             return;
         }
-        return fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan/execute`, {method: 'POST'})
+        return fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan/execute`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({start_segment_index: startSegmentIndex, resume: useResume})
+        })
             .then(response => response.json().then(data => ({ok: response.ok, data})))
             .then(executeResult => {
                 if (executeResult.ok && executeResult.data.success) {
+                    planIsRunning = true;
+                    updateMapModeButton();
+                    updateMapsSectionTitle();
                     setPlanStatus('Plan gestartet');
                     return;
                 }
@@ -639,13 +683,55 @@ function playLoadedPlan() {
     });
 }
 
+function pausePlanExecution() {
+    if (!activeMapName) return;
+    fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan/pause`, {method: 'POST'})
+        .then(response => response.json().then(data => ({ok: response.ok, data})))
+        .then(result => {
+            planIsRunning = false;
+            planResumeAvailable = true;
+            updateMapModeButton();
+            updateMapsSectionTitle();
+            setPlanStatus(result.ok ? 'Pause gesetzt' : (result.data.error || 'Pause fehlgeschlagen'));
+        })
+        .catch(error => setPlanStatus(error.message));
+}
+
 function stopPlanExecution() {
     fetch('/api/navigation/stop', {method: 'POST'})
         .then(response => response.json().then(data => ({ok: response.ok, data})))
         .then(result => {
+            planIsRunning = false;
+            planResumeAvailable = false;
+            updateMapModeButton();
+            updateMapsSectionTitle();
             setPlanStatus(result.ok ? 'Stop gesendet' : (result.data.error || 'Stop fehlgeschlagen'));
         })
         .catch(error => setPlanStatus(error.message));
+}
+
+function enterPlanUiMode(planName) {
+    planUiMode = 'plan';
+    activePlanName = planName || activeMapName || '';
+    document.querySelectorAll('.map-edit-control').forEach(el => el.classList.add('map-mode-hidden'));
+    document.getElementById('mapsScreen')?.classList.add('plan-mode');
+    document.getElementById('mapsScreen')?.classList.toggle('plan-driving', planIsRunning);
+    updateMapModeButton();
+    updateMapsSectionTitle();
+}
+
+function returnToMapEditMode() {
+    if (planIsRunning) {
+        setPlanStatus('Kartenmodus erst nach Stop möglich');
+        return;
+    }
+    planUiMode = 'map';
+    activePlanName = '';
+    document.querySelectorAll('.map-edit-control').forEach(el => el.classList.remove('map-mode-hidden'));
+    document.getElementById('mapsScreen')?.classList.remove('plan-mode');
+    document.getElementById('mapsScreen')?.classList.remove('plan-driving');
+    updateMapModeButton();
+    updateMapsSectionTitle();
 }
 
 function setLoadedPlanReady(ok) {
@@ -655,6 +741,34 @@ function setLoadedPlanReady(ok) {
 function refreshPlanButtons() {
     const playBtn = document.getElementById('planPlayBtn');
     if (playBtn) playBtn.disabled = !activeMapName || !lanePreviewPlan || !loadedPlanReady || !rtkAvailable;
+    const saveBtn = document.getElementById('planSaveBtn');
+    if (saveBtn) saveBtn.disabled = !activeMapName || !lanePreviewPlan || loadedPlanReady;
+    const pauseBtn = document.getElementById('planPauseBtn');
+    if (pauseBtn) pauseBtn.disabled = !planIsRunning;
+    updateMapModeButton();
+}
+
+function updateMapModeButton() {
+    const btn = document.getElementById('mapEditModeBtn');
+    if (btn) btn.disabled = planUiMode !== 'plan' || planIsRunning;
+}
+
+function updateMapsSectionTitle() {
+    const title = document.getElementById('mapsSectionTitle');
+    if (!title) return;
+    document.getElementById('mapsScreen')?.classList.toggle('plan-driving', planIsRunning);
+    document.getElementById('mapsScreen')?.classList.toggle('plan-mode', planUiMode === 'plan' || planIsRunning);
+    if (mapEditor) {
+        setTimeout(() => mapEditor.invalidateSize(), 50);
+    }
+    if (planIsRunning) {
+        const name = activePlanName || activeMapName || 'Plan';
+        title.innerHTML = `<span class="drive-title"><span class="drive-indicator"></span><span>Fahre ${escapeHtml(name)}</span></span>`;
+        return;
+    }
+    title.textContent = planUiMode === 'plan' && activePlanName
+        ? `Plan ${activePlanName}`
+        : 'Kartenverwaltung';
 }
 
 function setPlanStatus(message) {
@@ -697,7 +811,17 @@ function updateVehiclePose(sensorData, navigationStatus, planExecutionStatus) {
     }
     const nav = navigationStatus || {};
     const plan = planExecutionStatus || {};
+    planIsRunning = plan.running === true || plan.state === 'running';
+    planResumeAvailable = plan.resume_available === true || ['paused', 'rtk_lost'].includes(plan.state || '');
+    if (planIsRunning && planUiMode !== 'plan') {
+        enterPlanUiMode((plan.summary && plan.summary.map_name) || activePlanName || activeMapName || 'Plan');
+    }
+    updateMapModeButton();
+    updateMapsSectionTitle();
     updateNoGoStatus(plan.nogo_status);
+    if (planIsRunning && plan.current_segment && plan.current_segment.source_index !== undefined) {
+        updateLaneProgressForSegment(plan.current_segment.source_index);
+    }
     if (plan.state && plan.state !== 'idle') {
         const segment = plan.current_segment || {};
         const progress = `${plan.active_index || 0}/${plan.total || 0}`;
@@ -705,6 +829,40 @@ function updateVehiclePose(sensorData, navigationStatus, planExecutionStatus) {
     } else if (nav.state && nav.state !== 'idle') {
         setPlanStatus(`Navigation ${nav.state} · ${nav.mode || ''} ${nav.direction || ''}`.trim());
     }
+}
+
+function selectedStartSegmentIndex() {
+    if (!lanePreviewPlan) return null;
+    const slider = document.getElementById('laneProgressSlider');
+    const fraction = Number(slider?.value || 0) / 100;
+    const position = pointAtPlanProgress(lanePreviewPlan, fraction);
+    return position && position.segmentIndex !== undefined ? position.segmentIndex : null;
+}
+
+function updateLaneProgressForSegment(segmentIndex) {
+    if (!lanePreviewPlan) return;
+    const sequence = ((lanePreviewPlan.sequence && lanePreviewPlan.sequence.length) ? lanePreviewPlan.sequence : (lanePreviewPlan.lanes || []))
+        .filter(segment => (segment.coordinates || []).length >= 2);
+    const total = sequence.reduce((sum, segment) => sum + Number(segment.length_m || 0), 0);
+    if (total <= 0) return;
+    let travelled = 0;
+    for (const segment of sequence) {
+        if (Number(segment.segment_index || 0) >= Number(segmentIndex)) {
+            break;
+        }
+        travelled += Number(segment.length_m || 0);
+    }
+    updateLaneProgress((travelled / total) * 100);
+}
+
+function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, char => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    })[char]);
 }
 
 function updateNoGoStatus(nogoStatus) {
@@ -1028,11 +1186,14 @@ window.MappingEditor = {
     deleteSelectedMap,
     deleteSelectedPoint,
     generateLanePreview,
+    saveLanePlan,
     clearLanePreview,
     updateLaneProgress,
     refreshPlanList,
     loadSavedPlan,
     playLoadedPlan,
+    pausePlanExecution,
     stopPlanExecution,
+    returnToMapEditMode,
     updateVehiclePose,
 };

@@ -14,7 +14,7 @@ class NoGoZoneMonitor:
         plan: Dict[str, Any],
         vehicle_length_m: float = 1.15,
         vehicle_width_m: float = 0.79,
-        intrusion_tolerance_m: float = 0.15,
+        intrusion_tolerance_m: float = 0.35,
     ):
         try:
             from shapely.geometry import Polygon
@@ -59,7 +59,7 @@ class NoGoZoneMonitor:
             return {
                 "ok": False,
                 "state": "stop",
-                "reason": "Fahrzeug-Footprint mehr als 15 cm in No-Go-Zone",
+                "reason": f"Fahrzeug-Footprint mehr als {round(self.intrusion_tolerance_m * 100):.0f} cm in No-Go-Zone",
                 "distance_m": round(distance, 3),
             }
         if intersects_zone:

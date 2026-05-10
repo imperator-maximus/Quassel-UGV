@@ -4,7 +4,7 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .geometry import distance_m
 
@@ -13,6 +13,7 @@ class MowingPlanManager:
     """Stores generated mowing plans and converts them into executable steps."""
 
     SCHEMA = "raspberrycan.mowing_plan.v1"
+    MIN_EXECUTABLE_REST_LANE_M = 2.0
 
     def __init__(self, maps_dir: str, pose_provider: Optional[Callable[[], Dict[str, Any]]] = None):
         self.maps_dir = Path(maps_dir).expanduser()
@@ -31,6 +32,7 @@ class MowingPlanManager:
                     "map_name": payload.get("map_name", path.name[:-10]),
                     "path": str(path),
                     "created_at": payload.get("created_at"),
+                    "resume_available": (self.plans_dir / f"{path.name[:-10]}.resume.json").exists(),
                     "segment_count": len(payload.get("sequence") or []),
                     "unsafe_transition_count": self._unsafe_transition_count(payload),
                     "reverse_segment_count": self._reverse_segment_count(payload),
@@ -64,7 +66,13 @@ class MowingPlanManager:
             return {"success": False, "error": "Unbekanntes Planformat"}
         return {"success": True, "path": str(path), "plan": payload, "summary": self.summarize_plan(payload)}
 
-    def check_plan(self, map_name: str, plan: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def check_plan(
+        self,
+        map_name: str,
+        plan: Optional[Dict[str, Any]] = None,
+        start_segment_index: Optional[int] = None,
+        start_pose: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         loaded = {"plan": plan} if plan is not None else self.load_plan(map_name)
         if loaded.get("success") is False:
             return loaded
@@ -79,6 +87,10 @@ class MowingPlanManager:
             errors.append("Plan enthält unsichere Übergänge")
         if summary["reverse_segment_count"] > 0 and not self.reverse_track_supported:
             errors.append("Plan enthält Rückwärtssegmente, Ausführung noch nicht unterstützt")
+        if summary["short_rest_lane_count"] > 0:
+            warnings.append(
+                f"{summary['short_rest_lane_count']} sehr kurze Restbahn(en) werden bei der Ausführung übersprungen"
+            )
 
         pose = self._current_pose()
         if pose is None:
@@ -98,7 +110,11 @@ class MowingPlanManager:
         executable = []
         if not errors:
             try:
-                executable = self.executable_segments(payload)
+                executable = self.executable_segments(
+                    payload,
+                    start_segment_index=start_segment_index,
+                    start_pose=start_pose or pose,
+                )
             except ValueError as exc:
                 errors.append(str(exc))
 
@@ -111,42 +127,88 @@ class MowingPlanManager:
             "executable_segments": executable,
         }
 
-    def executable_segments(self, plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def executable_segments(
+        self,
+        plan: Dict[str, Any],
+        start_segment_index: Optional[int] = None,
+        start_pose: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         if self._unsafe_transition_count(plan) > 0:
             raise ValueError("Unsafe transitions blockieren die Ausführung")
 
-        sequence = [item for item in plan.get("sequence") or [] if self._coords(item)]
-        transitions_by_from = {
-            item.get("from_segment_index"): item
+        sequence = [
+            item for item in plan.get("sequence") or []
+            if self._coords(item) and self._is_executable_sequence_segment(item)
+        ]
+        if start_segment_index is not None:
+            try:
+                start_index = int(start_segment_index)
+            except (TypeError, ValueError):
+                raise ValueError("start_segment_index muss eine Zahl sein")
+            sequence = [
+                item for item in sequence
+                if int(item.get("segment_index", -1)) >= start_index
+            ]
+            if not sequence:
+                raise ValueError("Startsegment liegt außerhalb des Plans")
+        transitions_by_pair = {
+            (item.get("from_segment_index"), item.get("to_segment_index")): item
             for item in plan.get("transitions") or []
         }
         executable: List[Dict[str, Any]] = []
         current_end = None
+        previous_index = None
+        start_coord = self._pose_coord(start_pose)
 
         for segment in sequence:
-            coords = self._coords(segment)
+            coords = self._oriented_track_coords(segment, current_end or start_coord)
+            if current_end is None and start_coord is not None:
+                trimmed = self._trim_coords_from_point(coords, start_coord, max_distance_m=1.5)
+                if trimmed is not None:
+                    coords = trimmed
             start = coords[0]
-            if current_end is None or distance_m(self._point(current_end), self._point(start)) > 0.05:
-                executable.append({
-                    "type": "positioning",
-                    "source_type": segment.get("type"),
-                    "mode": "goto",
-                    "direction": "forward",
-                    "coordinates": [start],
-                    "length_m": 0.0,
-                })
+            if current_end is None:
+                if start_coord is None or self._coord_distance_m(start_coord, start) > 0.05:
+                    executable.append({
+                        "type": "positioning",
+                        "source_type": segment.get("type"),
+                        "mode": "goto",
+                        "direction": "forward",
+                        "coordinates": [start],
+                        "length_m": 0.0,
+                    })
+            elif self._coord_distance_m(current_end, start) > 0.05:
+                executable.append(self._transfer_segment(
+                    transitions_by_pair.get((previous_index, segment.get("segment_index"))),
+                    current_end,
+                    start,
+                ))
 
-            executable.append(self._track_segment(segment))
+            executable.append(self._track_segment(segment, coordinates=coords))
             current_end = coords[-1]
-
-            transition = transitions_by_from.get(segment.get("segment_index"))
-            if transition is not None:
-                executable.append(self._transition_segment(transition))
-                transition_coords = self._coords(transition)
-                if transition_coords:
-                    current_end = transition_coords[-1]
+            previous_index = segment.get("segment_index")
 
         return executable
+
+    def _transfer_segment(
+        self,
+        transition: Optional[Dict[str, Any]],
+        from_coord: List[float],
+        to_coord: List[float],
+    ) -> Dict[str, Any]:
+        if transition is not None:
+            segment = self._transition_segment(transition, from_coord=from_coord, to_coord=to_coord)
+            if segment is not None:
+                return segment
+        return {
+            "type": "positioning",
+            "source_type": "transfer",
+            "mode": "goto",
+            "direction": "forward",
+            "coordinates": [to_coord],
+            "length_m": self._coord_distance_m(from_coord, to_coord),
+            "route_kind": "direct_reposition",
+        }
 
     def summarize_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -155,10 +217,11 @@ class MowingPlanManager:
             "transition_count": len(plan.get("transitions") or []),
             "unsafe_transition_count": self._unsafe_transition_count(plan),
             "reverse_segment_count": self._reverse_segment_count(plan),
+            "short_rest_lane_count": self._short_rest_lane_count(plan),
             "total_drive_length_m": round(float(plan.get("total_drive_length_m", plan.get("total_length_m", 0.0)) or 0.0), 2),
         }
 
-    def _track_segment(self, segment: Dict[str, Any]) -> Dict[str, Any]:
+    def _track_segment(self, segment: Dict[str, Any], coordinates: Optional[List[List[float]]] = None) -> Dict[str, Any]:
         direction = "forward"
         if segment.get("type") == "rest_lane":
             direction = segment.get("direction", "forward")
@@ -170,17 +233,30 @@ class MowingPlanManager:
             "source_index": segment.get("segment_index"),
             "mode": "track",
             "direction": direction,
-            "coordinates": self._coords(segment),
+            "coordinates": coordinates or self._coords(segment),
             "length_m": float(segment.get("length_m", 0.0) or 0.0),
         }
 
-    def _transition_segment(self, transition: Dict[str, Any]) -> Dict[str, Any]:
+    def _transition_segment(
+        self,
+        transition: Dict[str, Any],
+        from_coord: Optional[List[float]] = None,
+        to_coord: Optional[List[float]] = None,
+    ) -> Optional[Dict[str, Any]]:
         if transition.get("safe") is not True:
             raise ValueError("Unsafe transitions blockieren die Ausführung")
         route_kind = transition.get("route_kind", "direct")
         if route_kind not in ("direct", "around_sub"):
             raise ValueError(f"Unbekannte Transition-Route: {route_kind}")
         coords = self._coords(transition)
+        if from_coord is not None and to_coord is not None and len(coords) >= 2:
+            direct = self._coord_distance_m(coords[0], from_coord) + self._coord_distance_m(coords[-1], to_coord)
+            reverse = self._coord_distance_m(coords[-1], from_coord) + self._coord_distance_m(coords[0], to_coord)
+            if reverse < direct:
+                coords = list(reversed(coords))
+                direct = reverse
+            if direct > 1.0:
+                return None
         return {
             "type": "transition",
             "source_index": transition.get("transition_index"),
@@ -190,6 +266,67 @@ class MowingPlanManager:
             "coordinates": coords,
             "length_m": float(transition.get("length_m", 0.0) or 0.0),
         }
+
+    def _oriented_track_coords(self, segment: Dict[str, Any], target: Optional[List[float]]) -> List[List[float]]:
+        coords = self._coords(segment)
+        if not coords or target is None:
+            return coords
+        if self._is_closed(coords):
+            return self._rotate_closed_ring_near(coords, target)
+        if segment.get("type") != "rest_lane" or len(coords) < 2:
+            return coords
+        forward = self._coord_distance_m(coords[0], target)
+        reverse = self._coord_distance_m(coords[-1], target)
+        return list(reversed(coords)) if reverse < forward else coords
+
+    def _trim_coords_from_point(
+        self,
+        coords: List[List[float]],
+        point: List[float],
+        max_distance_m: float,
+    ) -> Optional[List[List[float]]]:
+        if len(coords) < 2:
+            return None
+        best: Optional[Tuple[float, int]] = None
+        for index, coord in enumerate(coords):
+            candidate = (self._coord_distance_m(coord, point), index)
+            if best is None or candidate < best:
+                best = candidate
+        if best is None or best[0] > max_distance_m:
+            return None
+        index = best[1]
+        trimmed = [point] + coords[index + 1:]
+        return trimmed if len(trimmed) >= 2 else None
+
+    @classmethod
+    def _rotate_closed_ring_near(cls, ring: List[List[float]], target: List[float]) -> List[List[float]]:
+        open_ring = ring[:-1] if cls._is_closed(ring) else ring[:]
+        if len(open_ring) < 2:
+            return ring
+        best_index = min(range(len(open_ring)), key=lambda index: cls._coord_distance_m(open_ring[index], target))
+        rotated = open_ring[best_index:] + open_ring[:best_index]
+        rotated.append(rotated[0])
+        return rotated
+
+    @staticmethod
+    def _is_closed(coords: List[List[float]]) -> bool:
+        return len(coords) > 2 and coords[0][0] == coords[-1][0] and coords[0][1] == coords[-1][1]
+
+    @staticmethod
+    def _coord_distance_m(a: List[float], b: List[float]) -> float:
+        return distance_m(MowingPlanManager._point(a), MowingPlanManager._point(b))
+
+    @staticmethod
+    def _pose_coord(pose: Optional[Dict[str, Any]]) -> Optional[List[float]]:
+        if not isinstance(pose, dict):
+            return None
+        gps = pose.get("gps") if isinstance(pose.get("gps"), dict) else {}
+        lat = pose.get("latitude", pose.get("lat", gps.get("lat", gps.get("latitude"))))
+        lon = pose.get("longitude", pose.get("lon", pose.get("lng", gps.get("lon", gps.get("lng", gps.get("longitude"))))))
+        try:
+            return [float(lon), float(lat)]
+        except (TypeError, ValueError):
+            return None
 
     def _persisted_payload(self, map_name: str, plan: Dict[str, Any]) -> Dict[str, Any]:
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -263,6 +400,16 @@ class MowingPlanManager:
     def _coords(segment: Dict[str, Any]) -> List[List[float]]:
         return [coord for coord in (segment.get("coordinates") or []) if isinstance(coord, list) and len(coord) >= 2]
 
+    @classmethod
+    def _is_executable_sequence_segment(cls, segment: Dict[str, Any]) -> bool:
+        if segment.get("type") != "rest_lane":
+            return True
+        try:
+            length_m = float(segment.get("length_m", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            length_m = 0.0
+        return length_m >= cls.MIN_EXECUTABLE_REST_LANE_M
+
     @staticmethod
     def _point(coord: List[float]) -> Dict[str, float]:
         return {"longitude": float(coord[0]), "latitude": float(coord[1])}
@@ -282,4 +429,11 @@ class MowingPlanManager:
         return len([
             item for item in plan.get("sequence") or []
             if item.get("type") == "rest_lane" and item.get("direction") == "reverse"
+        ])
+
+    @classmethod
+    def _short_rest_lane_count(cls, plan: Dict[str, Any]) -> int:
+        return len([
+            item for item in plan.get("sequence") or []
+            if item.get("type") == "rest_lane" and not cls._is_executable_sequence_segment(item)
         ])

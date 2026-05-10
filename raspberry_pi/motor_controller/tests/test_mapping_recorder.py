@@ -43,8 +43,8 @@ class MappingRecorderTests(unittest.TestCase):
     def _plan_with_center_sub(self, sub_margin_m=0.25):
         with tempfile.TemporaryDirectory() as tmp:
             recorder = MappingRecorder(tmp, lambda: {})
-            main = self._write_square_map(tmp, recorder, "Brunnen", 0.0, 0.0, 10.0, 10.0)
-            sub = self._write_square_map(tmp, recorder, "sub_Brunnen_Mitte", 4.0, 4.0, 6.0, 6.0)
+            main = self._write_square_map(tmp, recorder, "Brunnen", 0.0, 0.0, 20.0, 20.0)
+            sub = self._write_square_map(tmp, recorder, "sub_Brunnen_Mitte", 8.0, 8.0, 12.0, 12.0)
             result = recorder.plan_contour_lanes(
                 "Brunnen",
                 cut_width_m=0.5,
@@ -453,6 +453,59 @@ class MappingRecorderTests(unittest.TestCase):
         self.assertEqual("rest_lane", executable[3]["source_type"])
         self.assertEqual("forward", executable[3]["direction"])
 
+    def test_executable_segments_can_start_from_middle_segment(self):
+        manager = MowingPlanManager("/tmp/maps", lambda: {"latitude": 52.0, "longitude": 10.0, "rtk_status": "RTK FIXED"})
+        plan = self._sample_plan(reverse=False, unsafe=False)
+
+        executable = manager.executable_segments(plan, start_segment_index=1)
+
+        self.assertEqual(["positioning", "mow"], [item["type"] for item in executable])
+        self.assertEqual("goto", executable[0]["mode"])
+        self.assertEqual(plan["rest_lanes"][0]["coordinates"][0], executable[0]["coordinates"][0])
+        self.assertEqual("rest_lane", executable[1]["source_type"])
+
+    def test_reverse_start_uses_nearest_lane_end_without_positioning_loop(self):
+        manager = MowingPlanManager("/tmp/maps", lambda: self._pose_m(10.0, 0.0, 270.0))
+        plan = self._reverse_transition_plan()
+
+        executable = manager.executable_segments(
+            plan,
+            start_segment_index=1,
+            start_pose=self._pose_m(10.0, 0.0, 270.0),
+        )
+
+        self.assertEqual(["mow"], [item["type"] for item in executable])
+        self.assertEqual("reverse", executable[0]["direction"])
+        self.assertAlmostEqual(self._coord_m(10.0, 0.0)[0], executable[0]["coordinates"][0][0])
+        self.assertAlmostEqual(self._coord_m(0.0, 0.0)[0], executable[0]["coordinates"][-1][0])
+
+    def test_reverse_next_lane_orients_to_previous_end(self):
+        manager = MowingPlanManager("/tmp/maps", lambda: {"latitude": 52.0, "longitude": 10.0, "rtk_status": "RTK FIXED"})
+        plan = self._reverse_transition_plan()
+
+        executable = manager.executable_segments(plan)
+
+        self.assertEqual(["positioning", "mow", "mow"], [item["type"] for item in executable])
+        self.assertEqual("reverse", executable[-1]["direction"])
+        self.assertEqual(plan["sequence"][0]["coordinates"][-1], executable[-1]["coordinates"][0])
+
+    def test_tiny_rest_lanes_are_skipped_for_execution(self):
+        manager = MowingPlanManager("/tmp/maps", lambda: {"latitude": 52.0, "longitude": 10.0, "rtk_status": "RTK FIXED"})
+        plan = self._sample_plan(reverse=False, unsafe=False)
+        tiny = dict(plan["rest_lanes"][0])
+        tiny["length_m"] = 0.7
+        plan["rest_lanes"] = [tiny]
+        plan["sequence"] = [plan["lanes"][0], tiny]
+
+        result = manager.check_plan("Brunnen", plan)
+        executable = manager.executable_segments(plan)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(1, result["summary"]["short_rest_lane_count"])
+        self.assertIn("sehr kurze Restbahn", result["warnings"][0])
+        self.assertEqual(["positioning", "mow"], [item["type"] for item in executable])
+        self.assertEqual("contour", executable[-1]["source_type"])
+
     def test_invalid_plan_never_sets_navigation_commands(self):
         class FakeNavigation:
             def __init__(self):
@@ -506,6 +559,19 @@ class MappingRecorderTests(unittest.TestCase):
         self.assertEqual("stop", result["state"])
         self.assertIn("15 cm", result["reason"])
 
+    def test_nogo_monitor_default_allows_shallow_intrusion_as_warning(self):
+        self._assert_shapely_available()
+        monitor = NoGoZoneMonitor(self._sample_nogo_plan())
+
+        shallow = monitor.check_pose(self._pose_m(-0.5, 1.0, 90.0))
+        deep = monitor.check_pose(self._pose_m(-0.1, 1.0, 90.0))
+
+        self.assertTrue(shallow["ok"])
+        self.assertEqual("warning", shallow["state"])
+        self.assertFalse(deep["ok"])
+        self.assertEqual("stop", deep["state"])
+        self.assertIn("35 cm", deep["reason"])
+
     @staticmethod
     def _sample_plan(reverse=False, unsafe=False):
         contour = {
@@ -522,7 +588,7 @@ class MappingRecorderTests(unittest.TestCase):
             "rest_group": 0,
             "direction": "reverse" if reverse else "forward",
             "coordinates": [[10.00002, 52.0], [10.00003, 52.0]],
-            "length_m": 1.0,
+            "length_m": 3.0,
         }
         transition = {
             "type": "transition",
@@ -553,11 +619,53 @@ class MappingRecorderTests(unittest.TestCase):
             "rest_lane_count": 1,
             "transition_count": 1,
             "unsafe_transition_count": 1 if unsafe else 0,
-            "total_drive_length_m": 3.0,
+            "total_drive_length_m": 5.0,
             "lanes": [contour],
             "rest_lanes": [rest],
             "sequence": [contour, rest],
             "transitions": [transition],
+        }
+
+    @classmethod
+    def _reverse_transition_plan(cls):
+        contour = {
+            "type": "contour",
+            "segment_index": 0,
+            "lane_index": 0,
+            "coordinates": [cls._coord_m(0.0, -1.0), cls._coord_m(0.0, 0.0)],
+            "length_m": 1.0,
+        }
+        rest = {
+            "type": "rest_lane",
+            "segment_index": 1,
+            "rest_index": 0,
+            "rest_group": 0,
+            "direction": "reverse",
+            "coordinates": [cls._coord_m(10.0, 0.0), cls._coord_m(0.0, 0.0)],
+            "length_m": 10.0,
+        }
+        transition = {
+            "type": "transition",
+            "transition_index": 0,
+            "from_segment_index": 0,
+            "to_segment_index": 1,
+            "from_type": "contour",
+            "to_type": "rest_lane",
+            "safe": True,
+            "reason": "ok",
+            "route_kind": "direct",
+            "coordinates": [cls._coord_m(0.0, 0.0), cls._coord_m(10.0, 0.0)],
+            "length_m": 10.0,
+        }
+        return {
+            "success": True,
+            "name": "Brunnen",
+            "map_name": "Brunnen",
+            "sequence": [contour, rest],
+            "transitions": [transition],
+            "rest_lanes": [rest],
+            "lanes": [contour],
+            "total_drive_length_m": 11.0,
         }
 
     @classmethod

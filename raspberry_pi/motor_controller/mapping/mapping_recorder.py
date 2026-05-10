@@ -241,8 +241,19 @@ class MappingRecorder:
     def load_plan(self, name: str) -> Dict[str, Any]:
         return self.plans.load_plan(name)
 
-    def check_plan(self, name: str, plan: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        return self.plans.check_plan(name, plan)
+    def check_plan(
+        self,
+        name: str,
+        plan: Optional[Dict[str, Any]] = None,
+        start_segment_index: Optional[int] = None,
+        start_pose: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return self.plans.check_plan(
+            name,
+            plan,
+            start_segment_index=start_segment_index,
+            start_pose=start_pose,
+        )
 
     def check_nogo(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         try:
