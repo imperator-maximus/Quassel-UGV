@@ -548,18 +548,19 @@
 
         #mowerSpeedSlider {
             width: 100%;
-            height: 8px;
-            border-radius: 5px;
+            height: 16px;
+            border-radius: 8px;
             background: rgba(255, 255, 255, 0.2);
             outline: none;
             -webkit-appearance: none;
+            touch-action: pan-y;
         }
 
         #mowerSpeedSlider::-webkit-slider-thumb {
             -webkit-appearance: none;
             appearance: none;
-            width: 20px;
-            height: 20px;
+            width: 34px;
+            height: 34px;
             border-radius: 50%;
             background: linear-gradient(45deg, #34a853, #4caf50);
             cursor: pointer;
@@ -567,8 +568,8 @@
         }
 
         #mowerSpeedSlider::-moz-range-thumb {
-            width: 20px;
-            height: 20px;
+            width: 34px;
+            height: 34px;
             border-radius: 50%;
             background: linear-gradient(45deg, #34a853, #4caf50);
             cursor: pointer;
@@ -1183,33 +1184,37 @@
 
                     <div class="mower-speed-section" id="mowerSpeedSection">
                         <div class="speed-label">
-                            <span>Geschwindigkeit: <span id="mowerSpeedValue">0</span>%</span>
+                            <span>Drehzahl: <span id="mowerSpeedValue">500</span> rpm</span>
                         </div>
                         <div class="speed-slider-container">
-                            <input type="range" id="mowerSpeedSlider" min="0" max="100" value="0" step="5"
-                                   oninput="updateMowerSpeed(this.value)" disabled>
+                            <input type="range" id="mowerSpeedSlider" min="500" max="5000" value="500" step="50"
+                                   oninput="previewMowerSpeed(this.value)"
+                                   onchange="sendMowerSpeed(this.value)"
+                                   onpointerdown="mowerSliderActive = true"
+                                   onpointerup="mowerSliderActive = false; sendMowerSpeed(this.value)"
+                                   onpointercancel="mowerSliderActive = false"
+                                   disabled>
                             <div class="speed-markers">
-                                <span>0%</span>
-                                <span>25%</span>
-                                <span>50%</span>
-                                <span>75%</span>
-                                <span>100%</span>
+                                <span id="mowerMinRpmMarker">500</span>
+                                <span id="mowerMidRpmMarker">2750</span>
+                                <span id="mowerMaxRpmMarker">5000</span>
                             </div>
-                        </div>
-                        <div class="speed-info">
-                            <small>PWM-Bereich: 16%-84% (0.8V-4.2V)</small>
                         </div>
                     </div>
                 </div>
 
                 <div class="mower-info">
                     <div class="info-row">
-                        <span class="info-label">Relais (GPIO 23):</span>
+                        <span class="info-label">Modus:</span>
+                        <span class="info-value" id="mowerModeStatus">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Ausgang:</span>
                         <span class="info-value" id="mowerRelayStatus">AUS</span>
                     </div>
                     <div class="info-row">
-                        <span class="info-label">PWM (GPIO 12):</span>
-                        <span class="info-value" id="mowerPwmStatus">0%</span>
+                        <span class="info-label">Soll:</span>
+                        <span class="info-value" id="mowerPwmStatus">500 rpm</span>
                     </div>
                 </div>
             </div>
@@ -1231,6 +1236,10 @@
         let currentKnobPos = { x: 150, y: 150 };
         let maxSpeed = 100;
         let maxSpeedInitialized = false;  // Flag um zu verhindern, dass Server den Slider überschreibt
+        let currentMowerRpm = 500;
+        let currentMowerState = false;
+        let mowerRequestPending = false;
+        let mowerSliderActive = false;
 
         // Hochfrequente Updates für flüssige Steuerung
         let lastJoystickSend = 0;
@@ -1528,13 +1537,21 @@
 
         // Mäher Power Toggle
         function toggleMowerPower() {
+            if (mowerRequestPending) {
+                return;
+            }
             console.log('🔄 Mäher-Toggle gestartet...');
+            const rpm = currentMowerRpm;
+            const desiredState = !currentMowerState;
+            mowerRequestPending = true;
+            document.getElementById('mowerPowerBtn').disabled = true;
 
             fetch('/api/mower/toggle', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                }
+                },
+                body: JSON.stringify({ state: desiredState, rpm })
             })
             .then(response => {
                 console.log('📡 HTTP Response Status:', response.status);
@@ -1562,22 +1579,32 @@
             .catch(error => {
                 console.error('❌ Fehler beim Mäher Toggle:', error);
                 alert('Netzwerk-Fehler beim Mäher Toggle: ' + error.message);
+            })
+            .finally(() => {
+                mowerRequestPending = false;
+                document.getElementById('mowerPowerBtn').disabled = false;
             });
         }
 
-        // Mäher-Geschwindigkeit aktualisieren
-        function updateMowerSpeed(speed) {
-            console.log('🔄 Mäher-Geschwindigkeit:', speed + '%');
+        function previewMowerSpeed(speed) {
+            const rpm = parseInt(speed);
+            currentMowerRpm = rpm;
+            document.getElementById('mowerSpeedValue').textContent = rpm;
+            document.getElementById('mowerSpeedSlider').value = rpm;
+        }
 
-            // Anzeige sofort aktualisieren
-            document.getElementById('mowerSpeedValue').textContent = speed;
+        // Mäher-Drehzahl aktualisieren
+        function sendMowerSpeed(speed) {
+            previewMowerSpeed(speed);
+            const rpm = currentMowerRpm;
+            console.log('🔄 Mäher-Drehzahl:', rpm + ' rpm');
 
             fetch('/api/mower/speed', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ speed: parseInt(speed) })
+                body: JSON.stringify({ rpm })
             })
             .then(response => {
                 if (!response.ok) {
@@ -1589,7 +1616,7 @@
                 console.log('📦 Mäher-Geschwindigkeit Response:', data);
 
                 if (data.success) {
-                    console.log('✅ Mäher-Geschwindigkeit erfolgreich:', data.mower_speed + '%');
+                    console.log('✅ Mäher-Drehzahl erfolgreich:', data.mower_rpm + ' rpm');
                     updateMowerModal(data);
                 } else {
                     console.error('❌ Mäher-Geschwindigkeit fehlgeschlagen:', data.error || 'Unbekannter Fehler');
@@ -1605,7 +1632,13 @@
         // Mäher-Modal UI aktualisieren
         function updateMowerModal(data) {
             const mowerState = data.mower_state || false;
-            const mowerSpeed = data.mower_speed || 0;
+            currentMowerState = mowerState;
+            const mowerMode = data.mower_mode || 'gpio_pwm';
+            const isOdrive = mowerMode === 'odrive_can';
+            const minRpm = data.mower_min_rpm || 0;
+            const maxRpm = data.mower_max_rpm || 100;
+            const mowerSpeed = isOdrive ? (data.mower_rpm || data.mower_default_rpm || minRpm) : (data.mower_speed || 0);
+            const displaySpeed = mowerSliderActive ? currentMowerRpm : mowerSpeed;
 
             // Status-Dot im Modal
             document.getElementById('mowerModalStatus').className =
@@ -1630,16 +1663,40 @@
             const speedSlider = document.getElementById('mowerSpeedSlider');
             const speedValue = document.getElementById('mowerSpeedValue');
 
-            speedSlider.disabled = !mowerState;
-            speedSlider.value = mowerSpeed;
-            speedValue.textContent = mowerSpeed;
+            if (isOdrive) {
+                speedSlider.min = minRpm;
+                speedSlider.max = maxRpm;
+                speedSlider.step = 50;
+                document.getElementById('mowerMinRpmMarker').textContent = minRpm;
+                document.getElementById('mowerMidRpmMarker').textContent = Math.round((minRpm + maxRpm) / 2);
+                document.getElementById('mowerMaxRpmMarker').textContent = maxRpm;
+            } else {
+                speedSlider.min = 0;
+                speedSlider.max = 100;
+                speedSlider.step = 5;
+                document.getElementById('mowerMinRpmMarker').textContent = '0%';
+                document.getElementById('mowerMidRpmMarker').textContent = '50%';
+                document.getElementById('mowerMaxRpmMarker').textContent = '100%';
+            }
+
+            const controlsDisabled = isOdrive ? !data.mower_enabled : !mowerState;
+            speedSlider.disabled = controlsDisabled;
+            if (!mowerSliderActive) {
+                speedSlider.value = mowerSpeed;
+                speedValue.textContent = mowerSpeed;
+                currentMowerRpm = mowerSpeed;
+            }
 
             // Info-Anzeigen
+            document.getElementById('mowerModeStatus').textContent = isOdrive ? 'ODrive CAN' : 'GPIO/PWM';
             document.getElementById('mowerRelayStatus').textContent = mowerState ? 'EIN' : 'AUS';
 
-            // PWM-Berechnung (16-84% für 0-100%)
-            const pwmPercent = mowerState ? (16 + (mowerSpeed / 100) * (84 - 16)) : 0;
-            document.getElementById('mowerPwmStatus').textContent = pwmPercent.toFixed(1) + '%';
+            if (isOdrive) {
+                document.getElementById('mowerPwmStatus').textContent = displaySpeed + ' rpm';
+            } else {
+                const pwmPercent = mowerState ? (16 + (displaySpeed / 100) * (84 - 16)) : 0;
+                document.getElementById('mowerPwmStatus').textContent = pwmPercent.toFixed(1) + '%';
+            }
         }
 
         // Verbindungszeit aktualisieren

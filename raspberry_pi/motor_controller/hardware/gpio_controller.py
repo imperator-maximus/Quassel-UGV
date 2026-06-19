@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 GPIO Controller - Zentrale GPIO-Verwaltung mit Singleton-Pattern
 Verhindert mehrfache GPIO-Initialisierung und verwaltet pigpio-Instanz
@@ -201,4 +202,3 @@ class GPIOController:
     def __del__(self):
         """Destruktor - Cleanup bei Objektzerstörung"""
         self.cleanup()
-

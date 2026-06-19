@@ -156,6 +156,10 @@ class SafetyMonitor:
     
     def start_watchdog(self):
         """Startet Watchdog-Thread"""
+        if not self.config.enabled:
+            self.logger.info("Safety Watchdog deaktiviert")
+            return
+
         if self.watchdog_running:
             self.logger.warning("Watchdog läuft bereits")
             return
@@ -234,4 +238,3 @@ class SafetyMonitor:
     def __del__(self):
         """Destruktor - Cleanup bei Objektzerstörung"""
         self.cleanup()
-

@@ -45,6 +45,17 @@ mower:
   duty_max: 84             # % (Maximale Geschwindigkeit)
   duty_off: 0              # % (Aus)
 
+odrive_mower:
+  enabled: false           # Teststand: ODrive/ODESC-Mähdeck per CAN statt GPIO/PWM
+  node_id: 0
+  axis_state: 5            # Legacy sensorless state
+  min_rpm: 500             # Sensorless-Teststand: darunter unzuverlaessig
+  max_rpm: 5000
+  default_rpm: 500
+  ramp_rate_rpm_s: 300
+  command_interval_s: 0.1  # Set_Input_Vel periodisch senden
+  coast_delay_s: 0.5
+
 # CAN-Bus-Konfiguration
 can:
   interface: can0

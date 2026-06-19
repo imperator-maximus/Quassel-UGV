@@ -65,6 +65,20 @@ class MowerConfig:
 
 
 @dataclass
+class ODriveMowerConfig:
+    """ODrive/ODESC-Mähdeck-Teststand über CAN."""
+    enabled: bool = False
+    node_id: int = 0
+    axis_state: int = 5
+    min_rpm: int = 300
+    max_rpm: int = 1200
+    default_rpm: int = 300
+    ramp_rate_rpm_s: int = 300
+    command_interval_s: float = 0.1
+    coast_delay_s: float = 0.5
+
+
+@dataclass
 class CANConfig:
     """CAN-Bus-Konfiguration"""
     interface: str = 'can0'
@@ -139,6 +153,7 @@ class Config:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     light: LightConfig = field(default_factory=LightConfig)
     mower: MowerConfig = field(default_factory=MowerConfig)
+    odrive_mower: ODriveMowerConfig = field(default_factory=ODriveMowerConfig)
     can: CANConfig = field(default_factory=CANConfig)
     navigation: NavigationConfig = field(default_factory=NavigationConfig)
     mapping: MappingConfig = field(default_factory=MappingConfig)
@@ -174,6 +189,8 @@ class Config:
             config.light = LightConfig(**data['light'])
         if 'mower' in data:
             config.mower = MowerConfig(**data['mower'])
+        if 'odrive_mower' in data:
+            config.odrive_mower = ODriveMowerConfig(**data['odrive_mower'])
         if 'can' in data:
             config.can = CANConfig(**data['can'])
         if 'navigation' in data:
@@ -229,6 +246,17 @@ class Config:
                 'duty_min': self.mower.duty_min,
                 'duty_max': self.mower.duty_max,
                 'duty_off': self.mower.duty_off
+            },
+            'odrive_mower': {
+                'enabled': self.odrive_mower.enabled,
+                'node_id': self.odrive_mower.node_id,
+                'axis_state': self.odrive_mower.axis_state,
+                'min_rpm': self.odrive_mower.min_rpm,
+                'max_rpm': self.odrive_mower.max_rpm,
+                'default_rpm': self.odrive_mower.default_rpm,
+                'ramp_rate_rpm_s': self.odrive_mower.ramp_rate_rpm_s,
+                'command_interval_s': self.odrive_mower.command_interval_s,
+                'coast_delay_s': self.odrive_mower.coast_delay_s
             },
             'can': {
                 'interface': self.can.interface,

@@ -15,6 +15,7 @@ from pathlib import Path
 from .config import Config
 from .hardware.gpio_controller import GPIOController
 from .hardware.pwm_controller import PWMController
+from .hardware.odrive_mower import ODriveMowerController
 from .hardware.safety_monitor import SafetyMonitor
 from .communication.can_handler import CANHandler
 from .control.motor_control import MotorControl
@@ -45,6 +46,7 @@ class MotorControllerApp:
         self.pwm: PWMController = None
         self.safety: SafetyMonitor = None
         self.can: CANHandler = None
+        self.odrive_mower: ODriveMowerController = None
         self.motor: MotorControl = None
         self.joystick: JoystickHandler = None
         self.navigation: NavigationController = None
@@ -136,6 +138,13 @@ class MotorControllerApp:
             # CAN-Handler
             self.logger.info("Initialisiere CAN-Handler...")
             self.can = CANHandler(self.config.can)
+
+            if self.config.odrive_mower.enabled:
+                self.logger.info("Initialisiere ODrive-Maehdeck-Testmodus...")
+                self.odrive_mower = ODriveMowerController(
+                    self.config.odrive_mower,
+                    self.can
+                )
             
             # Motor-Control
             self.logger.info("Initialisiere Motor-Control...")
@@ -179,7 +188,8 @@ class MotorControllerApp:
                 self.web.set_hardware_refs(
                     self.config.light,
                     self.config.mower,
-                    self.pwm
+                    self.pwm,
+                    self.odrive_mower
                 )
             
             # Callbacks verbinden
@@ -285,6 +295,10 @@ class MotorControllerApp:
             if self.safety:
                 self.logger.info("Stoppe Safety-Watchdog...")
                 self.safety.cleanup()
+
+            if self.odrive_mower:
+                self.logger.info("Stoppe ODrive-Maehdeck...")
+                self.odrive_mower.cleanup()
             
             # CAN-Reader stoppen
             if self.can:

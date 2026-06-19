@@ -64,6 +64,7 @@ class WebServer:
         self.light_config = None
         self.mower_config = None
         self.pwm_controller = None
+        self.odrive_mower = None
         
         # Status
         self.can_enabled = True
@@ -89,7 +90,7 @@ class WebServer:
         if self.flask_available:
             self._init_flask()
     
-    def set_hardware_refs(self, light_config, mower_config, pwm_controller):
+    def set_hardware_refs(self, light_config, mower_config, pwm_controller, odrive_mower=None):
         """
         Setzt Hardware-Referenzen für Light/Mower-Steuerung
         
@@ -101,6 +102,7 @@ class WebServer:
         self.light_config = light_config
         self.mower_config = mower_config
         self.pwm_controller = pwm_controller
+        self.odrive_mower = odrive_mower
     
     def _init_flask(self):
         """Initialisiert Flask-App mit Socket.IO"""
@@ -172,8 +174,7 @@ class WebServer:
                 'plan_execution_status': self.get_plan_execution_status(),
                 'mapping_status': self.mapping.get_status() if self.mapping else {'state': 'disabled'},
                 'light_state': self.light_state,
-                'mower_state': self.mower_state,
-                'mower_speed': self.pwm_controller.get_mower_speed() if self.pwm_controller else 0
+                **self._mower_api_status()
             })
         
         @self.app.route('/api/can/toggle', methods=['POST'])
@@ -201,6 +202,27 @@ class WebServer:
         @self.app.route('/api/mower/toggle', methods=['POST'])
         def api_mower_toggle():
             """Schaltet Mäher Ein/Aus"""
+            if self.odrive_mower and self.odrive_mower.enabled:
+                data = request.get_json(silent=True) or {}
+                rpm = data.get('rpm')
+                desired_state = data.get('state')
+                if desired_state is None:
+                    desired_state = data.get('enabled')
+                if desired_state is not None:
+                    desired_state = bool(desired_state)
+
+                if desired_state is True:
+                    status = self.odrive_mower.start(int(rpm)) if rpm is not None else self.odrive_mower.start()
+                elif desired_state is False:
+                    status = self.odrive_mower.stop()
+                else:
+                    if self.odrive_mower.running:
+                        status = self.odrive_mower.stop()
+                    else:
+                        status = self.odrive_mower.start(int(rpm)) if rpm is not None else self.odrive_mower.start()
+                self.mower_state = status['running']
+                return jsonify(self._mower_api_status(success=status.get('success', True), error=status.get('error')))
+
             if self.mower_config and self.mower_config.enabled:
                 self.mower_state = not self.mower_state
                 self.gpio.output(self.mower_config.relay_pin, self.mower_state)
@@ -211,12 +233,18 @@ class WebServer:
 
                 self.logger.info(f"Mäher {'ein' if self.mower_state else 'aus'}")
 
-            return jsonify({'success': True, 'mower_state': self.mower_state})
+            return jsonify(self._mower_api_status())
         
         @self.app.route('/api/mower/speed', methods=['POST'])
         def api_mower_speed():
             """Setzt Mäher-Geschwindigkeit"""
-            data = request.get_json()
+            data = request.get_json(silent=True) or {}
+
+            if self.odrive_mower and self.odrive_mower.enabled:
+                rpm = data.get('rpm', data.get('speed', self.odrive_mower.target_rpm))
+                status = self.odrive_mower.set_rpm(int(rpm))
+                self.mower_state = status['running']
+                return jsonify(self._mower_api_status(success=status.get('success', True), error=status.get('error')))
 
             if self.mower_config and self.mower_config.enabled and 'speed' in data:
                 speed = max(0, min(100, int(data['speed'])))
@@ -225,10 +253,7 @@ class WebServer:
                     self.pwm_controller.set_mower_speed(speed)
                     self.logger.info(f"Mäher-Geschwindigkeit: {speed}%")
 
-            return jsonify({
-                'success': True,
-                'mower_speed': self.pwm_controller.get_mower_speed() if self.pwm_controller else 0
-            })
+            return jsonify(self._mower_api_status())
         
         @self.app.route('/api/joystick', methods=['POST'])
         def api_joystick():
@@ -874,6 +899,44 @@ class WebServer:
             self.joystick.set_max_speed(max_speed)
             self.logger.info(f"Max Speed: {max_speed}%")
 
+    def _mower_api_status(self, success=True, error=None):
+        if self.odrive_mower and self.odrive_mower.enabled:
+            status = self.odrive_mower.get_status(success=success, error=error)
+            return {
+                'success': status['success'],
+                'mower_mode': 'odrive_can',
+                'mower_enabled': status['enabled'],
+                'mower_state': status['running'],
+                'mower_speed': status['rpm'],
+                'mower_rpm': status['rpm'],
+                'mower_commanded_rpm': status['commanded_rpm'],
+                'mower_min_rpm': status['min_rpm'],
+                'mower_max_rpm': status['max_rpm'],
+                'mower_default_rpm': status['default_rpm'],
+                'mower_ramp_rate_rpm_s': status['ramp_rate_rpm_s'],
+                'mower_node_id': status['node_id'],
+                'mower_axis_state': status['axis_state'],
+                'mower_error': status['error'],
+            }
+
+        speed = self.pwm_controller.get_mower_speed() if self.pwm_controller else 0
+        return {
+            'success': success,
+            'mower_mode': 'gpio_pwm',
+            'mower_enabled': self.mower_config.enabled if self.mower_config else False,
+            'mower_state': self.mower_state,
+            'mower_speed': speed,
+            'mower_rpm': None,
+            'mower_commanded_rpm': None,
+            'mower_min_rpm': None,
+            'mower_max_rpm': None,
+            'mower_default_rpm': None,
+            'mower_ramp_rate_rpm_s': None,
+            'mower_node_id': None,
+            'mower_axis_state': None,
+            'mower_error': error,
+        }
+
     def _emit_status_update(self):
         """Sendet Status-Update an alle Clients"""
         if not self.socketio:
@@ -893,9 +956,7 @@ class WebServer:
             'mapping_status': self.mapping.get_status() if self.mapping else {'state': 'disabled'},
             'light_state': self.light_state,
             'light_enabled': self.light_config.enabled if self.light_config else False,
-            'mower_state': self.mower_state,
-            'mower_enabled': self.mower_config.enabled if self.mower_config else False,
-            'mower_speed': self.pwm_controller.get_mower_speed() if self.pwm_controller else 0,
+            **self._mower_api_status(),
             'current_pwm': self.motor.get_status().get('current_pwm', {'left': 1500, 'right': 1500}),
             'max_speed_percent': self.joystick.get_status().get('max_speed', 100)
         }

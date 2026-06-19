@@ -40,6 +40,17 @@ mower:
   duty_max: 84
   duty_off: 0
 
+odrive_mower:
+  enabled: true
+  node_id: 0
+  axis_state: 5
+  min_rpm: 500
+  max_rpm: 5000
+  default_rpm: 500
+  ramp_rate_rpm_s: 300
+  command_interval_s: 0.1
+  coast_delay_s: 0.5
+
 can:
   interface: can0
   bitrate: 250000
