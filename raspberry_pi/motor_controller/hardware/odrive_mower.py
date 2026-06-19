@@ -33,6 +33,9 @@ class ODriveMowerController:
         self.target_rpm = int(config.default_rpm)
         self.commanded_rpm = 0
         self.last_error = None
+        self.odrive_error = 0
+        self.odrive_state = 1
+        self.odrive_node_id = int(config.node_id)
         self._lock = threading.Lock()
         self._op_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -156,11 +159,44 @@ class ODriveMowerController:
                     self.running = False
                 return
 
+    def on_heartbeat(self, node_id: int, error: int, state: int) -> None:
+        """Verarbeitet ODrive-Heartbeat-Nachrichten vom CAN-Reader.
+
+        Wird vom CANHandler bei jedem empfangenen Heartbeat (cmd 0x01) gerufen.
+        Speichert error/state fuer die eigene Achse (node_id == config.node_id)
+        und aktualisiert ``last_error``, damit Web-App/UI ODrive-Fehler sehen.
+
+        Bei error!=0 wird der ODrive-internen Fehlercode als Hex-String in
+        ``last_error`` geschrieben, damit /api/status ihn als ``mower_error``
+        meldet. Bei error=0 wird ein vorheriger ODrive-Fehler geloescht – aber
+        nur wenn er von ODrive kam (nicht wenn er ein Python-CAN-Send-Fehler war).
+
+        Args:
+            node_id: ODrive-Knoten-ID aus der Arbitration-ID.
+            error: ODrive-Fehlercode (0 = kein Fehler).
+            state: ODrive-Axis-State (1=IDLE, 5=CLOSED_LOOP_SENSORLESS, ...).
+        """
+        if node_id != self.odrive_node_id:
+            return
+        with self._lock:
+            self.odrive_error = int(error)
+            self.odrive_state = int(state)
+            if error != 0:
+                self.last_error = f"ODrive error=0x{error:08X} state={state}"
+                self.logger.error("ODrive-Heartbeat Fehler: error=0x%08X state=%d", error, state)
+            else:
+                # ODrive-Fehler geloescht – aber Python-CAN-Send-Fehler bleiben
+                if self.last_error and self.last_error.startswith("ODrive error="):
+                    self.last_error = None
+
     def get_status(self, success: bool = True, error: str | None = None) -> Dict[str, Any]:
         with self._lock:
             running = self.running
             rpm = self.target_rpm
             commanded_rpm = self.commanded_rpm
+        with self._lock:
+            odrive_error = self.odrive_error
+            odrive_state = self.odrive_state
         return {
             "success": success,
             "enabled": self.enabled,
@@ -174,6 +210,8 @@ class ODriveMowerController:
             "node_id": int(self.config.node_id),
             "axis_state": int(self.config.axis_state),
             "error": error or self.last_error,
+            "odrive_error": odrive_error,
+            "odrive_state": odrive_state,
         }
 
     def cleanup(self) -> None:

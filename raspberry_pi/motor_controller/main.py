@@ -211,6 +211,11 @@ class MotorControllerApp:
         # CAN Handler -> Sensor Data (Logging + Navigation-Pose)
         self.can.set_sensor_data_callback(self._on_sensor_data)
 
+        # CAN Handler -> ODrive-Heartbeat -> ODriveMowerController
+        # Damit erkennt die Web-App ODrive-Fehler (error!=0) in /api/status
+        if self.odrive_mower:
+            self.can.set_odrive_heartbeat_callback(self.odrive_mower.on_heartbeat)
+
         # CAN Handler -> Navigation-Befehle vom Sensor-Hub
         if self.navigation:
             self.can.set_navigation_command_callback(self.navigation.on_navigation_command)

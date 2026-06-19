@@ -917,6 +917,8 @@ class WebServer:
                 'mower_node_id': status['node_id'],
                 'mower_axis_state': status['axis_state'],
                 'mower_error': status['error'],
+                'odrive_error': status.get('odrive_error', 0),
+                'odrive_state': status.get('odrive_state', 0),
             }
 
         speed = self.pwm_controller.get_mower_speed() if self.pwm_controller else 0
@@ -935,6 +937,8 @@ class WebServer:
             'mower_node_id': None,
             'mower_axis_state': None,
             'mower_error': error,
+            'odrive_error': 0,
+            'odrive_state': 0,
         }
 
     def _emit_status_update(self):

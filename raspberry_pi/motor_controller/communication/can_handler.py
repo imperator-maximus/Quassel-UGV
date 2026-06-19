@@ -59,6 +59,7 @@ class CANHandler:
         # Callbacks
         self.sensor_data_callback: Optional[Callable] = None
         self.navigation_command_callback: Optional[Callable] = None
+        self.odrive_heartbeat_callback: Optional[Callable] = None
 
         if self.can_available:
             self._init_can_bus()
@@ -124,7 +125,7 @@ class CANHandler:
                 if msg is None:
                     continue
                 
-                # Nur Sensor Hub Nachrichten verarbeiten
+                # Sensor Hub Nachrichten verarbeiten
                 if msg.arbitration_id == self.config.sensor_hub_id:
                     json_str = self.protocol.decode_frame(msg.arbitration_id, msg.data)
                     
@@ -137,7 +138,21 @@ class CANHandler:
                         except json.JSONDecodeError as e:
                             self.logger.error(f"❌ JSON-Decode Fehler: {e}")
                             error_count += 1
-                
+
+                # ODrive/ODESC Heartbeat (CAN-Simple cmd 0x01) auswerten
+                # Format: [uint32 error LE][uint32 state LE]
+                # Arbitration-ID = (node_id << 5) | 0x01
+                elif (msg.arbitration_id & 0x1F) == 0x01 and len(msg.data) >= 8:
+                    import struct as _struct
+                    node_id = msg.arbitration_id >> 5
+                    odrive_error = _struct.unpack("<I", bytes(msg.data[0:4]))[0]
+                    odrive_state = _struct.unpack("<I", bytes(msg.data[4:8]))[0]
+                    if self.odrive_heartbeat_callback:
+                        try:
+                            self.odrive_heartbeat_callback(node_id, odrive_error, odrive_state)
+                        except Exception as e:
+                            self.logger.error(f"❌ ODrive-Heartbeat Callback Fehler: {e}")
+
                 # Alte Buffers aufräumen
                 self.protocol.cleanup_old_buffers()
             
@@ -275,6 +290,18 @@ class CANHandler:
                 gerufen wird (z. B. ``nav_set_waypoints``, ``nav_start``).
         """
         self.navigation_command_callback = callback
+
+    def set_odrive_heartbeat_callback(self, callback: Callable):
+        """
+        Setzt Callback für ODrive/ODESC-Heartbeat-Nachrichten.
+
+        Wird bei jedem empfangenen Heartbeat (CAN-Simple cmd 0x01) gerufen.
+        Signature: callback(node_id: int, error: int, state: int)
+
+        Args:
+            callback: Funktion die bei jedem ODrive-Heartbeat aufgerufen wird.
+        """
+        self.odrive_heartbeat_callback = callback
     
     def get_status(self) -> Dict[str, Any]:
         """
