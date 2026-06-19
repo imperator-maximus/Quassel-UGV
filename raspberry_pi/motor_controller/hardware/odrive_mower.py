@@ -115,9 +115,17 @@ class ODriveMowerController:
                 self.commanded_rpm = 0
 
             try:
-                self._set_input_rpm(0)
-                if was_running and self.config.coast_delay_s > 0:
-                    time.sleep(float(self.config.coast_delay_s))
+                # Direkt IDLE setzen – freies Auslaufen, kein aktives Bremsen.
+                #
+                # Set_Input_Vel(0) wird absichtlich NICHT gesendet. Im Sensorless-
+                # Closed-Loop (state=5) wuerde Set_Input_Vel(0) aktives Bremsen
+                # erzwingen. Bei hohen Drehzahlen (z.B. 5000 rpm) muss die kinetische
+                # Energie in kurzer Zeit abgebaut werden -> Bremswiderstand-Ueberlast
+                # (ERROR_BRAKE_DUTY_CYCLE 0x20) + Stromspike (ERROR_OVER_CURRENT 0x10).
+                #
+                # Stattdessen: Set_Axis_State(IDLE) entkoppelt den Regler sofort,
+                # der Motor laeuft mechanisch frei aus (coast). Das dauert laenger,
+                # ist aber sicher fuer Bremswiderstand und Stromkreis.
                 self._set_axis_state(AXIS_STATE_IDLE)
             except Exception as exc:
                 self.last_error = str(exc)
