@@ -1,0 +1,13 @@
+[Unit]
+Description=UGV teststand USB-CAN SocketCAN can0 at 250 kbit/s
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/ip link set can0 down
+ExecStart=/usr/sbin/ip link set can0 up type can bitrate 250000
+ExecStop=/usr/sbin/ip link set can0 down
+
+[Install]
+WantedBy=multi-user.target

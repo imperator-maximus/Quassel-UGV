@@ -3,6 +3,11 @@
 
 Tested with a candleLight/gs_usb USB-CAN adapter on Windows and a legacy
 ODrive V3.x SimpleCAN firmware at 250 kbit/s.
+
+On Linux/Raspberry Pi, prefer SocketCAN with a candleLight/gs_usb adapter:
+
+    sudo ip link set can0 up type can bitrate 250000
+    python scripts/can_odrive_m0_test.py --interface socketcan --channel can0 --listen-only
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ import can
 CMD_HEARTBEAT = 0x001
 CMD_SET_AXIS_STATE = 0x007
 CMD_SET_INPUT_VEL = 0x00D
+CMD_CLEAR_ERRORS = 0x018
 
 AXIS_STATE_IDLE = 1
 AXIS_STATE_STARTUP_SEQUENCE = 2
@@ -47,7 +53,8 @@ def send_axis_state(bus: can.BusABC, node_id: int, state: int) -> None:
             arbitration_id=arbitration_id(node_id, CMD_SET_AXIS_STATE),
             data=struct.pack("<I", state),
             is_extended_id=False,
-        )
+        ),
+        timeout=1.0,
     )
     print(f"tx node={node_id} Set_Axis_State state={state}")
 
@@ -58,9 +65,22 @@ def send_input_vel(bus: can.BusABC, node_id: int, velocity: float) -> None:
             arbitration_id=arbitration_id(node_id, CMD_SET_INPUT_VEL),
             data=struct.pack("<fhh", float(velocity), 0, 0),
             is_extended_id=False,
-        )
+        ),
+        timeout=1.0,
     )
     print(f"tx node={node_id} Set_Input_Vel vel={velocity}")
+
+
+def send_clear_errors(bus: can.BusABC, node_id: int) -> None:
+    bus.send(
+        can.Message(
+            arbitration_id=arbitration_id(node_id, CMD_CLEAR_ERRORS),
+            data=b"",
+            is_extended_id=False,
+        ),
+        timeout=1.0,
+    )
+    print(f"tx node={node_id} Clear_Errors")
 
 
 def decode_message(msg: can.Message) -> str:
@@ -90,10 +110,27 @@ def listen(bus: can.BusABC, seconds: float) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--interface",
+        default="gs_usb",
+        choices=("gs_usb", "socketcan"),
+        help="python-can interface; use socketcan on Linux/Raspberry Pi",
+    )
+    parser.add_argument(
+        "--channel",
+        default=None,
+        help="CAN channel; default: 0 for gs_usb, can0 for socketcan",
+    )
     parser.add_argument("--node", type=int, default=0, help="ODrive CAN node ID")
     parser.add_argument("--bitrate", type=int, default=250000, help="CAN bitrate")
     parser.add_argument("--velocity", type=float, default=12.0, help="turns/s")
     parser.add_argument("--duration", type=float, default=5.0, help="run time in seconds")
+    parser.add_argument(
+        "--coast-delay",
+        type=float,
+        default=1.0,
+        help="seconds between velocity=0 and IDLE during stop",
+    )
     parser.add_argument(
         "--state",
         type=int,
@@ -110,36 +147,64 @@ def main() -> int:
         action="store_true",
         help="only print received CAN frames",
     )
+    parser.add_argument(
+        "--clear-errors",
+        action="store_true",
+        help="send Clear_Errors before running or listening",
+    )
     args = parser.parse_args()
 
     patch_gs_usb_backend()
 
-    bus = can.Bus(interface="gs_usb", channel=0, bitrate=args.bitrate)
-    print(f"CAN open: gs_usb channel=0 bitrate={args.bitrate}")
+    channel = args.channel
+    if channel is None:
+        channel = "can0" if args.interface == "socketcan" else 0
+
+    bus_kwargs = {"interface": args.interface, "channel": channel}
+    if args.interface != "socketcan":
+        bus_kwargs["bitrate"] = args.bitrate
+    bus = can.Bus(**bus_kwargs)
+    print(f"CAN open: {args.interface} channel={channel} bitrate={args.bitrate}")
 
     if args.listen_only:
         try:
+            if args.clear_errors:
+                send_clear_errors(bus, args.node)
             listen(bus, args.duration)
         finally:
             bus.shutdown()
             print("CAN closed")
         return 0
 
+    run_started = False
     try:
         print("Pre-run heartbeat check")
+        if args.clear_errors:
+            send_clear_errors(bus, args.node)
+            time.sleep(0.2)
         listen(bus, 1.0)
 
         target_state = AXIS_STATE_STARTUP_SEQUENCE if args.startup_sequence else args.state
         send_input_vel(bus, args.node, args.velocity)
         send_axis_state(bus, args.node, target_state)
+        run_started = True
         listen(bus, args.duration)
+    except can.CanError as exc:
+        print(f"CAN send/receive error: {exc}")
     finally:
         print("Stopping axis")
         try:
-            send_input_vel(bus, args.node, 0.0)
-            time.sleep(0.1)
-            send_axis_state(bus, args.node, AXIS_STATE_IDLE)
-            listen(bus, 1.0)
+            if run_started:
+                send_input_vel(bus, args.node, 0.0)
+                if args.coast_delay > 0:
+                    print(f"Waiting {args.coast_delay:.2f}s before IDLE")
+                    listen(bus, args.coast_delay)
+                send_axis_state(bus, args.node, AXIS_STATE_IDLE)
+                listen(bus, 1.0)
+            else:
+                print("Run did not start; skipping CAN stop commands")
+        except can.CanError as exc:
+            print(f"Stop command failed: {exc}")
         finally:
             bus.shutdown()
             print("CAN closed")

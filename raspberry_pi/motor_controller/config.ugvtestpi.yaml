@@ -1,0 +1,84 @@
+# Raspberry Pi teststand profile for ODrive/ODESC mower-deck CAN bring-up.
+# No camera, no SensorHub dependency, and no GPIO/PWM mower outputs.
+
+pwm:
+  enabled: false
+  pins:
+    left: 19
+    right: 18
+  frequency: 50
+  neutral_value: 1500
+  min_value: 1000
+  max_value: 2000
+  forward_factor: 500.0
+  turn_factor: 300.0
+
+ramping:
+  enabled: true
+  acceleration_rate: 25
+  deceleration_rate: 800
+  brake_rate: 1500
+  update_interval: 0.02
+
+safety:
+  pin: 17
+  enabled: false
+  debounce_time: 0.2
+  command_timeout: 2.0
+  joystick_timeout: 1.0
+
+light:
+  enabled: false
+  pin: 22
+
+mower:
+  enabled: false
+  relay_pin: 23
+  pwm_pin: 12
+  pwm_frequency: 1000
+  duty_min: 16
+  duty_max: 84
+  duty_off: 0
+
+can:
+  interface: can0
+  bitrate: 250000
+  motor_controller_id: 0x200
+  sensor_hub_id: 0x100
+  max_frame_size: 6
+  frame_timeout: 1.0
+
+navigation:
+  enabled: false
+  watchdog_timeout_s: 1.0
+  geofence_radius_m: 50.0
+  max_joystick: 0.30
+  acceptance_radius_m: 0.25
+  slowdown_radius_m: 0.5
+  turn_kp: 0.02
+  track_lookahead_m: 0.8
+  min_inner_wheel_speed: 0.50
+
+mapping:
+  enabled: false
+  maps_dir: /home/imperator/ugvtestpi/maps
+  min_point_distance_m: 0.25
+
+web:
+  enabled: true
+  host: 0.0.0.0
+  port: 8080
+  secret_key: ugvtestpi_teststand
+  template_folder: templates
+  static_folder: static
+  max_speed_percent: 20.0
+
+logging:
+  level: INFO
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  file: /home/imperator/ugvtestpi/motor_controller.log
+  console: true
+  file_enabled: false
+
+quiet: false
+monitor: true
