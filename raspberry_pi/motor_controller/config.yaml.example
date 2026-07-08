@@ -47,7 +47,8 @@ mower:
 
 odrive_mower:
   enabled: false           # Teststand: ODrive/ODESC-Mähdeck per CAN statt GPIO/PWM
-  node_id: 0
+  node_id: 0               # Rueckfall fuer Einzelmotor-Betrieb
+  node_ids: [0, 1, 2]      # Teststand: alle Mähmotor-Nodes gemeinsam starten
   axis_state: 5            # Legacy sensorless state
   min_rpm: 500             # Sensorless-Teststand: darunter unzuverlaessig
   max_rpm: 5000
@@ -55,6 +56,7 @@ odrive_mower:
   ramp_rate_rpm_s: 300
   command_interval_s: 0.1  # Set_Input_Vel periodisch senden
   coast_delay_s: 0.5
+  start_stagger_s: 0.3     # Mehrere Mäher-Nodes nacheinander starten
 
 # CAN-Bus-Konfiguration
 can:

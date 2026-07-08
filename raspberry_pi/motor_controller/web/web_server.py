@@ -915,10 +915,15 @@ class WebServer:
                 'mower_default_rpm': status['default_rpm'],
                 'mower_ramp_rate_rpm_s': status['ramp_rate_rpm_s'],
                 'mower_node_id': status['node_id'],
+                'mower_node_ids': status.get('node_ids', [status['node_id']]),
                 'mower_axis_state': status['axis_state'],
                 'mower_error': status['error'],
                 'odrive_error': status.get('odrive_error', 0),
                 'odrive_state': status.get('odrive_state', 0),
+                'odrive_errors': status.get('odrive_errors', {}),
+                'odrive_states': status.get('odrive_states', {}),
+                'odrive_missing_heartbeats': status.get('odrive_missing_heartbeats', []),
+                'odrive_heartbeat_ages': status.get('odrive_heartbeat_ages', {}),
             }
 
         speed = self.pwm_controller.get_mower_speed() if self.pwm_controller else 0
@@ -935,10 +940,15 @@ class WebServer:
             'mower_default_rpm': None,
             'mower_ramp_rate_rpm_s': None,
             'mower_node_id': None,
+            'mower_node_ids': [],
             'mower_axis_state': None,
             'mower_error': error,
             'odrive_error': 0,
             'odrive_state': 0,
+            'odrive_errors': {},
+            'odrive_states': {},
+            'odrive_missing_heartbeats': [],
+            'odrive_heartbeat_ages': {},
         }
 
     def _emit_status_update(self):

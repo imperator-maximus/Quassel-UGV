@@ -43,6 +43,7 @@ mower:
 odrive_mower:
   enabled: true
   node_id: 0
+  node_ids: [0, 1, 2]
   axis_state: 5
   min_rpm: 500
   max_rpm: 5000
@@ -50,6 +51,8 @@ odrive_mower:
   ramp_rate_rpm_s: 300
   command_interval_s: 0.1
   coast_delay_s: 0.5
+  start_stagger_s: 0.3
+  heartbeat_timeout_s: 1.0
 
 can:
   interface: can0

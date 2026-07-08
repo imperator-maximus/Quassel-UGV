@@ -69,6 +69,7 @@ class ODriveMowerConfig:
     """ODrive/ODESC-Mähdeck-Teststand über CAN."""
     enabled: bool = False
     node_id: int = 0
+    node_ids: List[int] = field(default_factory=list)
     axis_state: int = 5
     min_rpm: int = 300
     max_rpm: int = 1200
@@ -76,6 +77,8 @@ class ODriveMowerConfig:
     ramp_rate_rpm_s: int = 300
     command_interval_s: float = 0.1
     coast_delay_s: float = 0.5
+    start_stagger_s: float = 0.3
+    heartbeat_timeout_s: float = 1.0
 
 
 @dataclass
@@ -190,7 +193,10 @@ class Config:
         if 'mower' in data:
             config.mower = MowerConfig(**data['mower'])
         if 'odrive_mower' in data:
-            config.odrive_mower = ODriveMowerConfig(**data['odrive_mower'])
+            odrive_data = dict(data['odrive_mower'])
+            if 'node_ids' in odrive_data and odrive_data['node_ids'] is None:
+                odrive_data['node_ids'] = []
+            config.odrive_mower = ODriveMowerConfig(**odrive_data)
         if 'can' in data:
             config.can = CANConfig(**data['can'])
         if 'navigation' in data:
@@ -250,13 +256,16 @@ class Config:
             'odrive_mower': {
                 'enabled': self.odrive_mower.enabled,
                 'node_id': self.odrive_mower.node_id,
+                'node_ids': self.odrive_mower.node_ids,
                 'axis_state': self.odrive_mower.axis_state,
                 'min_rpm': self.odrive_mower.min_rpm,
                 'max_rpm': self.odrive_mower.max_rpm,
                 'default_rpm': self.odrive_mower.default_rpm,
                 'ramp_rate_rpm_s': self.odrive_mower.ramp_rate_rpm_s,
                 'command_interval_s': self.odrive_mower.command_interval_s,
-                'coast_delay_s': self.odrive_mower.coast_delay_s
+                'coast_delay_s': self.odrive_mower.coast_delay_s,
+                'start_stagger_s': self.odrive_mower.start_stagger_s,
+                'heartbeat_timeout_s': self.odrive_mower.heartbeat_timeout_s
             },
             'can': {
                 'interface': self.can.interface,
