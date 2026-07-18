@@ -6,7 +6,8 @@
 - **OS:** DietPi
 - **User:** `imperator`
 - **App-Verzeichnis:** `/opt/sensor_hub`
-- **CAN:** CANable2 per USB via `slcan-can0.service` → `can0`
+- **CAN:** USB-CAN adapter (currently CANable2) via `slcan-can0.service` → `can0`
+- **CAN protocol:** Classical CAN 2.0 at 1 Mbit/s; CAN FD is not used
 - **GPS:** Holybro UM982 per USB via `/dev/serial/by-id/...`
 - **IMU:** WitMotion USB via `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`
 - **Web:** direkte Auslieferung auf **Port 80**
@@ -97,6 +98,7 @@ curl http://127.0.0.1/api/ntrip/status
 
 - `sensor-hub.service` läuft als User `imperator`
 - `can0` ist `UP`
+- der USB-CAN-Adapter arbeitet mit Classical CAN 2.0 bei 1 Mbit/s
 - `http://orangeugv/` antwortet direkt von Flask/Werkzeug auf Port 80
 - `/api/health` meldet `status: ok`
 - `/api/status` liefert GPS-Daten

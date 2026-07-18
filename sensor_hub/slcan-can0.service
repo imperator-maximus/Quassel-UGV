@@ -1,5 +1,5 @@
 [Unit]
-Description=CANable2 slcan bridge as can0
+Description=Orange Pi Classical CAN 2.0 USB-CAN bridge (CANable2) as can0
 After=network-online.target
 Wants=network-online.target
 

@@ -8,6 +8,21 @@ Modulare, erweiterbare Plattform für autonome Rasenmäher mit:
 - Sicherheitssysteme & Notfallbehandlung
 - Web-Interface & Remote-Steuerung
 
+## CAN-Hardwaretopologie
+
+Alle Teilnehmer verwenden **Classical CAN 2.0** mit maximal 8 Datenbytes pro
+Frame. CAN FD wird nicht verwendet.
+
+| Einsatz | CAN-Anbindung | Profil |
+|---------|---------------|--------|
+| Orange Pi Zero 2W Sensor Hub | USB-CAN-Adapter (aktuell CANable2), SocketCAN `can0` | Produktion: 1 Mbit/s |
+| Haupt-UGV-Rechner (Raspberry Pi 3) | InnoMaker RS485 CAN HAT (MCP2515), SocketCAN `can0` | Produktion: 1 Mbit/s |
+| UGV-Testrechner | USB-CAN-Adapter, SocketCAN `can0` | Teststand: 250 kbit/s |
+| ODrive/ODESC | integrierte CAN-Schnittstelle, SimpleCAN | Bitrate des jeweiligen Busses |
+
+Auf einem gemeinsamen physischen Bus müssen alle Teilnehmer dieselbe Bitrate
+verwenden.
+
 ## 📁 Projektstruktur
 
 ```
@@ -164,4 +179,3 @@ POST /api/sensor/restart      # Sensor Hub neustarten
 ---
 
 **Status**: Architektur-Plan erstellt | **Nächster Schritt**: Config-System implementieren
-

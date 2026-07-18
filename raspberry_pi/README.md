@@ -9,10 +9,10 @@
 **Goal:** Implement autonomous UGV with RTK-GPS positioning, IMU orientation, and real-time web interface.
 
 **Hardware:**
-- **Sensor Hub**: Orange Pi Zero 2W + CANable2
+- **Sensor Hub**: Orange Pi Zero 2W + USB-CAN adapter (currently CANable2)
   - Holybro UM982 (Dual-antenna RTK-GPS, USB)
   - WitMotion USB-IMU (USB)
-- **Motor Controller**: Raspberry Pi 3 + Innomaker RS485 CAN HAT
+- **Motor Controller**: Raspberry Pi 3 + InnoMaker RS485 CAN HAT
   - Motor control (2-channel Hardware-PWM via pigpio)
   - Mower control (Relay + PWM speed control)
   - Light control (Relay)
@@ -20,7 +20,10 @@
   - Web interface with virtual joystick
 
 **Communication:**
-- CAN Bus: 500 kbit/s (Sensor Hub) / 1 Mbps (Motor Control)
+- Protocol: Classical CAN 2.0 on all devices; CAN FD is not used
+- Production CAN bus: 1 Mbit/s
+- UGV test stand: USB-CAN adapter at 250 kbit/s
+- ODrive/ODESC controllers: integrated CAN interface using SimpleCAN
 - JSON-based Multi-Frame Protocol
 - IMU/GPS telemetry updates
 - WebSocket: Real-time web interface
@@ -129,17 +132,19 @@ Connect Sensor Hub to Controller via CAN Bus:
 
 ## 🔧 Hardware Configuration
 
-### PiCAN FD Details
+### InnoMaker RS485 CAN HAT Details
 - **CAN Controller:** MCP2515
+- **Protocol:** Classical CAN 2.0 (maximum 8 data bytes per frame)
 - **16MHz oscillator** for stable CAN timing
 - **GPIO25** for CAN interrupt
 - **SPI Interface:** spi0.1 (CS1)
 
-### Sensor Hub (Pi Zero 2W) Boot Configuration
+### Sensor Hub (Orange Pi Zero 2W) Boot Configuration
 ```bash
 # Current production sensor hub:
 # - Orange Pi Zero 2W
-# - CANable2 via USB / slcan
+# - USB-CAN adapter (currently CANable2) via slcan
+# - Classical CAN 2.0 at 1 Mbit/s
 # - Holybro UM982 via USB serial
 # - WitMotion via USB serial
 #
@@ -152,6 +157,17 @@ Connect Sensor Hub to Controller via CAN Bus:
 dtparam=spi=on
 dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=25
 ```
+
+This overlay configures the MCP2515 on the **InnoMaker RS485 CAN HAT**. It
+does not enable CAN FD.
+
+### UGV Test Stand and ODrive
+
+- The UGV test Raspberry Pi uses a **USB-CAN adapter**, not the InnoMaker HAT.
+- `ugvtestpi-usbcan0.service` configures its `can0` for **250 kbit/s**.
+- The ODrive/ODESC units provide their own **integrated Classical CAN 2.0**
+  interfaces and communicate via SimpleCAN.
+- Every participant on one physical CAN bus must use the same bitrate.
 
 ### Sensor Configuration
 **GPS (Holybro UM982):**
@@ -252,7 +268,7 @@ ip link show can0
 # Monitor CAN traffic
 candump can0
 
-# Verify bitrate: 500 kbit/s for sensor hub
+# Verify bitrate: 1 Mbit/s on the production bus
 ```
 
 ### Web Interface Not Accessible
@@ -274,7 +290,8 @@ curl http://localhost:80
 - **GPS Accuracy**: RTK Fixed (cm-level)
 - **Heading Accuracy**: Dual-antenna (±1°)
 - **IMU Sampling**: 200 Hz (5ms)
-- **CAN Bitrate**: 500 kbit/s (Sensor Hub)
+- **CAN Protocol**: Classical CAN 2.0; CAN FD is not used
+- **CAN Bitrate**: 1 Mbit/s production bus / 250 kbit/s UGV test stand
 - **Memory Usage**: Python runtime (~80MB RAM)
 
 ### Communication Latency
@@ -286,8 +303,8 @@ curl http://localhost:80
 ## 🎉 Success Criteria
 
 ### Hardware Setup Complete
-- ✅ PiCAN FD properly configured in boot config
-- ✅ MCP2515 successfully initialized on spi0.1
+- ✅ InnoMaker RS485 CAN HAT properly configured in boot config
+- ✅ MCP2515 Classical CAN 2.0 controller successfully initialized on spi0.1
 - ✅ CAN interface can0 UP and ready
 - ✅ WitMotion USB device detected
 - ✅ UART GPS receiving NMEA data
@@ -306,4 +323,3 @@ Once setup is complete, the system provides:
 - **6-DoF orientation** from WitMotion IMU
 - **Real-time web interface** with Bing Maps
 - **Autonomous navigation** capabilities
-

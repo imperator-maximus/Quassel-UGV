@@ -37,23 +37,32 @@ pip install python-can
 ```
 
 ### Hardware Requirements
-- Raspberry Pi with PiCAN FD
+- Orange Pi Zero 2W with USB-CAN adapter for the sensor hub
+- Main Raspberry Pi 3 with InnoMaker RS485 CAN HAT
+- UGV test Raspberry Pi with USB-CAN adapter
+- ODrive/ODESC controllers with integrated CAN interfaces
 - CAN bus connection between Sensor Hub and Controller
 - Proper CAN termination (120Ω resistors)
+- Classical CAN 2.0 on every node; CAN FD is not used
 
 ## 🔧 CAN Architecture Overview
 
-### Sensor Hub (Pi Zero 2W)
+### Sensor Hub (Orange Pi Zero 2W)
 - **Holybro UM982 RTK-GPS**: Dual-antenna for position and heading
 - **WitMotion USB-IMU**: IMU with native orientation output
-- **PiCAN FD**: CAN interface (500 kbit/s)
+- **USB-CAN adapter (currently CANable2)**: SocketCAN `can0`, Classical CAN 2.0 at 1 Mbit/s
 - **Sends**: GPS position, heading, RTK status, IMU orientation
 
 ### Controller (Pi 3)
 - **Motor Controller**: Receives CAN messages from sensor hub
 - **Web Interface**: Real-time Bing Maps display
-- **PiCAN FD**: CAN interface (1 Mbps for motor control)
+- **InnoMaker RS485 CAN HAT**: SocketCAN `can0`, Classical CAN 2.0 at 1 Mbit/s
 - **Receives**: Sensor data from hub
+
+### UGV Test Stand
+- **USB-CAN adapter**: SocketCAN `can0`, Classical CAN 2.0 at 250 kbit/s
+- **ODrive/ODESC units**: Integrated CAN interfaces using SimpleCAN
+- **Requirement**: Every test-bus node must be configured for 250 kbit/s
 
 ## 🔗 Integration Workflow
 
@@ -89,20 +98,26 @@ pip install python-can
 # On Raspberry Pi
 ip link show can0
 
-# If not found, check boot config
+# Main UGV with InnoMaker CAN HAT: check MCP2515 boot config
 cat /boot/firmware/config.txt | grep mcp2515
 ```
+
+For the Orange Pi and UGV test stand, check the USB adapter and its service
+instead; these systems do not use the MCP2515 Device Tree overlay.
 
 #### "No CAN messages received"
 - Verify CAN wiring (CANH, CANL, GND)
 - Check 120Ω termination resistors
-- Confirm CAN bitrate (500 kbit/s for sensor hub, 1 Mbps for motor control)
+- Confirm CAN bitrate (1 Mbit/s production bus, 250 kbit/s UGV test stand)
 - Ensure both devices have same bitrate
 
 #### "CAN interface down"
 ```bash
-# On Raspberry Pi - bring interface up
-sudo ip link set can0 up type can bitrate 500000
+# Main UGV production bus
+sudo ip link set can0 up type can bitrate 1000000
+
+# UGV test stand (USB-CAN)
+sudo ip link set can0 up type can bitrate 250000
 ```
 
 ## 📊 Expected Output

@@ -46,7 +46,7 @@ mower:
   duty_off: 0              # % (Aus)
 
 odrive_mower:
-  enabled: false           # Teststand: ODrive/ODESC-Mähdeck per CAN statt GPIO/PWM
+  enabled: false           # Teststand: ODrive/ODESC mit integriertem CAN 2.0
   node_id: 0               # Rueckfall fuer Einzelmotor-Betrieb
   node_ids: [0, 1, 2]      # Teststand: alle Mähmotor-Nodes gemeinsam starten
   axis_state: 5            # Legacy sensorless state
@@ -58,7 +58,9 @@ odrive_mower:
   coast_delay_s: 0.5
   start_stagger_s: 0.3     # Mehrere Mäher-Nodes nacheinander starten
 
-# CAN-Bus-Konfiguration
+# Classical-CAN-2.0-Konfiguration; CAN FD wird nicht verwendet.
+# Haupt-UGV: InnoMaker CAN HAT bei 1 Mbit/s.
+# UGV-Test: USB-CAN-Adapter bei 250 kbit/s (separates Testprofil).
 can:
   interface: can0
   bitrate: 1000000

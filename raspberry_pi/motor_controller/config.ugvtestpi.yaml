@@ -1,4 +1,6 @@
-# Raspberry Pi teststand profile for ODrive/ODESC mower-deck CAN bring-up.
+# Raspberry Pi teststand profile using a USB-CAN adapter for ODrive/ODESC
+# mower-deck bring-up. ODrive/ODESC units use their integrated Classical CAN
+# 2.0 interfaces; CAN FD is not used.
 # No camera, no SensorHub dependency, and no GPIO/PWM mower outputs.
 
 pwm:
@@ -56,7 +58,7 @@ odrive_mower:
 
 can:
   interface: can0
-  bitrate: 250000
+  bitrate: 250000       # USB-CAN test bus; all ODrive nodes must match
   motor_controller_id: 0x200
   sensor_hub_id: 0x100
   max_frame_size: 6

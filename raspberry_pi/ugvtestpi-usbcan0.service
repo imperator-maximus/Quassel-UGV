@@ -1,5 +1,5 @@
 [Unit]
-Description=UGV teststand USB-CAN SocketCAN can0 at 250 kbit/s
+Description=UGV teststand Classical CAN 2.0 via USB-CAN can0 at 250 kbit/s
 After=network.target
 
 [Service]

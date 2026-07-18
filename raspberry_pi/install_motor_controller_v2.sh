@@ -88,11 +88,11 @@ sudo sed -i "s|/home/nicolay/motor_controller|/home/$USER/motor_controller|g" /e
 sudo systemctl daemon-reload
 print_success "Systemd-Service installiert"
 
-# 9. CAN-Interface konfigurieren
-print_info "Konfiguriere CAN-Interface..."
+# 9. InnoMaker RS485 CAN HAT konfigurieren (MCP2515, Classical CAN 2.0)
+print_info "Konfiguriere InnoMaker CAN HAT..."
 if ! grep -q "dtoverlay=mcp2515-can1" /boot/config.txt; then
     echo "dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=25" | sudo tee -a /boot/config.txt
-    print_success "CAN-Interface in /boot/config.txt konfiguriert"
+    print_success "InnoMaker CAN HAT in /boot/config.txt konfiguriert"
 else
     print_info "CAN-Interface bereits konfiguriert"
 fi
@@ -158,4 +158,3 @@ if ! ip link show can0 &> /dev/null; then
         sudo reboot
     fi
 fi
-
