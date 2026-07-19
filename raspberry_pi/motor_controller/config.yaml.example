@@ -59,11 +59,10 @@ odrive_mower:
   start_stagger_s: 0.3     # Mehrere Mäher-Nodes nacheinander starten
 
 # Classical-CAN-2.0-Konfiguration; CAN FD wird nicht verwendet.
-# Haupt-UGV: InnoMaker CAN HAT bei 1 Mbit/s.
-# UGV-Test: USB-CAN-Adapter bei 250 kbit/s (separates Testprofil).
+# Haupt-UGV und ehemaliger UGV-Teststand: einheitlich 250 kbit/s.
 can:
   interface: can0
-  bitrate: 1000000
+  bitrate: 250000
   motor_controller_id: 0x200  # Eigene CAN-ID
   sensor_hub_id: 0x100        # Sensor Hub CAN-ID
   max_frame_size: 6           # Bytes Nutzdaten pro Frame

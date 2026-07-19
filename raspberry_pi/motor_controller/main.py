@@ -352,7 +352,7 @@ def main():
     parser.add_argument('--web', action='store_true', help='Web-Interface aktivieren')
     parser.add_argument('--web-port', type=int, default=80, help='Web-Port')
     parser.add_argument('--can', default='can0', help='CAN-Interface')
-    parser.add_argument('--bitrate', type=int, default=1000000, help='CAN-Bitrate')
+    parser.add_argument('--bitrate', type=int, default=250000, help='CAN-Bitrate')
     parser.add_argument('--quiet', action='store_true', help='Keine Ausgabe')
     
     args = parser.parse_args()

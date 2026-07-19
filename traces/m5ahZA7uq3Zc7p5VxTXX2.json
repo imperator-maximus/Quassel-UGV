@@ -1,0 +1,496 @@
+{
+  "trace_id": "m5ahZA7uq3Zc7p5VxTXX2",
+  "skill_id": "HLMo_775nwxvIOnt6T402",
+  "endpoint_id": "KFgFIFnWiQwAUkWKxZca7",
+  "started_at": "2026-07-18T19:33:50.245Z",
+  "completed_at": "2026-07-18T19:33:55.295Z",
+  "success": true,
+  "status_code": 200,
+  "trace_version": "5d9ebf619c61@089d49f75f26",
+  "decision_trace": [
+    {
+      "step": "probe",
+      "method": "GET-1byte",
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "ms": 5912
+    },
+    {
+      "step": "decision",
+      "strategy": "server",
+      "reason": "probe 200 + html + dom_extraction recipe — server fetch + extract"
+    },
+    {
+      "step": "server_fetch",
+      "status": 200
+    }
+  ],
+  "result": [
+    {
+      "type": "spa-initial-state",
+      "data": {
+        "url": "https://www.paypal.com/sdk/js?client-id=Abnv3pCUowbhrDfk7Ok8gpuMkML2VcVi6p6Wjs_nGjs9MPntQZm4SmfyhhOPVIAMH5gtv8CTfOEW79hX&currency=USD&integration-date=2026-05-14&components=buttons,funding-eligibility&vault=false&commit=false&intent=capture&disable-funding=card,paylater&enable-funding=venmo",
+        "url_params": {
+          "client-id": "Abnv3pCUowbhrDfk7Ok8gpuMkML2VcVi6p6Wjs_nGjs9MPntQZm4SmfyhhOPVIAMH5gtv8CTfOEW79hX",
+          "currency": "USD",
+          "integration-date": "2026-05-14",
+          "components": "buttons,funding-eligibility",
+          "vault": "false",
+          "commit": "false",
+          "intent": "capture",
+          "disable-funding": "bancontact,blik,eps,ideal,mybank,p24,trustly,multibanco,card,paylater",
+          "enable-funding": "venmo"
+        },
+        "script_attributes": {
+          "data-partner-attribution-id": "Woo_PPCP"
+        },
+        "client_id": "Abnv3pCUowbhrDfk7Ok8gpuMkML2VcVi6p6Wjs_nGjs9MPntQZm4SmfyhhOPVIAMH5gtv8CTfOEW79hX",
+        "currency": "USD",
+        "data_client_id": {
+          "set_attribute": false,
+          "endpoint": "/?wc-ajax=ppc-data-client-id",
+          "nonce": "4da1ee17ed",
+          "user": 0,
+          "has_subscriptions": false,
+          "paypal_subscriptions_enabled": false
+        },
+        "redirect": "https://www.inno-maker.com/checkout/",
+        "context": "mini-cart",
+        "ajax": {
+          "simulate_cart": {
+            "endpoint": "/?wc-ajax=ppc-simulate-cart",
+            "nonce": "b429dbe776"
+          },
+          "change_cart": {
+            "endpoint": "/?wc-ajax=ppc-change-cart",
+            "nonce": "732b52cc00"
+          },
+          "create_order": {
+            "endpoint": "/?wc-ajax=ppc-create-order",
+            "nonce": "efdc56f83b"
+          },
+          "approve_order": {
+            "endpoint": "/?wc-ajax=ppc-approve-order",
+            "nonce": "102f5c7aca"
+          },
+          "get_order": {
+            "endpoint": "/?wc-ajax=ppc-get-order",
+            "nonce": "0e20cf6c5e"
+          },
+          "approve_subscription": {
+            "endpoint": "/?wc-ajax=ppc-approve-subscription",
+            "nonce": "81b6ce3792"
+          },
+          "save_checkout_form": {
+            "endpoint": "/?wc-ajax=ppc-save-checkout-form",
+            "nonce": "ad529271ae"
+          },
+          "validate_checkout": {
+            "endpoint": "/?wc-ajax=ppc-validate-checkout",
+            "nonce": "a26f58c8b6"
+          },
+          "cart_script_params": {
+            "endpoint": "/?wc-ajax=ppc-cart-script-params"
+          },
+          "create_setup_token": {
+            "endpoint": "/?wc-ajax=ppc-create-setup-token",
+            "nonce": "e5b69421a0"
+          },
+          "create_payment_token": {
+            "endpoint": "/?wc-ajax=ppc-create-payment-token",
+            "nonce": "5ab2ecf94c"
+          },
+          "create_payment_token_for_guest": {
+            "endpoint": "/?wc-ajax=ppc-update-customer-id",
+            "nonce": "2df1b4c3b0"
+          },
+          "update_shipping": {
+            "endpoint": "/?wc-ajax=ppc-update-shipping",
+            "nonce": "35322279f6"
+          },
+          "update_customer_shipping": {
+            "shipping_options": {
+              "endpoint": "https://www.inno-maker.com/wp-json/wc/store/v1/cart/select-shipping-rate"
+            },
+            "shipping_address": {
+              "cart_endpoint": "https://www.inno-maker.com/wp-json/wc/store/v1/cart/",
+              "update_customer_endpoint": "https://www.inno-maker.com/wp-json/wc/store/v1/cart/update-customer"
+            },
+            "wp_rest_nonce": "e7e52654a8",
+            "update_shipping_method": "/?wc-ajax=update_shipping_method"
+          }
+        },
+        "cart_contains_subscription": "",
+        "subscription_plan_id": "",
+        "variable_paypal_subscription_variations": [],
+        "variable_paypal_subscription_variation_from_cart": "",
+        "subscription_product_allowed": "",
+        "locations_with_subscription_product": {
+          "product": false,
+          "payorder": false,
+          "cart": false
+        },
+        "enforce_vault": "",
+        "can_save_vault_token": "",
+        "is_free_trial_cart": "",
+        "bn_codes": {
+          "checkout": "Woo_PPCP",
+          "cart": "Woo_PPCP",
+          "mini-cart": "Woo_PPCP",
+          "product": "Woo_PPCP"
+        },
+        "payer": null,
+        "button": {
+          "wrapper": "#ppc-button-ppcp-gateway",
+          "is_disabled": false,
+          "mini_cart_wrapper": "#ppc-button-minicart",
+          "is_mini_cart_disabled": false,
+          "cancel_wrapper": "#ppcp-cancel",
+          "mini_cart_style": {
+            "layout": "vertical",
+            "color": "gold",
+            "shape": "rect",
+            "label": "paypal",
+            "tagline": false,
+            "height": 35
+          },
+          "style": {
+            "layout": "vertical",
+            "color": "gold",
+            "shape": "rect",
+            "label": "paypal",
+            "tagline": false
+          }
+        },
+        "separate_buttons": {
+          "card": {
+            "id": "ppcp-card-button-gateway",
+            "wrapper": "#ppc-button-ppcp-card-button-gateway",
+            "style": {
+              "shape": "rect",
+              "color": "black",
+              "layout": "horizontal"
+            }
+          }
+        },
+        "hosted_fields": {
+          "wrapper": "#ppcp-hosted-fields",
+          "labels": {
+            "credit_card_number": "",
+            "cvv": "",
+            "mm_yy": "MM/YY",
+            "fields_empty": "Card payment details are missing. Please fill in all required fields.",
+            "fields_not_valid": "Unfortunately, your credit card details are not valid.",
+            "card_not_supported": "Unfortunately, we do not support your credit card.",
+            "cardholder_name_required": "Cardholder's first and last name are required, please fill the checkout form required fields."
+          },
+          "valid_cards": [
+            "mastercard",
+            "visa",
+            "master-card"
+          ],
+          "contingency": "NO_3D_SECURE"
+        },
+        "messages": [],
+        "labels": {
+          "error": {
+            "generic": "Something went wrong. Please try again or choose another payment source.",
+            "required": {
+              "generic": "Required form fields are not filled.",
+              "field": "%s is a required field.",
+              "elements": {
+                "terms": "Please read and accept the terms and conditions to proceed with your order."
+              }
+            }
+          },
+          "billing_field": "Billing %s",
+          "shipping_field": "Shipping %s"
+        },
+        "simulate_cart": {
+          "enabled": true,
+          "throttling": 5000
+        },
+        "order_id": "0",
+        "order_key": "",
+        "single_product_buttons_enabled": "1",
+        "mini_cart_buttons_enabled": "1",
+        "basic_checkout_validation_enabled": "",
+        "early_checkout_validation_enabled": "1",
+        "funding_sources_without_redirect": [
+          "paypal",
+          "paylater",
+          "venmo",
+          "card"
+        ],
+        "user": {
+          "is_logged": false,
+          "has_wc_card_payment_tokens": false
+        },
+        "should_handle_shipping_in_paypal": "",
+        "server_side_shipping_callback": {
+          "enabled": true
+        },
+        "appswitch": {
+          "enabled": true
+        },
+        "needShipping": "",
+        "vaultingEnabled": "",
+        "productType": null,
+        "manualRenewalEnabled": "",
+        "final_review_enabled": "1"
+      },
+      "relevance_score": 58
+    },
+    {
+      "type": "spa-initial-state",
+      "data": {
+        "themeUrl": "https://www.inno-maker.com/wp-content/themes/dt-the7",
+        "passText": "To view this protected post, enter the password below:",
+        "moreButtonText": {
+          "loading": "Loading...",
+          "loadMore": "Load more"
+        },
+        "postID": "4938",
+        "ajaxurl": "https://www.inno-maker.com/wp-admin/admin-ajax.php",
+        "REST": {
+          "baseUrl": "https://www.inno-maker.com/wp-json/the7/v1",
+          "endpoints": {
+            "sendMail": "/send-mail"
+          }
+        },
+        "contactMessages": {
+          "required": "One or more fields have an error. Please check and try again.",
+          "terms": "Please accept the privacy policy.",
+          "fillTheCaptchaError": "Please, fill the captcha."
+        },
+        "captchaSiteKey": "",
+        "ajaxNonce": "6d4ba3dc79",
+        "pageData": {
+          "type": "page",
+          "template": "page",
+          "layout": null
+        },
+        "themeSettings": {
+          "smoothScroll": "on",
+          "lazyLoading": false,
+          "desktopHeader": {
+            "height": 90
+          },
+          "ToggleCaptionEnabled": "disabled",
+          "ToggleCaption": "Navigation",
+          "floatingHeader": {
+            "showAfter": 94,
+            "showMenu": true,
+            "height": 60,
+            "logo": {
+              "showLogo": true,
+              "html": "![INNOMAKER| Automotive Ethernet|USB CAN|USB CAMERA|HIFI AUDIO](https://www.inno-maker.com/wp-content/uploads/2022/03/innomaker-logo.png)",
+              "url": "https://www.inno-maker.com/"
+            }
+          },
+          "topLine": {
+            "floatingTopLine": {
+              "logo": {
+                "showLogo": false,
+                "html": ""
+              }
+            }
+          },
+          "mobileHeader": {
+            "firstSwitchPoint": 992,
+            "secondSwitchPoint": 778,
+            "firstSwitchPointHeight": 60,
+            "secondSwitchPointHeight": 60,
+            "mobileToggleCaptionEnabled": "disabled",
+            "mobileToggleCaption": "菜单"
+          },
+          "stickyMobileHeaderFirstSwitch": {
+            "logo": {
+              "html": ""
+            }
+          },
+          "stickyMobileHeaderSecondSwitch": {
+            "logo": {
+              "html": ""
+            }
+          },
+          "sidebar": {
+            "switchPoint": 992
+          },
+          "boxedWidth": "1280px"
+        },
+        "wcCartFragmentHash": "cbe8a83ca8d088048b5634aac798fd91",
+        "elementor": {
+          "settings": {
+            "container_width": 1400
+          }
+        }
+      },
+      "relevance_score": 44
+    },
+    {
+      "type": "spa-initial-state",
+      "data": {
+        "disable_ajax_loading": "",
+        "url_variable": "filters",
+        "url_mask": "%t%[%v%]",
+        "url_split": "|",
+        "nice_url_variable": "filters",
+        "nice_url_value_1": "/",
+        "nice_url_value_2": "",
+        "nice_url_split": "/",
+        "version": "3.2.0.3",
+        "number_style": [
+          ",",
+          ".",
+          2
+        ],
+        "current_language": "",
+        "current_page_url": "https://www.inno-maker.com/rs485-and-can-module-for-raspberry-pi",
+        "ajaxurl": "https://www.inno-maker.com/wp-admin/admin-ajax.php",
+        "product_cat": "-1",
+        "product_taxonomy": "-1",
+        "s": "",
+        "products_holder_id": "ul.products,.bapf_products_apply_filters  .elementor-loop-container",
+        "result_count_class": ".woocommerce-result-count",
+        "ordering_class": "form.woocommerce-ordering",
+        "pagination_class": ".woocommerce-pagination,.bapf_products_apply_filters  .elementor-pagination, .bapf_products_apply_filters .e-load-more-anchor",
+        "control_sorting": "1",
+        "seo_friendly_urls": "1",
+        "seo_uri_decode": "",
+        "slug_urls": "",
+        "nice_urls": "",
+        "ub_product_count": "",
+        "ub_product_text": "products",
+        "ub_product_button_text": "Show",
+        "default_sorting": "menu_order",
+        "first_page": "1",
+        "scroll_shop_top": "",
+        "ajax_request_load": "1",
+        "ajax_request_load_style": "jquery",
+        "use_request_method": "get",
+        "no_products": "No products were found matching your selection.",
+        "recount_products": "1",
+        "pos_relative": "1",
+        "woocommerce_removes": {
+          "result_count": "",
+          "ordering": "",
+          "pagination": "",
+          "pagination_ajax": true
+        },
+        "pagination_ajax": "1",
+        "description_show": "click",
+        "description_hide": "click",
+        "hide_sel_value": "",
+        "hide_o_value": "1",
+        "use_select2": "",
+        "hide_empty_value": "1",
+        "hide_button_value": "1",
+        "scroll_shop_top_px": "-180",
+        "load_image": "",
+        "translate": {
+          "show_value": "Show value(s)",
+          "hide_value": "Hide value(s)",
+          "unselect_all": "Unselect all",
+          "nothing_selected": "Nothing is selected",
+          "products": "products"
+        },
+        "trailing_slash": "1",
+        "pagination_base": "page",
+        "reload_changed_filters": "",
+        "operator_and": "+",
+        "operator_or": "-",
+        "nice_url_mask": "%t%/%v%",
+        "nn_url_variable": "filters",
+        "nn_url_mask": "%t%[%v%]",
+        "nn_url_value_1": "[",
+        "nn_url_value_2": "]",
+        "nn_url_split": "|"
+      },
+      "relevance_score": 23
+    },
+    {
+      "type": "spa-initial-state",
+      "data": {
+        "params": {
+          "lifetime": 0.00001,
+          "session": 30,
+          "base64": false,
+          "ajaxurl": "https://www.inno-maker.com/wp-admin/admin-ajax.php",
+          "prefix": "wc_order_attribution_",
+          "allowTracking": true
+        },
+        "fields": {
+          "source_type": "current.typ",
+          "referrer": "current_add.rf",
+          "utm_campaign": "current.cmp",
+          "utm_source": "current.src",
+          "utm_medium": "current.mdm",
+          "utm_content": "current.cnt",
+          "utm_id": "current.id",
+          "utm_term": "current.trm",
+          "utm_source_platform": "current.plt",
+          "utm_creative_format": "current.fmt",
+          "utm_marketing_tactic": "current.tct",
+          "session_entry": "current_add.ep",
+          "session_start_time": "current_add.fd",
+          "session_pages": "session.pgs",
+          "session_count": "udata.vst",
+          "user_agent": "udata.uag"
+        }
+      },
+      "relevance_score": 10
+    },
+    {
+      "type": "spa-initial-state",
+      "data": {
+        "loadVariationTieredPricingNonce": "052220b5c8",
+        "currencyOptions": {
+          "currency_symbol": "&#36;",
+          "decimal_separator": ".",
+          "thousand_separator": ",",
+          "decimals": 2,
+          "price_format": "%1$s%2$s"
+        },
+        "supportedVariableProductTypes": [
+          "variable",
+          "variable-subscription"
+        ],
+        "supportedSimpleProductTypes": [
+          "simple",
+          "subscription",
+          "variation"
+        ]
+      },
+      "relevance_score": 7.1
+    },
+    {
+      "type": "spa-initial-state",
+      "data": {
+        "shareButtonText": {
+          "facebook": "Share on Facebook",
+          "twitter": "Share on X",
+          "pinterest": "Pin it",
+          "linkedin": "Share on Linkedin",
+          "whatsapp": "Share on Whatsapp"
+        },
+        "overlayOpacity": "85"
+      },
+      "relevance_score": 5.6
+    },
+    {
+      "type": "spa-initial-state",
+      "data": {
+        "ajax_url": "/wp-admin/admin-ajax.php",
+        "wc_ajax_url": "/?wc-ajax=%%endpoint%%",
+        "i18n_view_cart": "View cart",
+        "cart_url": "https://www.inno-maker.com/cart/",
+        "is_cart": "",
+        "cart_redirect_after_add": "yes"
+      },
+      "relevance_score": 3.6
+    }
+  ],
+  "workflow_selected_bindings": [],
+  "workflow_strategy": "server"
+}

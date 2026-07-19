@@ -38,7 +38,7 @@ This project implements a complete autonomous UGV system featuring:
 ┌─────────────────────────────────────────┐
 │  CHASSIS (Pi 3 + Motor Control)         │
 │  ├─ WebApp (Python-based)               │
-│  ├─ InnoMaker RS485 CAN HAT             │
+│  ├─ USB-CAN Adapter (gs_usb)            │
 │  │  └─ SocketCAN can0, Classical CAN 2.0│
 │  ├─ ODrive(s) with integrated CAN       │
 │  └─ WLAN Access Point                   │
@@ -56,9 +56,9 @@ frames. CAN FD is not used.
 
 | System | CAN hardware | SocketCAN | Bitrate/profile |
 |--------|--------------|-----------|-----------------|
-| Production sensor hub | Orange Pi Zero 2W + USB-CAN adapter (currently CANable2) | `can0` | 1 Mbit/s production bus |
-| Main UGV controller | Raspberry Pi 3 + InnoMaker RS485 CAN HAT (MCP2515) | `can0` | 1 Mbit/s production bus |
-| UGV test stand | Raspberry Pi + USB-CAN adapter | `can0` | 250 kbit/s test profile |
+| Production sensor hub | Orange Pi Zero 2W + USB-CAN adapter (currently CANable2) | `can0` | 250 kbit/s |
+| Main UGV controller | Raspberry Pi 3 + USB-CAN adapter (`gs_usb`) | `can0` | 250 kbit/s |
+| Former UGV test stand (offline) | Raspberry Pi + USB-CAN adapter | `can0` | 250 kbit/s |
 | ODrive motor controllers | Integrated CAN interface, SimpleCAN protocol | CAN node | Same bitrate as the connected bus |
 
 ### Physical Vehicle Layout
@@ -99,7 +99,7 @@ frames. CAN FD is not used.
 | Component | Function |
 |-----------|----------|
 | Python WebApp | Flask/FastAPI |
-| InnoMaker RS485 CAN HAT | Classical CAN 2.0 via SocketCAN `can0` |
+| USB-CAN adapter (`gs_usb`) | Classical CAN 2.0 via SocketCAN `can0` |
 | CAN Listener | Receives sensor data and ODrive messages |
 | WebSocket/SSE | Real-time push to browser |
 | Bing Maps API | Map display |
@@ -194,7 +194,7 @@ python3 web_app.py
 
 ### Controller (Pi 3)
 - **MCU**: Broadcom BCM2837 (ARM Cortex-A53 Quad-Core)
-- **CAN Interface**: InnoMaker RS485 CAN HAT (MCP2515, 16MHz oscillator, Classical CAN 2.0)
+- **CAN Interface**: USB-CAN adapter (`gs_usb`, Classical CAN 2.0)
 - **Motor Control**: GPIO 18/19 (Hardware-PWM)
 - **Operating System**: Raspberry Pi OS (Debian-based)
 - **Network**: WiFi + SSH access (nicolay@raspberrycan)
@@ -209,9 +209,9 @@ python3 web_app.py
 - The USB-CAN adapter does not occupy the Orange Pi SPI header.
 
 ### GPIO Pin Configuration (Pi 3 - Controller)
-**InnoMaker CAN HAT:**
-- **SPI0.1 / CS1**: MCP2515 CAN controller
-- **GPIO 25**: CAN interrupt
+**USB-CAN:**
+- CAN no longer occupies SPI, chip-select, or interrupt GPIOs.
+- The legacy MCP2515 Device Tree overlay is disabled.
 
 **Motor Control:**
 - **GPIO 18**: Right Motor PWM Output (Hardware-PWM)
@@ -251,8 +251,7 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
 
 ### CAN Bus Configuration
 - **Protocol**: Classical CAN 2.0; CAN FD is not used
-- **Production bitrate**: 1 Mbit/s on Orange Pi USB-CAN, InnoMaker HAT and connected ODrives
-- **UGV test bitrate**: 250 kbit/s on the test USB-CAN adapter and test ODrives
+- **Unified bitrate**: 250 kbit/s on Orange Pi USB-CAN, main-controller USB-CAN, USB-CAN test profile and connected ODrives
 - **Frames**: maximum 8 data bytes; the JSON protocol is split across multiple Classical CAN frames
 - **Termination**: 120Ω resistor on both ends
 - **Ground**: Common ground connection required
@@ -366,10 +365,10 @@ tail -f /var/log/ugv_app.log
 Sensor Hub (Orange Pi Zero 2W)   Main UGV Controller (Pi 3)
 ├─ GPS (UM982)                   ├─ Web Interface
 ├─ IMU (WitMotion USB)           ├─ Motor Control
-└─ USB-CAN Adapter               └─ InnoMaker CAN HAT
+└─ USB-CAN Adapter               └─ USB-CAN Adapter (gs_usb)
         │                                │
         └──── Classical CAN 2.0 Bus ─────┤
-                    (1 Mbit/s)           └─ ODrive(s), integrated CAN
+                   (250 kbit/s)          └─ ODrive(s), integrated CAN
                         │
                         ▼
                   [ Browser Client ]
@@ -515,7 +514,7 @@ IMU_BAUDRATE = 9600
 
 # CAN Configuration
 CAN_INTERFACE = 'can0'           # CAN interface
-CAN_BITRATE = 1000000            # 1 Mbit/s production CAN 2.0 bus
+CAN_BITRATE = 250000             # Unified 250 kbit/s CAN 2.0 bus
 
 # Telemetry
 CAN_SEND_RATE = 10               # Hz CAN transmit rate
@@ -530,7 +529,7 @@ DEBUG = False                    # Production mode
 
 # CAN Configuration
 CAN_INTERFACE = 'can0'           # CAN interface
-CAN_BITRATE = 1000000            # 1 Mbps for motor control
+CAN_BITRATE = 250000             # Unified 250 kbit/s CAN 2.0 bus
 
 # WebSocket Configuration
 UPDATE_RATE = 50                 # Hz (20ms updates)
@@ -591,9 +590,9 @@ User=nicolay
 The CAN interface is automatically configured at boot:
 ```ini
 [Service]
-ExecStart=/bin/bash -c 'ip link set can0 down; ip link set can0 type can bitrate 1000000; ip link set can0 txqueuelen 1000; ip link set can0 up'
+ExecStart=/bin/bash -c 'ip link set can0 down; ip link set can0 type can bitrate 250000 restart-ms 100; ip link set can0 txqueuelen 1000; ip link set can0 up'
 ```
-- **Bitrate**: 1 Mbit/s for the production Classical CAN 2.0 bus
+- **Bitrate**: unified 250 kbit/s Classical CAN 2.0 bus
 - **TX Queue Length**: 1000 packets for improved buffer performance
 - **Auto-start**: Enabled via systemd for reliable boot configuration
 
@@ -631,7 +630,7 @@ ExecStart=/bin/bash -c 'ip link set can0 down; ip link set can0 type can bitrate
 **Solution**:
 1. Check CAN interface: `ip link show can0`
 2. Monitor CAN traffic: `candump can0`
-3. Verify bitrate: 1 Mbit/s on the production bus or 250 kbit/s on the UGV test stand
+3. Verify bitrate: 250 kbit/s on every bus participant
 4. Check CAN termination (120Ω resistors)
 5. Test CAN: `cansend can0 123#DEADBEEF`
 
@@ -685,7 +684,7 @@ tail -f /var/log/ugv_app.log
 - **Heading Accuracy**: Dual-antenna (±1°)
 - **IMU Sampling**: 200 Hz (5ms)
 - **CAN Protocol**: Classical CAN 2.0 on all nodes; no CAN FD
-- **CAN Bitrate**: 1 Mbit/s production bus / 250 kbit/s UGV test stand
+- **CAN Bitrate**: unified 250 kbit/s on all bus participants
 - **Memory Usage**: Python runtime (~80MB RAM)
 
 ### Communication Latency
@@ -736,8 +735,8 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 ### Hardware Support
 - **Orange Pi Zero 2W**: Allwinner H616 sensor hub with USB-CAN adapter
 - **Raspberry Pi 3**: ARM Cortex-A53 Quad-Core
-- **InnoMaker RS485 CAN HAT**: MCP2515-based Classical CAN 2.0 interface
-- **USB-CAN adapter**: Classical CAN 2.0 interface for Orange Pi and UGV test stand
+- **USB-CAN adapter**: Classical CAN 2.0 interface for Orange Pi, main UGV controller and former test stand
+- **InnoMaker RS485 CAN HAT**: retired; its fixed termination and Device Tree overlay are no longer used
 - **ODrive**: motor controller with integrated Classical CAN 2.0 interface
 - **Holybro UM982**: Dual-antenna RTK-GPS receiver
 - **WitMotion USB-IMU**: IMU sensor with native orientation output
@@ -755,7 +754,7 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 
 **Key Achievements:**
 - ✅ Sensor hub architecture (Orange Pi Zero 2W + USB-CAN adapter)
-- ✅ Main UGV controller with InnoMaker RS485 CAN HAT
+- ✅ Main UGV controller with USB-CAN adapter (`gs_usb`)
 - ✅ UGV test stand with USB-CAN adapter and ODrives with integrated CAN
 - ✅ RTK-GPS + IMU integration
 - ✅ JSON-based CAN communication (robust, human-readable)

@@ -75,9 +75,10 @@ print_info "Setze Berechtigungen..."
 chmod +x /home/$USER/motor_controller/main.py
 print_success "Berechtigungen gesetzt"
 
-# 8. Systemd-Service installieren
-print_info "Installiere Systemd-Service..."
+# 8. Systemd-Services installieren
+print_info "Installiere Systemd-Services..."
 sudo cp motor_controller_v2.service /etc/systemd/system/motor-controller-v2.service
+sudo cp can-interface.service /etc/systemd/system/can-interface.service
 
 # Service-Datei anpassen (User ersetzen)
 sudo sed -i "s/User=nicolay/User=$USER/g" /etc/systemd/system/motor-controller-v2.service
@@ -86,26 +87,26 @@ sudo sed -i "s|WorkingDirectory=/home/nicolay|WorkingDirectory=/home/$USER|g" /e
 sudo sed -i "s|/home/nicolay/motor_controller|/home/$USER/motor_controller|g" /etc/systemd/system/motor-controller-v2.service
 
 sudo systemctl daemon-reload
-print_success "Systemd-Service installiert"
+sudo systemctl enable can-interface.service
+print_success "Systemd-Services installiert"
 
-# 9. InnoMaker RS485 CAN HAT konfigurieren (MCP2515, Classical CAN 2.0)
-print_info "Konfiguriere InnoMaker CAN HAT..."
-if ! grep -q "dtoverlay=mcp2515-can1" /boot/config.txt; then
-    echo "dtoverlay=mcp2515-can1,oscillator=16000000,interrupt=25" | sudo tee -a /boot/config.txt
-    print_success "InnoMaker CAN HAT in /boot/config.txt konfiguriert"
-else
-    print_info "CAN-Interface bereits konfiguriert"
-fi
+# 9. Altes InnoMaker/MCP2515-Overlay deaktivieren
+print_info "Deaktiviere alte MCP2515 Device-Tree-Einträge..."
+for boot_config in /boot/firmware/config.txt /boot/config.txt; do
+    if [ -f "$boot_config" ]; then
+        sudo sed -i -E 's|^([[:space:]]*dtoverlay=mcp2515-can.*)|# \1|' "$boot_config"
+    fi
+done
+print_success "USB-CAN benötigt kein MCP2515 Device-Tree-Overlay"
 
-# 10. CAN-Interface aktivieren (falls bereits verfügbar)
+# 10. USB-CAN-Interface aktivieren
 if ip link show can0 &> /dev/null; then
-    print_info "Aktiviere CAN-Interface..."
-    sudo ip link set can0 down 2>/dev/null || true
-    sudo ip link set can0 type can bitrate 1000000
-    sudo ip link set can0 up
-    print_success "CAN-Interface aktiviert (1 Mbps)"
+    print_info "Aktiviere USB-CAN-Interface..."
+    sudo systemctl restart can-interface.service
+    print_success "USB-CAN als can0 aktiviert (250 kbit/s)"
 else
-    print_info "CAN-Interface nicht verfügbar (Reboot erforderlich)"
+    print_error "USB-CAN-Interface can0 nicht verfügbar"
+    print_info "USB-Adapter und gs_usb-Treiber mit lsusb und dmesg prüfen"
 fi
 
 # 11. Test-Ausführung
@@ -147,14 +148,8 @@ echo "   http://$(hostname)/api/status"
 echo ""
 echo "============================================================"
 
-# Reboot-Check
+# USB-CAN-Check
 if ! ip link show can0 &> /dev/null; then
     echo ""
-    print_info "⚠️  CAN-Interface benötigt Reboot zur Aktivierung"
-    echo ""
-    read -p "Jetzt neu starten? (j/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Jj]$ ]]; then
-        sudo reboot
-    fi
+    print_info "⚠️  USB-CAN-Adapter wurde nicht als can0 erkannt"
 fi

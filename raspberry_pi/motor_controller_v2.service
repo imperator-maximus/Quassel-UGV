@@ -1,8 +1,8 @@
 [Unit]
 Description=Quassel UGV Motor Controller v2.0
-After=network.target pigpiod.service can0.service
+After=network.target pigpiod.service can-interface.service
 Requires=pigpiod.service
-Wants=can0.service
+Wants=can-interface.service
 
 [Service]
 Type=simple
@@ -34,4 +34,3 @@ SyslogIdentifier=motor-controller
 
 [Install]
 WantedBy=multi-user.target
-

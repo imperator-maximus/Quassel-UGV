@@ -63,7 +63,7 @@ CAN_SEND_RATE = int(os.getenv('CAN_SEND_RATE', '10'))
 # ============================================================================
 CAN_ENABLED = _env_flag('CAN_ENABLED', True)
 CAN_INTERFACE = os.getenv('CAN_INTERFACE', 'can0')
-CAN_BITRATE = int(os.getenv('CAN_BITRATE', '1000000'))
+CAN_BITRATE = int(os.getenv('CAN_BITRATE', '250000'))
 CAN_SENSOR_HUB_ID = int(os.getenv('CAN_SENSOR_HUB_ID', '0x100'), 0)
 CAN_CONTROLLER_ID = int(os.getenv('CAN_CONTROLLER_ID', '0x200'), 0)
 CAN_MAX_FRAME_SIZE = int(os.getenv('CAN_MAX_FRAME_SIZE', '6'))
@@ -75,4 +75,3 @@ CAN_FRAME_TIMEOUT = float(os.getenv('CAN_FRAME_TIMEOUT', '1.0'))
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 LOG_FILE = os.getenv('LOG_FILE', '/var/log/sensor_hub.log')
 LOG_FORMAT = os.getenv('LOG_FORMAT', '[%(asctime)s] %(levelname)s - %(message)s')
-

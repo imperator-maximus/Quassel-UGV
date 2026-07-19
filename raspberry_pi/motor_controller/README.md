@@ -4,11 +4,11 @@ Modularer Motor Controller für Quassel UGV mit Hardware-PWM, CAN-Bus und Web-In
 
 ## CAN-Hardware
 
-- Der Haupt-UGV-Rechner nutzt das **InnoMaker RS485 CAN HAT** als `can0`.
-- Der UGV-Teststand nutzt einen **USB-CAN-Adapter** als `can0`.
+- Der Haupt-UGV-Rechner nutzt einen **USB-CAN-Adapter** mit `gs_usb` als `can0`.
+- Der ehemalige, inzwischen offline geschaltete UGV-Teststand nutzt einen **USB-CAN-Adapter** als `can0`.
 - Die ODrive/ODESC-Motorcontroller besitzen jeweils eine **integrierte CAN-Schnittstelle** und sprechen SimpleCAN.
 - Alle Teilnehmer verwenden **Classical CAN 2.0** mit maximal 8 Datenbytes pro Frame; CAN FD wird nicht verwendet.
-- Das Produktionsprofil läuft mit **1 Mbit/s**, das UGV-Testprofil mit **250 kbit/s**. Auf einem gemeinsamen Bus müssen alle Teilnehmer dieselbe Bitrate verwenden.
+- Haupt-UGV, Sensor Hub, ODrives und das ehemalige Testprofil sind einheitlich auf **250 kbit/s** eingestellt.
 
 ## 🚀 Quick Start
 
@@ -86,7 +86,7 @@ web:
 
 can:
   interface: can0
-  bitrate: 1000000  # Produktionsbus; UGV-Testprofil: 250000
+  bitrate: 250000
 
 logging:
   level: INFO
@@ -144,8 +144,8 @@ sudo systemctl enable pigpiod
 
 ### CAN-Interface nicht verfügbar
 ```bash
-# Haupt-UGV mit InnoMaker CAN HAT, Classical CAN 2.0
-sudo ip link set can0 up type can bitrate 1000000
+# Haupt-UGV mit USB-CAN, Classical CAN 2.0
+sudo ip link set can0 up type can bitrate 250000 restart-ms 100
 ```
 
 Am UGV-Teststand wird stattdessen der USB-CAN-Adapter über

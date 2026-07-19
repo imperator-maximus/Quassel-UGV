@@ -21,7 +21,7 @@ RTK-GPS + WitMotion USB-IMU + CAN-Telemetrie für den **Orange Pi Zero 2W (DietP
 ### Hardware
 - Orange Pi Zero 2W
 - USB-CAN-Adapter, aktuell CANable2 (`can0` via `slcand`)
-- Classical CAN 2.0 bei 1 Mbit/s; CAN FD wird nicht verwendet
+- Classical CAN 2.0 bei 250 kbit/s; CAN FD wird nicht verwendet
 - Holybro UM982 RTK-GPS per USB (`/dev/serial/by-id/...`)
 - WitMotion USB-IMU (`/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`)
 - stabile 5V-Versorgung

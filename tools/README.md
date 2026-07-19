@@ -38,8 +38,8 @@ pip install python-can
 
 ### Hardware Requirements
 - Orange Pi Zero 2W with USB-CAN adapter for the sensor hub
-- Main Raspberry Pi 3 with InnoMaker RS485 CAN HAT
-- UGV test Raspberry Pi with USB-CAN adapter
+- Main Raspberry Pi 3 with USB-CAN adapter (`gs_usb`)
+- Former UGV test Raspberry Pi with USB-CAN adapter (offline)
 - ODrive/ODESC controllers with integrated CAN interfaces
 - CAN bus connection between Sensor Hub and Controller
 - Proper CAN termination (120Ω resistors)
@@ -50,16 +50,16 @@ pip install python-can
 ### Sensor Hub (Orange Pi Zero 2W)
 - **Holybro UM982 RTK-GPS**: Dual-antenna for position and heading
 - **WitMotion USB-IMU**: IMU with native orientation output
-- **USB-CAN adapter (currently CANable2)**: SocketCAN `can0`, Classical CAN 2.0 at 1 Mbit/s
+- **USB-CAN adapter (currently CANable2)**: SocketCAN `can0`, Classical CAN 2.0 at 250 kbit/s
 - **Sends**: GPS position, heading, RTK status, IMU orientation
 
 ### Controller (Pi 3)
 - **Motor Controller**: Receives CAN messages from sensor hub
 - **Web Interface**: Real-time Bing Maps display
-- **InnoMaker RS485 CAN HAT**: SocketCAN `can0`, Classical CAN 2.0 at 1 Mbit/s
+- **USB-CAN adapter (`gs_usb`)**: SocketCAN `can0`, Classical CAN 2.0 at 250 kbit/s
 - **Receives**: Sensor data from hub
 
-### UGV Test Stand
+### Former UGV Test Stand (Offline)
 - **USB-CAN adapter**: SocketCAN `can0`, Classical CAN 2.0 at 250 kbit/s
 - **ODrive/ODESC units**: Integrated CAN interfaces using SimpleCAN
 - **Requirement**: Every test-bus node must be configured for 250 kbit/s
@@ -98,23 +98,24 @@ pip install python-can
 # On Raspberry Pi
 ip link show can0
 
-# Main UGV with InnoMaker CAN HAT: check MCP2515 boot config
-cat /boot/firmware/config.txt | grep mcp2515
+# Main UGV: verify USB-CAN driver and interface
+lsusb
+ip -details link show can0
 ```
 
-For the Orange Pi and UGV test stand, check the USB adapter and its service
-instead; these systems do not use the MCP2515 Device Tree overlay.
+All host computers use USB-CAN adapters. The main UGV uses `gs_usb`; the
+Orange Pi CANable2 currently uses `slcand`.
 
 #### "No CAN messages received"
 - Verify CAN wiring (CANH, CANL, GND)
 - Check 120Ω termination resistors
-- Confirm CAN bitrate (1 Mbit/s production bus, 250 kbit/s UGV test stand)
+- Confirm the unified CAN bitrate of 250 kbit/s
 - Ensure both devices have same bitrate
 
 #### "CAN interface down"
 ```bash
 # Main UGV production bus
-sudo ip link set can0 up type can bitrate 1000000
+sudo ip link set can0 up type can bitrate 250000 restart-ms 100
 
 # UGV test stand (USB-CAN)
 sudo ip link set can0 up type can bitrate 250000

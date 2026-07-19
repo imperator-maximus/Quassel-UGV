@@ -15,9 +15,9 @@ Frame. CAN FD wird nicht verwendet.
 
 | Einsatz | CAN-Anbindung | Profil |
 |---------|---------------|--------|
-| Orange Pi Zero 2W Sensor Hub | USB-CAN-Adapter (aktuell CANable2), SocketCAN `can0` | Produktion: 1 Mbit/s |
-| Haupt-UGV-Rechner (Raspberry Pi 3) | InnoMaker RS485 CAN HAT (MCP2515), SocketCAN `can0` | Produktion: 1 Mbit/s |
-| UGV-Testrechner | USB-CAN-Adapter, SocketCAN `can0` | Teststand: 250 kbit/s |
+| Orange Pi Zero 2W Sensor Hub | USB-CAN-Adapter (aktuell CANable2), SocketCAN `can0` | 250 kbit/s |
+| Haupt-UGV-Rechner (Raspberry Pi 3) | USB-CAN-Adapter (`gs_usb`), SocketCAN `can0` | 250 kbit/s |
+| Ehemaliger UGV-Testrechner (offline) | USB-CAN-Adapter, SocketCAN `can0` | 250 kbit/s |
 | ODrive/ODESC | integrierte CAN-Schnittstelle, SimpleCAN | Bitrate des jeweiligen Busses |
 
 Auf einem gemeinsamen physischen Bus müssen alle Teilnehmer dieselbe Bitrate

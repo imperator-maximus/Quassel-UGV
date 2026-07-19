@@ -27,7 +27,7 @@ class MotorController:
     def __init__(self, enable_pwm=False, pwm_pins=[18, 19], enable_monitor=True, quiet=False,
                  enable_ramping=True, acceleration_rate=25, deceleration_rate=800, brake_rate=1500,
                  enable_web=False, web_port=80, safety_pin=17, light_enabled=True, light_pin=22,
-                 mower_enabled=True, mower_relay_pin=23, mower_pwm_pin=12, can_interface='can0', can_bitrate=1000000):
+                 mower_enabled=True, mower_relay_pin=23, mower_pwm_pin=12, can_interface='can0', can_bitrate=250000):
         """
         Initialisiert den Motor Controller
         
@@ -49,7 +49,7 @@ class MotorController:
             mower_relay_pin: GPIO für Mäher-Relais
             mower_pwm_pin: GPIO für Mäher-PWM
             can_interface: CAN-Interface (default 'can0')
-            can_bitrate: CAN-Bitrate (default 1000000)
+            can_bitrate: CAN-Bitrate (default 250000)
         """
         # Konfiguration
         self.enable_pwm = enable_pwm
@@ -490,7 +490,7 @@ def main():
     parser.add_argument('--web', action='store_true', help='Web-Interface aktivieren')
     parser.add_argument('--web-port', type=int, default=80, help='Web-Port')
     parser.add_argument('--can', default='can0', help='CAN-Interface')
-    parser.add_argument('--bitrate', type=int, default=1000000, help='CAN-Bitrate')
+    parser.add_argument('--bitrate', type=int, default=250000, help='CAN-Bitrate')
     parser.add_argument('--quiet', action='store_true', help='Keine Ausgabe')
     
     args = parser.parse_args()
@@ -516,4 +516,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

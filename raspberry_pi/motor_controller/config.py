@@ -85,7 +85,7 @@ class ODriveMowerConfig:
 class CANConfig:
     """CAN-Bus-Konfiguration"""
     interface: str = 'can0'
-    bitrate: int = 1000000
+    bitrate: int = 250000
     motor_controller_id: int = 0x200
     sensor_hub_id: int = 0x100
     max_frame_size: int = 6  # Bytes Nutzdaten pro Frame
