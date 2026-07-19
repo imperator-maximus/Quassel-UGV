@@ -55,6 +55,13 @@ class CANHandler:
         # Sensor-Daten
         self._sensor_data: Dict[str, Any] = {}
         self._sensor_data_lock = threading.Lock()
+        self._last_sensor_data_monotonic = 0.0
+
+        # Empfangene ODrive/ODESC-Heartbeats. Diese Erfassung ist absichtlich
+        # unabhaengig von der Maehdeck-Steuerung, damit die Web-Oberflaeche den
+        # CAN-Netzwerkzustand auch bei gestopptem Maehdeck anzeigen kann.
+        self._odrive_heartbeats: Dict[int, Dict[str, Any]] = {}
+        self._odrive_heartbeats_lock = threading.Lock()
         
         # Callbacks
         self.sensor_data_callback: Optional[Callable] = None
@@ -147,6 +154,7 @@ class CANHandler:
                     node_id = msg.arbitration_id >> 5
                     odrive_error = _struct.unpack("<I", bytes(msg.data[0:4]))[0]
                     odrive_state = _struct.unpack("<I", bytes(msg.data[4:8]))[0]
+                    self._record_odrive_heartbeat(node_id, odrive_error, odrive_state)
                     if self.odrive_heartbeat_callback:
                         try:
                             self.odrive_heartbeat_callback(node_id, odrive_error, odrive_state)
@@ -193,6 +201,7 @@ class CANHandler:
 
         with self._sensor_data_lock:
             self._sensor_data = data
+            self._last_sensor_data_monotonic = time.monotonic()
 
         # Callback aufrufen
         if self.sensor_data_callback:
@@ -302,21 +311,94 @@ class CANHandler:
             callback: Funktion die bei jedem ODrive-Heartbeat aufgerufen wird.
         """
         self.odrive_heartbeat_callback = callback
-    
-    def get_status(self) -> Dict[str, Any]:
+
+    def _record_odrive_heartbeat(self, node_id: int, error: int, state: int):
+        """Speichert den letzten Heartbeat eines ODrive-Knotens."""
+        with self._odrive_heartbeats_lock:
+            self._odrive_heartbeats[int(node_id)] = {
+                'error': int(error),
+                'state': int(state),
+                'last_seen_monotonic': time.monotonic(),
+            }
+
+    def get_status(
+        self,
+        expected_odrive_node_ids=None,
+        sensor_timeout_s: float = 2.0,
+        odrive_timeout_s: float = 1.0,
+    ) -> Dict[str, Any]:
         """
         Gibt CAN-Handler-Status zurück
         
         Returns:
             Dictionary mit Status-Informationen
         """
+        now = time.monotonic()
+        with self._sensor_data_lock:
+            sensor_last_seen = self._last_sensor_data_monotonic
+        sensor_age = None if sensor_last_seen <= 0.0 else max(0.0, now - sensor_last_seen)
+        sensor_online = sensor_age is not None and sensor_age <= float(sensor_timeout_s)
+
+        expected_nodes = [] if expected_odrive_node_ids is None else [
+            int(node_id) for node_id in expected_odrive_node_ids
+        ]
+        with self._odrive_heartbeats_lock:
+            heartbeat_snapshot = {
+                node_id: dict(heartbeat)
+                for node_id, heartbeat in self._odrive_heartbeats.items()
+            }
+
+        node_ids = sorted(set(expected_nodes) | set(heartbeat_snapshot))
+        odrive_nodes = {}
+        for node_id in node_ids:
+            heartbeat = heartbeat_snapshot.get(node_id)
+            age = None
+            if heartbeat:
+                age = max(0.0, now - heartbeat['last_seen_monotonic'])
+            odrive_nodes[str(node_id)] = {
+                'online': age is not None and age <= float(odrive_timeout_s),
+                'age_s': None if age is None else round(age, 2),
+                'error': None if heartbeat is None else heartbeat['error'],
+                'state': None if heartbeat is None else heartbeat['state'],
+            }
+
+        expected_online = [
+            node_id
+            for node_id in expected_nodes
+            if odrive_nodes.get(str(node_id), {}).get('online', False)
+        ]
+        expected_error_nodes = [
+            node_id
+            for node_id in expected_nodes
+            if odrive_nodes.get(str(node_id), {}).get('error') not in (None, 0)
+        ]
+        all_expected_online = bool(expected_nodes) and len(expected_online) == len(expected_nodes)
+        all_expected_healthy = all_expected_online and not expected_error_nodes
+        interface_online = bool(self.can_available and self.can_enabled and self.reader_running)
+
         return {
             'can_available': self.can_available,
             'can_enabled': self.can_enabled,
             'reader_running': self.reader_running,
             'interface': self.config.interface,
             'bitrate': self.config.bitrate,
-            'protocol_status': self.protocol.get_buffer_status()
+            'protocol_status': self.protocol.get_buffer_status(),
+            'interface_online': interface_online,
+            'sensor_hub': {
+                'online': sensor_online,
+                'age_s': None if sensor_age is None else round(sensor_age, 2),
+                'can_id': self.config.sensor_hub_id,
+            },
+            'odrives': {
+                'expected_node_ids': expected_nodes,
+                'online_count': len(expected_online),
+                'expected_count': len(expected_nodes),
+                'all_online': all_expected_online,
+                'error_node_ids': expected_error_nodes,
+                'all_healthy': all_expected_healthy,
+                'nodes': odrive_nodes,
+            },
+            'network_healthy': interface_online and sensor_online and all_expected_healthy,
         }
     
     def cleanup(self):

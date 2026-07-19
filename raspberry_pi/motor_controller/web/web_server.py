@@ -166,7 +166,7 @@ class WebServer:
             """Gibt System-Status zurück"""
             return jsonify({
                 'can_enabled': self.can_enabled,
-                'can_status': self.can.get_status(),
+                'can_status': self._can_api_status(),
                 'motor_status': self.motor.get_status(),
                 'joystick_status': self.joystick.get_status(),
                 'sensor_data': self.can.get_sensor_data(),
@@ -951,6 +951,19 @@ class WebServer:
             'odrive_heartbeat_ages': {},
         }
 
+    def _can_api_status(self):
+        """CAN-Interface sowie SensorHub- und ODrive-Erreichbarkeit."""
+        expected_nodes = []
+        heartbeat_timeout_s = 1.0
+        if self.odrive_mower and self.odrive_mower.enabled:
+            expected_nodes = self.odrive_mower.node_ids
+            heartbeat_timeout_s = float(self.odrive_mower.config.heartbeat_timeout_s)
+        return self.can.get_status(
+            expected_odrive_node_ids=expected_nodes,
+            sensor_timeout_s=2.0,
+            odrive_timeout_s=heartbeat_timeout_s,
+        )
+
     def _emit_status_update(self):
         """Sendet Status-Update an alle Clients"""
         if not self.socketio:
@@ -960,7 +973,7 @@ class WebServer:
             'can_enabled': self.can_enabled,
             'pwm_enabled': True,
             'monitor_enabled': True,
-            'can_status': self.can.get_status(),
+            'can_status': self._can_api_status(),
             'motor_status': self.motor.get_status(),
             'joystick_status': self.joystick.get_status(),
             'joystick_enabled': self.joystick.get_status().get('enabled', False),

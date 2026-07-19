@@ -183,6 +183,12 @@
             box-shadow: 0 0 10px rgba(139, 69, 19, 0.5);
         }
 
+        .status-dot.warning {
+            background: #ffb000;
+            border-color: #ffb000;
+            box-shadow: 0 0 12px rgba(255, 176, 0, 0.65);
+        }
+
         .main-content {
             flex: 1;
             display: flex;
@@ -979,6 +985,14 @@
                 <div class="status-dot" id="canStatus"></div>
                 <span>CAN Bus</span>
             </div>
+            <div class="status-indicator" id="sensorHubCanIndicator">
+                <div class="status-dot" id="sensorHubCanStatus"></div>
+                <span id="sensorHubCanStatusText">SensorHub</span>
+            </div>
+            <div class="status-indicator" id="odriveCanIndicator">
+                <div class="status-dot" id="odriveCanStatus"></div>
+                <span id="odriveCanStatusText">ODrive 0/3</span>
+            </div>
             <div class="status-indicator">
                 <div class="status-dot" id="pwmStatus"></div>
                 <span>PWM Output</span>
@@ -1362,9 +1376,42 @@
         function updateStatus(data) {
             canEnabled = data.can_enabled;
 
+            const canStatus = data.can_status || {};
+            const sensorHubStatus = canStatus.sensor_hub || {};
+            const odriveStatus = canStatus.odrives || {};
+            const expectedOdrives = odriveStatus.expected_count || 0;
+            const onlineOdrives = odriveStatus.online_count || 0;
+            const interfaceOnline = canStatus.interface_online === true;
+
             // Status-Dots aktualisieren
             document.getElementById('canStatus').className =
-                'status-dot ' + (data.can_enabled ? 'active' : 'inactive');
+                'status-dot ' + (interfaceOnline ? 'active' : 'inactive');
+            document.getElementById('canStatus').title = interfaceOnline
+                ? `${canStatus.interface || 'can0'} aktiv, ${(canStatus.bitrate || 0) / 1000} kbit/s`
+                : 'CAN-Interface nicht aktiv';
+
+            document.getElementById('sensorHubCanStatus').className =
+                'status-dot ' + (sensorHubStatus.online ? 'active' : 'inactive');
+            document.getElementById('sensorHubCanStatusText').textContent =
+                sensorHubStatus.online ? 'SensorHub OK' : 'SensorHub offline';
+            document.getElementById('sensorHubCanIndicator').title = sensorHubStatus.age_s == null
+                ? 'Noch keine SensorHub-Telemetrie empfangen'
+                : `Letzte SensorHub-Telemetrie vor ${sensorHubStatus.age_s.toFixed(2)} s`;
+
+            const odriveDotState = odriveStatus.all_healthy
+                ? 'active'
+                : (onlineOdrives > 0 ? 'warning' : 'inactive');
+            document.getElementById('odriveCanStatus').className = `status-dot ${odriveDotState}`;
+            document.getElementById('odriveCanStatusText').textContent =
+                `ODrive ${onlineOdrives}/${expectedOdrives || '?'}${(odriveStatus.error_node_ids || []).length ? ' ⚠' : ''}`;
+            const nodeDetails = Object.entries(odriveStatus.nodes || {}).map(([nodeId, node]) => {
+                const age = node.age_s == null ? 'nie' : `${node.age_s.toFixed(2)} s`;
+                const error = node.error == null ? 'unbekannt' : `0x${node.error.toString(16).padStart(8, '0')}`;
+                return `Node ${nodeId}: ${node.online ? 'online' : 'offline'}, Alter ${age}, Fehler ${error}, State ${node.state ?? '?'}`;
+            });
+            document.getElementById('odriveCanIndicator').title = nodeDetails.length
+                ? nodeDetails.join('\n')
+                : 'Noch keine ODrive-Heartbeats empfangen';
             document.getElementById('pwmStatus').className =
                 'status-dot ' + (data.pwm_enabled ? 'active' : 'inactive');
             document.getElementById('monitorStatus').className =

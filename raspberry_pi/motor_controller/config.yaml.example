@@ -37,7 +37,7 @@ light:
 
 # Mäher-Konfiguration
 mower:
-  enabled: true
+  enabled: false           # Haupt-UGV: Mähdeck wird ausschließlich per ODrive-CAN gesteuert
   relay_pin: 23            # GPIO23 für Mäher-Relais
   pwm_pin: 12              # GPIO12 für Mäher-PWM
   pwm_frequency: 1000      # Hz
@@ -46,9 +46,9 @@ mower:
   duty_off: 0              # % (Aus)
 
 odrive_mower:
-  enabled: false           # Teststand: ODrive/ODESC mit integriertem CAN 2.0
+  enabled: true            # Haupt-UGV: ODrive/ODESC mit integriertem Classical CAN 2.0
   node_id: 0               # Rueckfall fuer Einzelmotor-Betrieb
-  node_ids: [0, 1, 2]      # Teststand: alle Mähmotor-Nodes gemeinsam starten
+  node_ids: [0, 1, 2]      # Drei angeschlossene Mähmotor-Nodes; Node 3 ist unbenutzt
   axis_state: 5            # Legacy sensorless state
   min_rpm: 500             # Sensorless-Teststand: darunter unzuverlaessig
   max_rpm: 5000
@@ -57,6 +57,7 @@ odrive_mower:
   command_interval_s: 0.1  # Set_Input_Vel periodisch senden
   coast_delay_s: 0.5
   start_stagger_s: 0.3     # Mehrere Mäher-Nodes nacheinander starten
+  heartbeat_timeout_s: 1.0
 
 # Classical-CAN-2.0-Konfiguration; CAN FD wird nicht verwendet.
 # Haupt-UGV und ehemaliger UGV-Teststand: einheitlich 250 kbit/s.
