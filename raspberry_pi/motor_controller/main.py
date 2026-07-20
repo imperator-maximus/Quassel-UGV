@@ -143,7 +143,8 @@ class MotorControllerApp:
                 self.logger.info("Initialisiere ODrive-Maehdeck-Testmodus...")
                 self.odrive_mower = ODriveMowerController(
                     self.config.odrive_mower,
-                    self.can
+                    self.can,
+                    self.safety,
                 )
             
             # Motor-Control
@@ -182,7 +183,8 @@ class MotorControllerApp:
                     self.can,
                     self.gpio,
                     self.navigation,
-                    self.mapping
+                    self.mapping,
+                    self.safety,
                 )
                 # Hardware-Referenzen setzen
                 self.web.set_hardware_refs(
@@ -207,6 +209,8 @@ class MotorControllerApp:
         """Verbindet Callbacks zwischen Komponenten"""
         # Safety Monitor -> Motor Control (Emergency Stop)
         self.safety.set_emergency_stop_callback(self.motor.emergency_stop)
+        self.safety.set_system_stop_callback(self._system_safety_stop)
+        self.safety.set_can_health_check(self._can_health_check)
 
         # CAN Handler -> Sensor Data (Logging + Navigation-Pose)
         self.can.set_sensor_data_callback(self._on_sensor_data)
@@ -215,6 +219,8 @@ class MotorControllerApp:
         # Damit erkennt die Web-App ODrive-Fehler (error!=0) in /api/status
         if self.odrive_mower:
             self.can.set_odrive_heartbeat_callback(self.odrive_mower.on_heartbeat)
+            self.can.set_odrive_iq_callback(self.odrive_mower.on_iq)
+            self.odrive_mower.set_system_stop_callback(self.safety.trigger_system_stop)
 
         # CAN Handler -> Navigation-Befehle vom Sensor-Hub
         if self.navigation:
@@ -237,6 +243,52 @@ class MotorControllerApp:
             self.can.send_command('nav_status', payload)
         except Exception as exc:
             self.logger.debug(f"nav_status Send fehlgeschlagen: {exc}")
+
+    def _can_health_check(self) -> tuple[bool, str | None]:
+        """Prueft alle CAN-Teilnehmer, die fuer sicheren Betrieb noetig sind."""
+        expected_nodes = self.odrive_mower.node_ids if self.odrive_mower else []
+        heartbeat_timeout_s = (
+            float(self.odrive_mower.config.heartbeat_timeout_s)
+            if self.odrive_mower
+            else 1.0
+        )
+        status = self.can.get_status(
+            expected_odrive_node_ids=expected_nodes,
+            sensor_timeout_s=1.0,
+            odrive_timeout_s=heartbeat_timeout_s,
+        )
+        if not status['interface_online']:
+            return False, "CAN-Interface oder Reader ausgefallen"
+        if not status['sensor_hub']['online']:
+            return False, "SensorHub CAN-Timeout"
+        odrives = status['odrives']
+        offline = [
+            int(node_id)
+            for node_id, node in odrives['nodes'].items()
+            if int(node_id) in expected_nodes and not node['online']
+        ]
+        if offline:
+            return False, f"ODrive CAN-Timeout: nodes {offline}"
+        if odrives['error_node_ids']:
+            return False, f"ODrive Fehler: nodes {odrives['error_node_ids']}"
+        return True, None
+
+    def _system_safety_stop(self, reason: str):
+        """Stoppt Navigation, Fahrantrieb und alle Maehmotoren."""
+        self.logger.critical("🛑 Gesamtsystem wird gestoppt: %s", reason)
+        if self.web:
+            try:
+                self.web.pause_plan_execution(reason='safety_stop')
+            except Exception as exc:
+                self.logger.error("Plan-Stopp fehlgeschlagen: %s", exc)
+        if self.navigation:
+            self.navigation.stop(reason='safety_stop')
+        if self.joystick:
+            self.joystick.disable()
+        elif self.motor:
+            self.motor.emergency_stop()
+        if self.odrive_mower:
+            self.odrive_mower.emergency_stop(reason)
     
     def start(self):
         """Startet alle Komponenten"""
@@ -246,6 +298,8 @@ class MotorControllerApp:
             # CAN-Reader starten
             if self.can:
                 self.can.start_reader()
+            if self.odrive_mower:
+                self.odrive_mower.start_monitor()
             
             # Safety-Watchdog starten
             if self.safety:

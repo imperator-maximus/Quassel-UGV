@@ -83,8 +83,11 @@ def configure_axis(axis, node_id, phase_resistance, phase_inductance):
     cfg.startup_homing = False
     cfg.enable_step_dir = False
     cfg.step_dir_always_on = False
-    cfg.enable_watchdog = False
-    cfg.watchdog_timeout = 0.0
+    # Set_Input_Vel is refreshed by the Raspberry Pi every 100 ms. If CAN or
+    # the host dies, the axis must disarm locally because an IDLE frame can no
+    # longer reach the board.
+    cfg.watchdog_timeout = 1.0
+    cfg.enable_watchdog = True
     cfg.enable_sensorless_mode = True
 
     cfg.can.node_id = node_id
@@ -254,6 +257,8 @@ def verify_configuration(board, require_clean_errors=True):
             (int(axis.current_state) == 1, f"axis{index} IDLE"),
             (int(axis.config.can.node_id) == node_id, f"axis{index} node ID"),
             (int(axis.config.can.heartbeat_rate_ms) == 100, f"axis{index} heartbeat"),
+            (bool(axis.config.enable_watchdog), f"axis{index} watchdog enabled"),
+            (close(axis.config.watchdog_timeout, 1.0), f"axis{index} watchdog timeout"),
             (bool(axis.config.enable_sensorless_mode), f"axis{index} sensorless enabled"),
             (not bool(axis.config.startup_motor_calibration), f"axis{index} no startup calibration"),
             (not bool(axis.config.startup_closed_loop_control), f"axis{index} no startup closed loop"),

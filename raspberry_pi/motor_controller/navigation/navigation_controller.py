@@ -145,6 +145,13 @@ class NavigationController:
         self._emit_state()
 
     def start(self) -> bool:
+        if (
+            self.safety
+            and hasattr(self.safety, 'is_motion_allowed')
+            and not self.safety.is_motion_allowed()
+        ):
+            self._set_error('Sicherheitsstopp ist verriegelt')
+            return False
         with self._lock:
             if not self._waypoints:
                 self._last_error = 'Keine Wegpunkte gesetzt'

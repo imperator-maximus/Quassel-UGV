@@ -47,6 +47,12 @@ class SafetyMonitor:
         
         # Emergency Stop Callback
         self.emergency_stop_callback: Optional[Callable] = None
+        self.system_stop_callback: Optional[Callable] = None
+        self.can_health_check: Optional[Callable] = None
+        self.system_stop_latched = False
+        self.system_stop_reason: Optional[str] = None
+        self.system_stop_time: Optional[float] = None
+        self._watchdog_started_monotonic = 0.0
         
         # Watchdog-Thread
         self.watchdog_running = False
@@ -99,7 +105,7 @@ class SafetyMonitor:
             self.last_safety_trigger = current_time
         
         self.logger.warning("🚨 SICHERHEITSSCHALTER AUSGELÖST!")
-        self.trigger_emergency_stop()
+        self.trigger_system_stop("Sicherheitsschalter ausgeloest")
     
     def set_emergency_stop_callback(self, callback: Callable):
         """
@@ -109,6 +115,54 @@ class SafetyMonitor:
             callback: Funktion die bei Emergency Stop aufgerufen wird
         """
         self.emergency_stop_callback = callback
+
+    def set_system_stop_callback(self, callback: Callable):
+        """Setzt den Callback fuer einen verriegelten Gesamtsystem-Stopp."""
+        self.system_stop_callback = callback
+
+    def set_can_health_check(self, callback: Callable):
+        """Setzt eine Funktion, die ``(healthy, reason)`` zurueckgibt."""
+        self.can_health_check = callback
+
+    def trigger_system_stop(self, reason: str):
+        """Verriegelt die Bewegung und stoppt Fahrantrieb sowie Maehdeck."""
+        with self._lock:
+            if self.system_stop_latched:
+                return
+            self.system_stop_latched = True
+            self.system_stop_reason = str(reason)
+            self.system_stop_time = time.time()
+
+        self.logger.critical("🚨 SYSTEM-SICHERHEITSSTOPP: %s", reason)
+        if self.system_stop_callback:
+            try:
+                self.system_stop_callback(str(reason))
+            except Exception as e:
+                self.logger.exception("System-Stopp Callback Fehler: %s", e)
+        else:
+            self.trigger_emergency_stop()
+
+    def is_motion_allowed(self) -> bool:
+        """Nur ein nicht verriegeltes System darf Antriebe starten."""
+        with self._lock:
+            return not self.system_stop_latched
+
+    def reset_system_stop(self) -> tuple[bool, str | None]:
+        """Loest die Verriegelung nur bei aktuell gesundem CAN-Netz."""
+        if self.can_health_check:
+            try:
+                healthy, reason = self.can_health_check()
+            except Exception as exc:
+                return False, f"CAN-Healthcheck fehlgeschlagen: {exc}"
+            if not healthy:
+                return False, str(reason or "CAN-Netz nicht gesund")
+
+        with self._lock:
+            self.system_stop_latched = False
+            self.system_stop_reason = None
+            self.system_stop_time = None
+        self.logger.info("✅ System-Sicherheitsstopp zurueckgesetzt")
+        return True, None
     
     def trigger_emergency_stop(self):
         """Löst Emergency Stop aus"""
@@ -156,7 +210,8 @@ class SafetyMonitor:
     
     def start_watchdog(self):
         """Startet Watchdog-Thread"""
-        if not self.config.enabled:
+        can_watchdog_enabled = bool(getattr(self.config, 'can_watchdog_enabled', False))
+        if not self.config.enabled and not can_watchdog_enabled:
             self.logger.info("Safety Watchdog deaktiviert")
             return
 
@@ -165,6 +220,7 @@ class SafetyMonitor:
             return
         
         self.watchdog_running = True
+        self._watchdog_started_monotonic = time.monotonic()
         self._stop_event.clear()
         self.watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
         self.watchdog_thread.start()
@@ -202,9 +258,20 @@ class SafetyMonitor:
                     self.trigger_emergency_stop()
                     with self._lock:
                         self.joystick_active = False
+
+                if bool(getattr(self.config, 'can_watchdog_enabled', False)) and self.can_health_check:
+                    grace_s = float(getattr(self.config, 'can_watchdog_startup_grace_s', 5.0))
+                    if time.monotonic() - self._watchdog_started_monotonic >= grace_s:
+                        try:
+                            healthy, reason = self.can_health_check()
+                        except Exception as exc:
+                            healthy, reason = False, f"CAN-Healthcheck fehlgeschlagen: {exc}"
+                        if not healthy:
+                            self.trigger_system_stop(reason or "CAN-Netz ausgefallen")
                 
                 # 100ms Wartezeit
-                self._stop_event.wait(0.1)
+                interval_s = float(getattr(self.config, 'can_watchdog_interval_s', 0.1))
+                self._stop_event.wait(max(0.02, interval_s))
             
             except Exception as e:
                 self.logger.error(f"❌ Watchdog-Loop Fehler: {e}")
@@ -227,7 +294,12 @@ class SafetyMonitor:
                 'last_joystick_time': self.last_joystick_time,
                 'joystick_active': self.joystick_active,
                 'command_timeout': self.config.command_timeout,
-                'joystick_timeout': self.config.joystick_timeout
+                'joystick_timeout': self.config.joystick_timeout,
+                'can_watchdog_enabled': bool(getattr(self.config, 'can_watchdog_enabled', False)),
+                'system_stop_latched': self.system_stop_latched,
+                'system_stop_reason': self.system_stop_reason,
+                'system_stop_time': self.system_stop_time,
+                'motion_allowed': not self.system_stop_latched,
             }
     
     def cleanup(self):

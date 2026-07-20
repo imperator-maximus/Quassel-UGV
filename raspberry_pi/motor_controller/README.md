@@ -166,10 +166,28 @@ export PYTHONPATH=/home/nicolay:$PYTHONPATH
 
 ## 🔒 Sicherheit
 
-- Sicherheitsschalter (GPIO 17) löst Emergency Stop aus
+- Sicherheitsschalter (GPIO 17) stoppt und verriegelt Fahrantrieb und Mähdeck
 - Command-Timeout (2s) stoppt Motoren bei fehlenden Befehlen
 - Joystick-Timeout (1s) stoppt Motoren bei Verbindungsabbruch
-- Watchdog-Thread überwacht alle Timeouts
+- CAN-Watchdog stoppt das Gesamtsystem bei fehlendem SensorHub, ODrive-Node
+  oder CAN-Reader
+- `GET_IQ` überwacht alle drei Mähmotorströme mit konfigurierbaren Zeitgrenzen
+- Der Strommonitor sendet auch im IDLE alle 100 ms eine ODrive-Abfrage. Dadurch
+  bleibt der lokale 1,0-s-ODrive-Watchdog gefüttert; bei Pi-/Kabelausfall läuft
+  er ab und disarmt die Achse lokal.
+- Der verriegelte Stopp wird in der Web-Oberfläche angezeigt und kann dort erst
+  nach wiederhergestelltem CAN manuell zurückgesetzt werden.
+
+Die ODrive-Watchdogs werden einmalig per USB gesetzt, jeweils nur mit einem
+angeschlossenen Board und mechanisch gesichertem Mähdeck:
+
+```bash
+# Board A (Nodes 0 und 1)
+python3 scripts/configure_odrive_watchdog.py apply --nodes 0,1 --timeout 1.0
+
+# Board B (nur verwendeter Node 2; Node 3 bleibt unverändert)
+python3 scripts/configure_odrive_watchdog.py apply --nodes 2 --timeout 1.0
+```
 
 ## 📊 GPIO-Belegung
 

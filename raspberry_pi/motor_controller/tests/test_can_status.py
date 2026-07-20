@@ -74,6 +74,17 @@ class CANStatusTests(unittest.TestCase):
         self.assertFalse(status["sensor_hub"]["online"])
         self.assertIsNone(status["sensor_hub"]["age_s"])
 
+    def test_reports_odrive_iq_measurement(self):
+        self.handler._record_odrive_heartbeat(2, 0, 1)
+        self.handler._record_odrive_iq(2, 12.5, -11.75)
+
+        status = self.handler.get_status(expected_odrive_node_ids=[2])
+
+        node = status["odrives"]["nodes"]["2"]
+        self.assertEqual(node["iq_setpoint_a"], 12.5)
+        self.assertEqual(node["iq_measured_a"], -11.75)
+        self.assertLess(node["iq_age_s"], 0.1)
+
 
 if __name__ == "__main__":
     unittest.main()

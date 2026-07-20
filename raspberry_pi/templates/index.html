@@ -993,6 +993,10 @@
                 <div class="status-dot" id="odriveCanStatus"></div>
                 <span id="odriveCanStatusText">ODrive 0/3</span>
             </div>
+            <div class="status-indicator" id="safetyIndicator" onclick="resetSafetyStop()" style="cursor: pointer;">
+                <div class="status-dot" id="safetyStatus"></div>
+                <span id="safetyStatusText">Safety</span>
+            </div>
             <div class="status-indicator">
                 <div class="status-dot" id="pwmStatus"></div>
                 <span>PWM Output</span>
@@ -1379,6 +1383,7 @@
             const canStatus = data.can_status || {};
             const sensorHubStatus = canStatus.sensor_hub || {};
             const odriveStatus = canStatus.odrives || {};
+            const safetyStatus = data.safety_status || {};
             const expectedOdrives = odriveStatus.expected_count || 0;
             const onlineOdrives = odriveStatus.online_count || 0;
             const interfaceOnline = canStatus.interface_online === true;
@@ -1407,11 +1412,20 @@
             const nodeDetails = Object.entries(odriveStatus.nodes || {}).map(([nodeId, node]) => {
                 const age = node.age_s == null ? 'nie' : `${node.age_s.toFixed(2)} s`;
                 const error = node.error == null ? 'unbekannt' : `0x${node.error.toString(16).padStart(8, '0')}`;
-                return `Node ${nodeId}: ${node.online ? 'online' : 'offline'}, Alter ${age}, Fehler ${error}, State ${node.state ?? '?'}`;
+                const iq = node.iq_measured_a == null ? '?' : `${node.iq_measured_a.toFixed(1)} A`;
+                return `Node ${nodeId}: ${node.online ? 'online' : 'offline'}, Alter ${age}, Fehler ${error}, State ${node.state ?? '?'}, Iq ${iq}`;
             });
             document.getElementById('odriveCanIndicator').title = nodeDetails.length
                 ? nodeDetails.join('\n')
                 : 'Noch keine ODrive-Heartbeats empfangen';
+            const safetyLatched = safetyStatus.system_stop_latched === true;
+            document.getElementById('safetyStatus').className =
+                `status-dot ${safetyLatched ? 'inactive' : 'active'}`;
+            document.getElementById('safetyStatusText').textContent =
+                safetyLatched ? 'STOPP ⚠' : 'Safety OK';
+            document.getElementById('safetyIndicator').title = safetyLatched
+                ? `${safetyStatus.system_stop_reason || 'Sicherheitsstopp'} – zum Rücksetzen klicken`
+                : 'Sicherheitsüberwachung aktiv';
             document.getElementById('pwmStatus').className =
                 'status-dot ' + (data.pwm_enabled ? 'active' : 'inactive');
             document.getElementById('monitorStatus').className =
@@ -1469,6 +1483,18 @@
             if (window.MappingEditor && typeof window.MappingEditor.updateVehiclePose === 'function') {
                 window.MappingEditor.updateVehiclePose(data.sensor_data, data.navigation_status, data.plan_execution_status);
             }
+        }
+
+        function resetSafetyStop() {
+            fetch('/api/safety/reset', { method: 'POST' })
+                .then(async response => {
+                    const data = await response.json();
+                    if (!response.ok || !data.success) {
+                        throw new Error(data.error || 'Safety-Reset nicht möglich');
+                    }
+                    updateStatusFromServer();
+                })
+                .catch(error => alert('Safety-Reset fehlgeschlagen: ' + error.message));
         }
 
         function updateMappingStatus(status) {

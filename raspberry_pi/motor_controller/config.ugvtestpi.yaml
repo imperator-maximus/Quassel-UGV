@@ -28,6 +28,9 @@ safety:
   debounce_time: 0.2
   command_timeout: 2.0
   joystick_timeout: 1.0
+  can_watchdog_enabled: false
+  can_watchdog_startup_grace_s: 5.0
+  can_watchdog_interval_s: 0.1
 
 light:
   enabled: false
@@ -55,6 +58,14 @@ odrive_mower:
   coast_delay_s: 0.5
   start_stagger_s: 0.3
   heartbeat_timeout_s: 1.0
+  current_monitor_enabled: true
+  current_poll_interval_s: 0.1
+  current_response_timeout_s: 0.75
+  current_startup_grace_s: 2.0
+  current_trip_a: 25.0
+  current_trip_duration_s: 0.5
+  current_critical_trip_a: 29.0
+  current_critical_trip_duration_s: 0.1
 
 can:
   interface: can0

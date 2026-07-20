@@ -6,6 +6,7 @@ JSON-basierte Kommunikation mit Multi-Frame-Support
 
 import json
 import logging
+import struct
 import threading
 import time
 from typing import Optional, Dict, Any, Callable
@@ -62,11 +63,14 @@ class CANHandler:
         # CAN-Netzwerkzustand auch bei gestopptem Maehdeck anzeigen kann.
         self._odrive_heartbeats: Dict[int, Dict[str, Any]] = {}
         self._odrive_heartbeats_lock = threading.Lock()
+        self._odrive_iq: Dict[int, Dict[str, Any]] = {}
+        self._odrive_iq_lock = threading.Lock()
         
         # Callbacks
         self.sensor_data_callback: Optional[Callable] = None
         self.navigation_command_callback: Optional[Callable] = None
         self.odrive_heartbeat_callback: Optional[Callable] = None
+        self.odrive_iq_callback: Optional[Callable] = None
 
         if self.can_available:
             self._init_can_bus()
@@ -150,16 +154,32 @@ class CANHandler:
                 # Format: [uint32 error LE][uint32 state LE]
                 # Arbitration-ID = (node_id << 5) | 0x01
                 elif (msg.arbitration_id & 0x1F) == 0x01 and len(msg.data) >= 8:
-                    import struct as _struct
                     node_id = msg.arbitration_id >> 5
-                    odrive_error = _struct.unpack("<I", bytes(msg.data[0:4]))[0]
-                    odrive_state = _struct.unpack("<I", bytes(msg.data[4:8]))[0]
+                    odrive_error = struct.unpack("<I", bytes(msg.data[0:4]))[0]
+                    odrive_state = struct.unpack("<I", bytes(msg.data[4:8]))[0]
                     self._record_odrive_heartbeat(node_id, odrive_error, odrive_state)
                     if self.odrive_heartbeat_callback:
                         try:
                             self.odrive_heartbeat_callback(node_id, odrive_error, odrive_state)
                         except Exception as e:
                             self.logger.error(f"❌ ODrive-Heartbeat Callback Fehler: {e}")
+
+                # ODrive CAN-Simple GET_IQ response (cmd 0x14):
+                # [float32 iq_setpoint][float32 iq_measured]. Remote request
+                # frames themselves carry no data and are therefore ignored.
+                elif (
+                    (msg.arbitration_id & 0x1F) == 0x14
+                    and not getattr(msg, 'is_remote_frame', False)
+                    and len(msg.data) >= 8
+                ):
+                    node_id = msg.arbitration_id >> 5
+                    iq_setpoint, iq_measured = struct.unpack("<ff", bytes(msg.data[:8]))
+                    self._record_odrive_iq(node_id, iq_setpoint, iq_measured)
+                    if self.odrive_iq_callback:
+                        try:
+                            self.odrive_iq_callback(node_id, iq_setpoint, iq_measured)
+                        except Exception as e:
+                            self.logger.error(f"❌ ODrive-IQ Callback Fehler: {e}")
 
                 # Alte Buffers aufräumen
                 self.protocol.cleanup_old_buffers()
@@ -312,12 +332,29 @@ class CANHandler:
         """
         self.odrive_heartbeat_callback = callback
 
+    def set_odrive_iq_callback(self, callback: Callable):
+        """Setzt den Listener fuer GET_IQ-Antworten.
+
+        Signature: callback(node_id: int, iq_setpoint: float,
+        iq_measured: float)
+        """
+        self.odrive_iq_callback = callback
+
     def _record_odrive_heartbeat(self, node_id: int, error: int, state: int):
         """Speichert den letzten Heartbeat eines ODrive-Knotens."""
         with self._odrive_heartbeats_lock:
             self._odrive_heartbeats[int(node_id)] = {
                 'error': int(error),
                 'state': int(state),
+                'last_seen_monotonic': time.monotonic(),
+            }
+
+    def _record_odrive_iq(self, node_id: int, iq_setpoint: float, iq_measured: float):
+        """Speichert die letzte Strommessung eines ODrive-Knotens."""
+        with self._odrive_iq_lock:
+            self._odrive_iq[int(node_id)] = {
+                'setpoint_a': float(iq_setpoint),
+                'measured_a': float(iq_measured),
                 'last_seen_monotonic': time.monotonic(),
             }
 
@@ -347,6 +384,11 @@ class CANHandler:
                 node_id: dict(heartbeat)
                 for node_id, heartbeat in self._odrive_heartbeats.items()
             }
+        with self._odrive_iq_lock:
+            iq_snapshot = {
+                node_id: dict(sample)
+                for node_id, sample in self._odrive_iq.items()
+            }
 
         node_ids = sorted(set(expected_nodes) | set(heartbeat_snapshot))
         odrive_nodes = {}
@@ -355,11 +397,18 @@ class CANHandler:
             age = None
             if heartbeat:
                 age = max(0.0, now - heartbeat['last_seen_monotonic'])
+            iq = iq_snapshot.get(node_id)
+            iq_age = None
+            if iq:
+                iq_age = max(0.0, now - iq['last_seen_monotonic'])
             odrive_nodes[str(node_id)] = {
                 'online': age is not None and age <= float(odrive_timeout_s),
                 'age_s': None if age is None else round(age, 2),
                 'error': None if heartbeat is None else heartbeat['error'],
                 'state': None if heartbeat is None else heartbeat['state'],
+                'iq_setpoint_a': None if iq is None else round(iq['setpoint_a'], 2),
+                'iq_measured_a': None if iq is None else round(iq['measured_a'], 2),
+                'iq_age_s': None if iq_age is None else round(iq_age, 2),
             }
 
         expected_online = [

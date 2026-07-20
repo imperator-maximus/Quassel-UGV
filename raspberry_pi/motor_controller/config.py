@@ -43,6 +43,9 @@ class SafetyConfig:
     debounce_time: float = 0.2  # Sekunden
     command_timeout: float = 2.0  # Sekunden
     joystick_timeout: float = 1.0  # Sekunden
+    can_watchdog_enabled: bool = True
+    can_watchdog_startup_grace_s: float = 5.0
+    can_watchdog_interval_s: float = 0.1
 
 
 @dataclass
@@ -79,6 +82,14 @@ class ODriveMowerConfig:
     coast_delay_s: float = 0.5
     start_stagger_s: float = 0.3
     heartbeat_timeout_s: float = 1.0
+    current_monitor_enabled: bool = True
+    current_poll_interval_s: float = 0.1
+    current_response_timeout_s: float = 0.75
+    current_startup_grace_s: float = 2.0
+    current_trip_a: float = 25.0
+    current_trip_duration_s: float = 0.5
+    current_critical_trip_a: float = 29.0
+    current_critical_trip_duration_s: float = 0.1
 
 
 @dataclass
@@ -238,7 +249,10 @@ class Config:
                 'enabled': self.safety.enabled,
                 'debounce_time': self.safety.debounce_time,
                 'command_timeout': self.safety.command_timeout,
-                'joystick_timeout': self.safety.joystick_timeout
+                'joystick_timeout': self.safety.joystick_timeout,
+                'can_watchdog_enabled': self.safety.can_watchdog_enabled,
+                'can_watchdog_startup_grace_s': self.safety.can_watchdog_startup_grace_s,
+                'can_watchdog_interval_s': self.safety.can_watchdog_interval_s
             },
             'light': {
                 'enabled': self.light.enabled,
@@ -265,7 +279,15 @@ class Config:
                 'command_interval_s': self.odrive_mower.command_interval_s,
                 'coast_delay_s': self.odrive_mower.coast_delay_s,
                 'start_stagger_s': self.odrive_mower.start_stagger_s,
-                'heartbeat_timeout_s': self.odrive_mower.heartbeat_timeout_s
+                'heartbeat_timeout_s': self.odrive_mower.heartbeat_timeout_s,
+                'current_monitor_enabled': self.odrive_mower.current_monitor_enabled,
+                'current_poll_interval_s': self.odrive_mower.current_poll_interval_s,
+                'current_response_timeout_s': self.odrive_mower.current_response_timeout_s,
+                'current_startup_grace_s': self.odrive_mower.current_startup_grace_s,
+                'current_trip_a': self.odrive_mower.current_trip_a,
+                'current_trip_duration_s': self.odrive_mower.current_trip_duration_s,
+                'current_critical_trip_a': self.odrive_mower.current_critical_trip_a,
+                'current_critical_trip_duration_s': self.odrive_mower.current_critical_trip_duration_s
             },
             'can': {
                 'interface': self.can.interface,

@@ -15,6 +15,7 @@ $remoteTemplates = "/home/$User/templates"
 $remoteStatic = "/home/$User/static"
 $remoteCanServiceTmp = "/tmp/ugv-can-interface.service"
 $remoteMotorServiceTmp = "/tmp/ugv-motor-controller-v2.service"
+$remoteODriveWatchdogTmp = "/tmp/configure_odrive_watchdog.py"
 
 function Invoke-Step {
     param(
@@ -50,6 +51,7 @@ Invoke-Step "Upload motor-controller package, template, and static assets" {
     scp -r "raspberry_pi/static/." "${remote}:$remoteStaticTmp/"
     scp "raspberry_pi/can-interface.service" "${remote}:$remoteCanServiceTmp"
     scp "raspberry_pi/motor-controller-v2.service" "${remote}:$remoteMotorServiceTmp"
+    scp "scripts/configure_odrive_watchdog.py" "${remote}:$remoteODriveWatchdogTmp"
 }
 
 $deployCommand = @"
@@ -70,6 +72,8 @@ cp $remoteTmp/index.html $remoteApp/web/templates/index.html
 mkdir -p $remoteStatic
 cp -a $remoteStaticTmp/. $remoteStatic/
 sudo chown -R ${User}:${User} $remoteApp $remoteTemplates/index.html $remoteStatic
+install -m 755 $remoteODriveWatchdogTmp /home/$User/configure_odrive_watchdog.py
+chown ${User}:${User} /home/$User/configure_odrive_watchdog.py
 sudo sed -i -E '/^can:/,/^[^[:space:]]/ s/^([[:space:]]+bitrate:).*/\1 250000/' $remoteApp/config.yaml
 sudo install -m 644 $remoteCanServiceTmp /etc/systemd/system/can-interface.service
 sudo install -m 644 $remoteMotorServiceTmp /etc/systemd/system/motor-controller-v2.service

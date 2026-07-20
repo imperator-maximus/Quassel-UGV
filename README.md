@@ -325,6 +325,14 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
 - **Hardware-PWM independence** (continues running if Python crashes)
 - **Command timeout monitoring** (2-second timeout → automatic neutral)
 - **Emergency stop functionality** with signal handlers
+- **CAN fail-safe**: loss of SensorHub telemetry, an ODrive heartbeat, or the
+  SocketCAN reader latches a system stop for drive and mower deck
+- **Mower overcurrent monitor**: CANSimple `GET_IQ` is polled at 10 Hz for
+  nodes 0/1/2; 25 A for 0.5 s or 29 A for 0.1 s latches the same stop
+- **Local ODrive watchdog**: each used axis must have a 1.0 s watchdog enabled,
+  so the mower disarms even when a broken CAN cable prevents an IDLE command
+- **Manual reset**: the web UI shows `STOPP`; reset is accepted only after the
+  CAN network is healthy and no non-watchdog ODrive error remains
 - **Service integration** with automatic restart on failure
 
 ## 🎮 System Commands

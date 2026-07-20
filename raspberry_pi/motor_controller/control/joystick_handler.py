@@ -48,6 +48,11 @@ class JoystickHandler:
             x: X-Achse (-1.0 bis 1.0)
             y: Y-Achse (-1.0 bis 1.0)
         """
+        if hasattr(self.safety, 'is_motion_allowed') and not self.safety.is_motion_allowed():
+            self.motor.emergency_stop()
+            self.logger.warning("Joystick-Befehl wegen verriegeltem Sicherheitsstopp verworfen")
+            return False
+
         with self._lock:
             self.x = max(-1.0, min(1.0, x))
             self.y = max(-1.0, min(1.0, y))
@@ -61,6 +66,7 @@ class JoystickHandler:
         self.motor.set_joystick(self.x, self.y, use_ramping=False)
         
         self.logger.debug(f"Joystick: x={self.x:.2f}, y={self.y:.2f}")
+        return True
     
     def disable(self):
         """Deaktiviert Joystick-Steuerung"""
@@ -120,4 +126,3 @@ class JoystickHandler:
                 'last_update': self.last_update,
                 'max_speed': self.max_speed
             }
-

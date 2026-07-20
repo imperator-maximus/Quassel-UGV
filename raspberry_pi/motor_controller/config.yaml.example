@@ -29,6 +29,9 @@ safety:
   debounce_time: 0.2       # Sekunden
   command_timeout: 2.0     # Sekunden (CAN-Command-Timeout)
   joystick_timeout: 1.0    # Sekunden (Joystick-Timeout)
+  can_watchdog_enabled: true       # Gesamtsystem stoppen, wenn CAN-Teilnehmer ausfallen
+  can_watchdog_startup_grace_s: 5.0
+  can_watchdog_interval_s: 0.1
 
 # Licht-Konfiguration
 light:
@@ -58,6 +61,14 @@ odrive_mower:
   coast_delay_s: 0.5
   start_stagger_s: 0.3     # Mehrere Mäher-Nodes nacheinander starten
   heartbeat_timeout_s: 1.0
+  current_monitor_enabled: true
+  current_poll_interval_s: 0.1     # GET_IQ mit 10 Hz je Node
+  current_response_timeout_s: 0.75 # Fehlende Stromantwort stoppt das Gesamtsystem
+  current_startup_grace_s: 2.0     # Sensorless-Anlauf nicht als Blockade werten
+  current_trip_a: 25.0             # Unterhalb des ODrive-Hardlimits von 30 A
+  current_trip_duration_s: 0.5
+  current_critical_trip_a: 29.0    # Nahe Hardlimit: praktisch sofort stoppen
+  current_critical_trip_duration_s: 0.1
 
 # Classical-CAN-2.0-Konfiguration; CAN FD wird nicht verwendet.
 # Haupt-UGV und ehemaliger UGV-Teststand: einheitlich 250 kbit/s.

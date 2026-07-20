@@ -58,3 +58,9 @@ Post-deployment checks:
 - both axes IDLE, no startup movement enabled
 - sensorless mode enabled; requested state 5 compatibility patch active
 - command `0x1e` returns `last_drv_fault = 0` on both axes
+
+The migration now also enables the 1.0 s axis watchdog. This is intentionally
+paired with the Raspberry Pi's continuous 100 ms `GET_IQ` polling: every
+CANSimple request feeds the watchdog, while a host or cable failure makes the
+axis disarm locally. Boards configured before this change must receive the
+one-time USB watchdog update before autonomous mower operation.

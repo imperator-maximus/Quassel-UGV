@@ -32,7 +32,7 @@ class WebServer:
     - Light/Mower-Steuerung
     """
     
-    def __init__(self, config, motor_control, joystick_handler, can_handler, gpio_controller, navigation_controller=None, mapping_recorder=None):
+    def __init__(self, config, motor_control, joystick_handler, can_handler, gpio_controller, navigation_controller=None, mapping_recorder=None, safety_monitor=None):
         """
         Initialisiert Web-Server
         
@@ -51,6 +51,7 @@ class WebServer:
         self.gpio = gpio_controller
         self.navigation = navigation_controller
         self.mapping = mapping_recorder
+        self.safety = safety_monitor
         
         # Flask-App
         self.flask_available = FLASK_AVAILABLE
@@ -173,6 +174,7 @@ class WebServer:
                 'navigation_status': self.navigation.get_status() if self.navigation else {'state': 'disabled'},
                 'plan_execution_status': self.get_plan_execution_status(),
                 'mapping_status': self.mapping.get_status() if self.mapping else {'state': 'disabled'},
+                'safety_status': self.safety.get_status() if self.safety else {},
                 'light_state': self.light_state,
                 **self._mower_api_status()
             })
@@ -181,13 +183,39 @@ class WebServer:
         def api_can_toggle():
             """Schaltet CAN Ein/Aus"""
             self.can_enabled = not self.can_enabled
+            self.can.can_enabled = self.can_enabled
             
             if not self.can_enabled:
-                self.motor.emergency_stop()
-                self.joystick.disable()
+                if self.safety:
+                    self.safety.trigger_system_stop("CAN manuell deaktiviert")
+                else:
+                    self.motor.emergency_stop()
+                    self.joystick.disable()
             
             self.logger.info(f"CAN {'aktiviert' if self.can_enabled else 'deaktiviert'}")
             return jsonify({'can_enabled': self.can_enabled})
+
+        @self.app.route('/api/safety/reset', methods=['POST'])
+        def api_safety_reset():
+            """Entriegelt nach manueller Bestaetigung nur bei gesundem CAN."""
+            if not self.safety:
+                return jsonify({'success': False, 'error': 'Safety Monitor nicht verfuegbar'}), 503
+            if self.odrive_mower:
+                cleared, clear_error = self.odrive_mower.prepare_safety_reset()
+                if not cleared:
+                    return jsonify({
+                        'success': False,
+                        'error': clear_error,
+                        'safety_status': self.safety.get_status(),
+                    }), 409
+                time.sleep(0.25)
+            success, error = self.safety.reset_system_stop()
+            payload = {
+                'success': success,
+                'error': error,
+                'safety_status': self.safety.get_status(),
+            }
+            return jsonify(payload), (200 if success else 409)
         
         @self.app.route('/api/light/toggle', methods=['POST'])
         def api_light_toggle():
@@ -924,6 +952,10 @@ class WebServer:
                 'odrive_states': status.get('odrive_states', {}),
                 'odrive_missing_heartbeats': status.get('odrive_missing_heartbeats', []),
                 'odrive_heartbeat_ages': status.get('odrive_heartbeat_ages', {}),
+                'odrive_currents': status.get('odrive_currents', {}),
+                'mower_current_monitor_enabled': status.get('current_monitor_enabled', False),
+                'mower_current_trip_a': status.get('current_trip_a'),
+                'mower_current_trip_duration_s': status.get('current_trip_duration_s'),
             }
 
         speed = self.pwm_controller.get_mower_speed() if self.pwm_controller else 0
@@ -949,6 +981,10 @@ class WebServer:
             'odrive_states': {},
             'odrive_missing_heartbeats': [],
             'odrive_heartbeat_ages': {},
+            'odrive_currents': {},
+            'mower_current_monitor_enabled': False,
+            'mower_current_trip_a': None,
+            'mower_current_trip_duration_s': None,
         }
 
     def _can_api_status(self):
@@ -981,6 +1017,7 @@ class WebServer:
             'navigation_status': self.navigation.get_status() if self.navigation else {'state': 'disabled'},
             'plan_execution_status': self.get_plan_execution_status(),
             'mapping_status': self.mapping.get_status() if self.mapping else {'state': 'disabled'},
+            'safety_status': self.safety.get_status() if self.safety else {},
             'light_state': self.light_state,
             'light_enabled': self.light_config.enabled if self.light_config else False,
             **self._mower_api_status(),
