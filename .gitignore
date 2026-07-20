@@ -115,6 +115,9 @@ logs/*.log
 !AP_Bootloader.bin
 !**/AP_Bootloader.bin
 
+# Exact field-deployed ODrive recovery image (source patch and hash are stored alongside it)
+!odrive_firmware/fw-v0.5.6-can-drvdiag-v3.6-56V/ODriveFirmware-v3.6-56V-fw0.5.6-can-drvdiag.hex
+
 # Arduino/ESP32 specific
 *.ino.cpp
 *.ino.with_bootloader.bin

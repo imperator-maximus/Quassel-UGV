@@ -1,0 +1,70 @@
+diff --git a/Firmware/MotorControl/axis.cpp b/Firmware/MotorControl/axis.cpp
+index 03735ce..74f790b 100644
+--- a/Firmware/MotorControl/axis.cpp
++++ b/Firmware/MotorControl/axis.cpp
+@@ -569,6 +569,11 @@ void Axis::run_state_machine_loop() {
+                 status = run_lockin_spin(config_.general_lockin, false);
+             } break;
+ 
++            // Compatibility with the legacy mower firmware and host software:
++            // state 5 used to mean sensorless closed-loop control. The official
++            // 0.5.6 enum leaves value 5 unused, so accept it as an alias while
++            // config_.enable_sensorless_mode selects the sensorless data path.
++            case static_cast<AxisState>(5):
+             case AXIS_STATE_CLOSED_LOOP_CONTROL: {
+                 //if (odrv.any_error())
+                 //    goto invalid_state_label;
+diff --git a/Firmware/communication/can/can_simple.cpp b/Firmware/communication/can/can_simple.cpp
+index 988c3c4..5e5202f 100644
+--- a/Firmware/communication/can/can_simple.cpp
++++ b/Firmware/communication/can/can_simple.cpp
+@@ -158,6 +158,9 @@ void CANSimple::do_command(Axis& axis, const can_Message_t& msg) {
+         case MSG_GET_CONTROLLER_ERROR:
+             get_controller_error_callback(axis);
+             break;
++        case MSG_GET_DRV_FAULT:
++            if (msg.rtr || msg.len == 0) get_drv_fault_callback(axis);
++            break;
+         default:
+             break;
+     }
+@@ -219,6 +222,19 @@ bool CANSimple::get_controller_error_callback(const Axis& axis) {
+     return canbus_->send_message(txmsg);
+ }
+ 
++bool CANSimple::get_drv_fault_callback(const Axis& axis) {
++    can_Message_t txmsg;
++    txmsg.id = axis.config_.can.node_id << NUM_CMD_ID_BITS;
++    txmsg.id += MSG_GET_DRV_FAULT;
++    txmsg.isExt = axis.config_.can.is_extended;
++    txmsg.len = 8;
++
++    can_setSignal(txmsg, axis.last_drv_fault_, 0, 32, true);
++    can_setSignal(txmsg, axis.motor_.fet_thermistor_.temperature_, 32, 32, true);
++
++    return canbus_->send_message(txmsg);
++}
++
+ void CANSimple::set_axis_nodeid_callback(Axis& axis, const can_Message_t& msg) {
+     axis.config_.can.node_id = can_getSignal<uint32_t>(msg, 0, 32, true);
+ }
+diff --git a/Firmware/communication/can/can_simple.hpp b/Firmware/communication/can/can_simple.hpp
+index 58b6982..650cb1a 100644
+--- a/Firmware/communication/can/can_simple.hpp
++++ b/Firmware/communication/can/can_simple.hpp
+@@ -37,6 +37,7 @@ class CANSimple {
+         MSG_SET_VEL_GAINS,
+         MSG_GET_ADC_VOLTAGE,
+         MSG_GET_CONTROLLER_ERROR,
++        MSG_GET_DRV_FAULT,
+         MSG_CO_HEARTBEAT_CMD = 0x700,  // CANOpen NMT Heartbeat  SEND
+     };
+ 
+@@ -58,6 +59,7 @@ class CANSimple {
+     bool get_motor_error_callback(const Axis& axis);
+     bool get_encoder_error_callback(const Axis& axis);
+     bool get_controller_error_callback(const Axis& axis);
++    bool get_drv_fault_callback(const Axis& axis);
+     bool get_sensorless_error_callback(const Axis& axis);
+     bool get_encoder_estimates_callback(const Axis& axis);
+     bool get_encoder_count_callback(const Axis& axis);
