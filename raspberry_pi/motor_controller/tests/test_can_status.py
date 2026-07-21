@@ -1,4 +1,5 @@
 import time
+import struct
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,6 +85,17 @@ class CANStatusTests(unittest.TestCase):
         self.assertEqual(node["iq_setpoint_a"], 12.5)
         self.assertEqual(node["iq_measured_a"], -11.75)
         self.assertLess(node["iq_age_s"], 0.1)
+
+    def test_heartbeat_state_ignores_v056_flag_bytes(self):
+        error = 0
+        state = 1
+        heartbeat = struct.pack("<IBBBB", error, state, 0, 0, 0x80)
+        parsed_error, parsed_state = self.handler._decode_odrive_heartbeat(heartbeat)
+
+        self.handler._record_odrive_heartbeat(0, parsed_error, parsed_state)
+        status = self.handler.get_status(expected_odrive_node_ids=[0])
+
+        self.assertEqual(status["odrives"]["nodes"]["0"]["state"], 1)
 
 
 if __name__ == "__main__":

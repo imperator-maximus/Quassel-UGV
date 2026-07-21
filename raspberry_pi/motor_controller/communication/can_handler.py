@@ -151,12 +151,12 @@ class CANHandler:
                             error_count += 1
 
                 # ODrive/ODESC Heartbeat (CAN-Simple cmd 0x01) auswerten
-                # Format: [uint32 error LE][uint32 state LE]
+                # fw-v0.5.6 format: [uint32 error LE][uint8 state]
+                # [uint8 motor flags][uint8 encoder flags][uint8 controller flags].
                 # Arbitration-ID = (node_id << 5) | 0x01
                 elif (msg.arbitration_id & 0x1F) == 0x01 and len(msg.data) >= 8:
                     node_id = msg.arbitration_id >> 5
-                    odrive_error = struct.unpack("<I", bytes(msg.data[0:4]))[0]
-                    odrive_state = struct.unpack("<I", bytes(msg.data[4:8]))[0]
+                    odrive_error, odrive_state = self._decode_odrive_heartbeat(msg.data)
                     self._record_odrive_heartbeat(node_id, odrive_error, odrive_state)
                     if self.odrive_heartbeat_callback:
                         try:
@@ -348,6 +348,13 @@ class CANHandler:
                 'state': int(state),
                 'last_seen_monotonic': time.monotonic(),
             }
+
+    @staticmethod
+    def _decode_odrive_heartbeat(data) -> tuple[int, int]:
+        """Dekodiert Error und den ein Byte grossen Axis-State."""
+        if len(data) < 8:
+            raise ValueError("ODrive heartbeat must contain 8 bytes")
+        return struct.unpack("<I", bytes(data[0:4]))[0], int(data[4])
 
     def _record_odrive_iq(self, node_id: int, iq_setpoint: float, iq_measured: float):
         """Speichert die letzte Strommessung eines ODrive-Knotens."""
