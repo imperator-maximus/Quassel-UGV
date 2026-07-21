@@ -29,6 +29,7 @@ class FakeODriveConfig:
     heartbeat_timeout_s: float = 1.0
     current_monitor_enabled: bool = True
     current_poll_interval_s: float = 0.1
+    current_poll_while_idle: bool = False
     current_response_timeout_s: float = 0.75
     current_startup_grace_s: float = 2.0
     current_trip_a: float = 25.0
@@ -85,6 +86,17 @@ class ODriveSafetyTests(unittest.TestCase):
             self.assertFalse(message.is_extended_id)
             self.assertEqual(message.dlc, 8)
             self.assertEqual(message.arbitration_id & 0x1F, CMD_GET_IQ)
+
+    def test_idle_monitor_does_not_poll_without_hardware_watchdog(self):
+        fake_can = SimpleNamespace(Message=FakeMessage)
+        with patch.object(odrive_module, "CAN_AVAILABLE", True), patch.object(
+            odrive_module, "can", fake_can, create=True
+        ):
+            self.controller.start_monitor()
+            time.sleep(0.25)
+            self.controller.stop_monitor()
+
+        self.assertEqual(self.bus.messages, [])
 
     def test_sustained_high_current_requests_system_stop(self):
         stopped = threading.Event()

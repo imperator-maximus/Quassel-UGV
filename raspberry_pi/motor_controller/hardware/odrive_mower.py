@@ -294,7 +294,7 @@ class ODriveMowerController:
             self._send_rtr(node_id, CMD_GET_IQ, dlc=8)
 
     def start_monitor(self) -> None:
-        """Pollt GET_IQ dauerhaft und haelt den ODrive-Watchdog am Leben."""
+        """Startet die Stromueberwachung; IDLE-Polling ist optional."""
         if self._monitor_worker and self._monitor_worker.is_alive():
             return
         self._monitor_stop_event.clear()
@@ -317,10 +317,15 @@ class ODriveMowerController:
                 with self._lock:
                     running = self.running
                     safety_stopped = self._system_stop_pending
+                poll_while_idle = bool(
+                    getattr(self.config, 'current_poll_while_idle', False)
+                )
                 # Im Betrieb fragt ausschliesslich der Kommando-Thread GET_IQ
                 # ab. Stirbt er, darf dieser Monitor den Hardware-Watchdog
                 # nicht weiterfuettern. Nach einem Safety-Stopp gilt dasselbe.
-                if not running and not safety_stopped:
+                # Ohne aktivierten ODrive-Hardware-Watchdog erzeugen Abfragen
+                # im IDLE nur unnoetigen RTR-Verkehr auf dem gemeinsamen Bus.
+                if not running and not safety_stopped and poll_while_idle:
                     self._poll_currents()
             except Exception as exc:
                 # Der zentrale CAN-Watchdog entscheidet anhand der empfangenen

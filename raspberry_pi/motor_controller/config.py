@@ -84,6 +84,7 @@ class ODriveMowerConfig:
     heartbeat_timeout_s: float = 1.0
     current_monitor_enabled: bool = True
     current_poll_interval_s: float = 0.1
+    current_poll_while_idle: bool = False
     current_response_timeout_s: float = 0.75
     current_startup_grace_s: float = 2.0
     current_trip_a: float = 25.0
@@ -282,6 +283,7 @@ class Config:
                 'heartbeat_timeout_s': self.odrive_mower.heartbeat_timeout_s,
                 'current_monitor_enabled': self.odrive_mower.current_monitor_enabled,
                 'current_poll_interval_s': self.odrive_mower.current_poll_interval_s,
+                'current_poll_while_idle': self.odrive_mower.current_poll_while_idle,
                 'current_response_timeout_s': self.odrive_mower.current_response_timeout_s,
                 'current_startup_grace_s': self.odrive_mower.current_startup_grace_s,
                 'current_trip_a': self.odrive_mower.current_trip_a,
