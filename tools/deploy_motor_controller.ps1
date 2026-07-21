@@ -42,16 +42,16 @@ if (-not $SkipTests) {
 }
 
 Invoke-Step "Prepare remote staging directory" {
-    ssh $remote "rm -rf $remoteTmp $remoteStaticTmp && mkdir -p $remoteTmp $remoteStaticTmp"
+    ssh -4 $remote "rm -rf $remoteTmp $remoteStaticTmp && mkdir -p $remoteTmp $remoteStaticTmp"
 }
 
 Invoke-Step "Upload motor-controller package, template, and static assets" {
-    scp -r "raspberry_pi/motor_controller/." "${remote}:$remoteTmp/"
-    scp "raspberry_pi/templates/index.html" "${remote}:$remoteTmp/index.html"
-    scp -r "raspberry_pi/static/." "${remote}:$remoteStaticTmp/"
-    scp "raspberry_pi/can-interface.service" "${remote}:$remoteCanServiceTmp"
-    scp "raspberry_pi/motor-controller-v2.service" "${remote}:$remoteMotorServiceTmp"
-    scp "scripts/configure_odrive_watchdog.py" "${remote}:$remoteODriveWatchdogTmp"
+    scp -4 -r "raspberry_pi/motor_controller/." "${remote}:$remoteTmp/"
+    scp -4 "raspberry_pi/templates/index.html" "${remote}:$remoteTmp/index.html"
+    scp -4 -r "raspberry_pi/static/." "${remote}:$remoteStaticTmp/"
+    scp -4 "raspberry_pi/can-interface.service" "${remote}:$remoteCanServiceTmp"
+    scp -4 "raspberry_pi/motor-controller-v2.service" "${remote}:$remoteMotorServiceTmp"
+    scp -4 "scripts/configure_odrive_watchdog.py" "${remote}:$remoteODriveWatchdogTmp"
 }
 
 $deployCommand = @"
@@ -97,11 +97,11 @@ echo backup=`$backup
 
 $remoteScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($deployCommand))
 Invoke-Step "Install, verify, and restart on remote" {
-    ssh $remote "echo $remoteScript | base64 -d | bash"
+    ssh -4 $remote "echo $remoteScript | base64 -d | bash"
 }
 
 Invoke-Step "Check recent service errors" {
-    ssh $remote "journalctl -u motor-controller-v2.service --since '2 minutes ago' --no-pager -p err..alert || true"
+    ssh -4 $remote "journalctl -u motor-controller-v2.service --since '2 minutes ago' --no-pager -p err..alert || true"
 }
 
 Write-Host ""
