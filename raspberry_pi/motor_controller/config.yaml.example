@@ -40,7 +40,7 @@ light:
 
 # Mäher-Konfiguration
 mower:
-  enabled: false           # Haupt-UGV: Mähdeck wird ausschließlich per ODrive-CAN gesteuert
+  enabled: false           # Haupt-UGV: Mähdeck wird ausschließlich per ODrive-USB gesteuert
   relay_pin: 23            # GPIO23 für Mäher-Relais
   pwm_pin: 12              # GPIO12 für Mäher-PWM
   pwm_frequency: 1000      # Hz
@@ -77,12 +77,12 @@ odrive_mower:
   startup_min_sensorless_rpm: 120.0
   startup_stable_duration_s: 0.4
   operating_current_limit_a: 30.0
-  heartbeat_timeout_s: 1.0        # CAN-Heartbeat; zugleich bisheriger Rückfallwert
+  heartbeat_timeout_s: 1.0        # Gemeinsame Zustands-Altersgrenze der Transportabstraktion
   usb_status_timeout_s: 3.0       # Host-Status; ODrive-Hardware-Watchdog bleibt 1.0 s
   current_monitor_enabled: true
   current_poll_interval_s: 0.1     # Kommandozyklus; GET_IQ läuft Round-Robin je Node
   current_poll_while_idle: false   # Erst mit konfiguriertem Hardware-Watchdog aktivieren
-  current_response_timeout_s: 10.0 # Kurze RTR-Lücken tolerieren; danach Gesamtsystem stoppen
+  current_response_timeout_s: 10.0 # Kurze USB-Abfragelücken tolerieren; danach Gesamtsystem stoppen
   current_startup_grace_s: 2.0     # Sensorless-Anlauf nicht als Blockade werten
   current_trip_a: 25.0             # Unterhalb des ODrive-Hardlimits von 30 A
   current_trip_duration_s: 0.5
@@ -103,8 +103,8 @@ can:
 # SensorHub-Pose: "can" (legacy), "shadow" (WiFi nur vergleichen) oder
 # "wifi" (WiFi ist aktive Quelle und wird vom Safety-Watchdog überwacht).
 sensor_hub:
-  transport: can
-  wifi_url: http://192.168.178.20/api/telemetry
+  transport: wifi          # Produktion: zwei persistente HTTP-Streams, kein CAN
+  wifi_url: http://schloss.fdog.de:8081/api/telemetry
   poll_interval_s: 0.2
   request_timeout_s: 1.5
   pause_timeout_s: 1.0
@@ -114,7 +114,7 @@ sensor_hub:
 # Pose kommt über den unter sensor_hub gewählten Transport.
 navigation:
   enabled: true
-  watchdog_timeout_s: 1.0      # Stop wenn keine CAN-Pose >1s
+  watchdog_timeout_s: 1.0      # Stop wenn keine aktuelle SensorHub-Pose >1s
   geofence_radius_m: 50.0      # Um ersten Wegpunkt
   max_joystick: 0.30           # Max. 30% Joystick-Skala
   acceptance_radius_m: 0.25    # Wegpunkt erreicht (Skid-Steer-Limit + RTK-Rauschen)

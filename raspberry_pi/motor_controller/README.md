@@ -8,13 +8,15 @@ legacy CAN und Web-Interface.
 - Der Haupt-UGV-Rechner nutzt **zwei direkte USB/Fibre-Verbindungen** zu den
   beiden ODrive-Boards. Node 0/1 liegen auf Board A, Node 2 auf Board B.
 - Die SensorHub-Pose kommt im Produktionsprofil per HTTP/WiFi.
-- Der CAN-Dienst des Haupt-UGV ist deaktiviert; der CAN-Code bleibt als
-  konfigurierbarer Rueckfall erhalten.
+- Der Client nutzt zwei parallele persistente NDJSON-Streams; der konfigurierte
+  Basis-Endpunkt `/api/telemetry` wird intern zu `/api/telemetry/stream` erweitert.
+- Der CAN-Dienst des Haupt-UGV ist deaktiviert; der CAN-Code bleibt nur fuer
+  Legacy-/Testprofile erhalten und ist kein automatischer Rueckfall.
 - Der ehemalige, inzwischen offline geschaltete UGV-Teststand nutzt einen **USB-CAN-Adapter** als `can0`.
 - Die ODrive/ODESC-Motorcontroller besitzen jeweils eine **integrierte CAN-Schnittstelle** und sprechen SimpleCAN.
 - Alle Teilnehmer verwenden **Classical CAN 2.0** mit maximal 8 Datenbytes pro Frame; CAN FD wird nicht verwendet.
 - Legacy-CAN-Profile verwenden einheitlich **250 kbit/s**.
-- `odrive_mower.transport` kann `usb` (Produktion) oder `can` (Rueckfall) sein.
+- `odrive_mower.transport` ist in Produktion `usb`; `can` ist nur ein explizites Legacy-/Testprofil.
 
 ## 🚀 Quick Start
 
@@ -65,7 +67,7 @@ motor_controller/
 │   ├── gpio_controller.py   # GPIO Singleton
 │   ├── pwm_controller.py    # PWM (Motoren + Mäher)
 │   └── safety_monitor.py    # Watchdog
-├── communication/           # CAN-Layer
+├── communication/           # HTTP/WiFi- und Legacy-CAN-Transporte
 │   ├── can_handler.py
 │   └── can_protocol.py
 ├── control/                 # Steuerungs-Layer
@@ -95,8 +97,8 @@ can:
   bitrate: 250000
 
 sensor_hub:
-  transport: shadow  # can | shadow | wifi
-  wifi_url: http://192.168.178.20/api/telemetry
+  transport: wifi
+  wifi_url: http://schloss.fdog.de:8081/api/telemetry
   poll_interval_s: 0.2
   request_timeout_s: 1.5
   pause_timeout_s: 1.0

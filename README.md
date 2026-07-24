@@ -1,20 +1,28 @@
 # 🚁 Quassel UGV - RTK-GPS + WitMotion Sensor Hub + WebApp
 
-A professional autonomous UGV system with an Orange-Pi-based sensor hub, RTK-GPS positioning, WitMotion IMU orientation, CAN telemetry, and a real-time web interface.
+> Start here for the current vehicle: **[`CURRENT_PRODUCTION.md`](CURRENT_PRODUCTION.md)**
+
+A professional autonomous UGV system with an Orange-Pi-based sensor hub, RTK-GPS positioning, WitMotion IMU orientation, redundant WiFi telemetry, direct ODrive USB control, and a real-time web interface.
+
+> **Authoritative production state (2026-07-24):** SensorHub telemetry uses two
+> parallel HTTP/WiFi streams. Both ODrive boards use two direct USB/Fibre
+> connections. CAN is disabled on the main UGV and SensorHub and exists only as
+> legacy/test code. Do not re-enable CAN when working on navigation or mowing.
 
 ## 🎯 Project Overview
 
 This project implements a complete autonomous UGV system featuring:
 - **Dual-antenna RTK-GPS** (Holybro UM982) for precise positioning and heading
 - **WitMotion USB-IMU** for roll/pitch/yaw orientation
-- **CAN Bus Integration** for motor telemetry plus configurable CAN/WiFi SensorHub telemetry
+- **Direct ODrive USB control** with current, error and watchdog diagnostics
+- **Redundant HTTP/WiFi SensorHub telemetry** over two persistent streams
 - **Real-time Web Interface** with Bing Maps satellite view
 - **Modular Architecture** with Orange Pi Zero 2W sensor hub and Pi 3 controller
 
 ### ✅ Project Status: **ACTIVE DEVELOPMENT**
-- ✅ Sensor hub architecture (Orange Pi Zero 2W + USB-CAN adapter)
+- ✅ Sensor hub architecture (Orange Pi Zero 2W, RTK/IMU and WiFi telemetry)
 - ✅ RTK-GPS + IMU integration
-- ✅ CAN bus communication
+- ✅ Two direct ODrive USB/Fibre connections
 - ✅ Web interface framework
 - ✅ WitMotion-based IMU telemetry on the sensor hub
 
@@ -49,15 +57,15 @@ This project implements a complete autonomous UGV system featuring:
 
 ### Production Transport Assignment
 
-All CAN participants use **Classical CAN 2.0** with standard 8-byte data
-frames. CAN FD is not used.
+The production vehicle has no active CAN path. Historical CAN test profiles use
+**Classical CAN 2.0** with standard 8-byte frames at 250 kbit/s; CAN FD is not used.
 
 | System | Active transport | Profile |
 |--------|------------------|---------|
-| Production sensor hub → main UGV | HTTP/WiFi | `/api/telemetry` |
+| Production sensor hub → main UGV | Two persistent HTTP/WiFi streams | `/api/telemetry/stream` |
 | Main UGV → ODrive boards | Two direct USB/Fibre links | serial number + axis index |
 | Former UGV test stand (offline) | USB-CAN `can0` | Classical CAN 2.0, 250 kbit/s |
-| Legacy ODrive fallback | Integrated SimpleCAN | Classical CAN 2.0, 250 kbit/s |
+| Legacy ODrive test code (inactive) | Integrated SimpleCAN | Classical CAN 2.0, 250 kbit/s |
 
 ### Physical Vehicle Layout
 
@@ -84,14 +92,13 @@ frames. CAN FD is not used.
 |-----------|----------|-----------|
 | UM982 GPS | RTK Position + Dual-Antenna Heading | USB Serial /dev/serial/by-id |
 | WitMotion USB-IMU | 9-DoF IMU incl. orientation frames | USB Serial |
-| DSD TECH SH-C30A USB-CAN adapter (`gs_usb`) | Classical CAN 2.0 gateway | SocketCAN can0 |
-| `sensor_hub_app.py` | Web API + CAN telemetry + sensor status | Systemd Service |
+| `sensor_hub_app.py` | Web API + redundant HTTP telemetry + sensor status | Systemd Service |
 
 **Data Flow:**
 - GPS-NMEA reading (pyserial)
 - IMU data reading (pyserial / WitMotion binary protocol)
 - Sensor telemetry (Position + Heading + Roll/Pitch/Yaw)
-- CAN message transmission (python-can)
+- Two persistent NDJSON telemetry streams over HTTP/WiFi
 
 **Pi 3 (Controller + WebApp):**
 | Component | Function |
@@ -182,13 +189,13 @@ python3 web_app.py
 
 ### Sensor Hub (Orange Pi Zero 2W)
 - **MCU**: Allwinner H616
-- **CAN Interface**: DSD TECH SH-C30A via native `gs_usb` (`can0`, Classical CAN 2.0)
+- **CAN Interface**: none in production; legacy USB-CAN adapter removed
 - **GPS**: Holybro UM982 (Dual-antenna RTK)
   - USB serial via `/dev/serial/by-id/...`
 - **IMU**: WitMotion USB-IMU
   - USB serial via `/dev/serial/by-id/...`
 - **Operating System**: DietPi / Debian-based
-- **Network**: CAN Bus to Controller
+- **Network**: HTTP/WiFi to the Raspberry controller via the Fritzbox port forward
 
 ### Controller (Pi 3)
 - **MCU**: Broadcom BCM2837 (ARM Cortex-A53 Quad-Core)
@@ -201,10 +208,10 @@ python3 web_app.py
 **USB Devices:**
 - **Holybro UM982**: USB serial GNSS (`/dev/serial/by-id/...`)
 - **WitMotion IMU**: USB serial IMU (`/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`)
-- **USB-CAN adapter (DSD TECH SH-C30A)**: native `gs_usb` as `can0` via `can-interface.service`
+- **No production USB-CAN adapter**; the Orange Pi USB ports are used by GNSS/IMU
 
 **Reserved/System Pins:**
-- The USB-CAN adapter does not occupy the Orange Pi SPI header.
+- No CAN HAT, SPI overlay or USB-CAN adapter is required in production.
 
 ### GPIO Pin Configuration (Pi 3 - Controller)
 **USB-CAN:**
@@ -256,7 +263,7 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
 - **Main UGV**: CAN disabled; SensorHub uses WiFi and ODrives use direct USB
 - **TX Queue**: Configured with txqueuelen=1000 for improved buffer performance
 
-### JSON CAN Protocol
+### Legacy JSON CAN Protocol (inactive in production)
 **Sensor Hub → Controller (Continuous, 50Hz):**
 ```json
 {
@@ -302,7 +309,7 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
 - **Real-time position tracking** with RTK-GPS
 - **Heading calculation** from dual-antenna GPS
 - **Native orientation data** from the WitMotion IMU
-- **CAN bus broadcasting** to controller
+- **Redundant HTTP/WiFi streaming** to the controller
 
 ### Web Interface
 - **Bing Maps satellite view** (Lübtheen-optimized)
@@ -345,8 +352,8 @@ sudo systemctl start sensor-hub.service
 # View sensor data
 sudo systemctl status sensor-hub.service
 
-# Monitor CAN messages
-candump can0
+# Verify the local telemetry stream
+curl -N --max-time 3 http://127.0.0.1/api/telemetry/stream
 
 # View logs
 journalctl -u sensor-hub -f
@@ -360,8 +367,8 @@ python3 web_app.py
 # Access web interface
 # http://raspberrycan:80
 
-# Monitor CAN messages
-candump can0
+# Inspect USB ODrive and SensorHub stream status
+curl http://127.0.0.1/api/status
 
 # View application logs
 tail -f /var/log/ugv_app.log
@@ -388,7 +395,7 @@ Sensor Hub (Orange Pi Zero 2W)   Main UGV Controller (Pi 3)
 UGV ESP32CAN/
 ├── 📄 README.md                    # This documentation
 ├── 📁 sensor_hub/                 # Current sensor hub (Orange Pi Zero 2W)
-│   ├── sensor_hub_app.py          # Flask API + CAN telemetry
+│   ├── sensor_hub_app.py          # Flask API + HTTP/WiFi telemetry
 │   ├── imu_handler.py             # WitMotion USB IMU parser
 │   ├── sensor-hub.service         # systemd service file
 │   ├── templates/sensor_hub.html  # Sensor hub web interface
@@ -418,9 +425,9 @@ navigation pipeline. Do not delete them.
 
 | Test file | Covers |
 |-----------|--------|
-| `sensor_hub/tests/test_vehicle_geometry.py` | Lever-arm correction (`correct_to_vehicle_center`): rotates the antenna offset by the current heading and translates the GPS fix to the vehicle center. A sign error here desyncs the map marker, the CAN telemetry pose, and the navigation distance calculation. |
+| `sensor_hub/tests/test_vehicle_geometry.py` | Lever-arm correction (`correct_to_vehicle_center`): rotates the antenna offset by the current heading and translates the GPS fix to the vehicle center. A sign error here desyncs the map marker, the transmitted telemetry pose, and the navigation distance calculation. |
 | `sensor_hub/tests/test_telemetry_payload.py` | Heading source priority in the CAN/HTTP payload: dual-GNSS heading wins over the IMU fallback, `heading_source` field reports `dual_gnss` / `imu_fallback`, and the raw GPS heading stays available under `gps.heading` for diagnostics. |
-| `raspberry_pi/motor_controller/tests/test_navigation_controller.py` | `NavigationController` end-to-end: bearing/heading-error wrapping, 30%-joystick limit, CAN telemetry pose ingestion, geofence stop, watchdog stop, `nav_*` command dispatch, **acceptance-radius arrival**, the **overshoot detector** (waypoint counts as reached when the minimum distance was within `engagement_radius = max(3 × acceptance_radius_m, 1.5 m)` and grows again for ≥2 consecutive samples — including a tangential grazing-pass case), and the **inner-wheel-speed guarantee** (anti-pivot floor scaled by `heading_factor = max(0, 1 − |err|/90°)`: at moderate errors the inner wheel rolls forward out of the ESC dead-zone; at ≥90° the floor collapses to 0 so the robot can pivot tightly without scrubbing; the `forward ≥ |turn|·ratio` no-reverse guard always holds). The overshoot test is the regression guard against the endless-pivot bug that occurs when GPS noise + drivetrain inertia keep the vehicle just outside the acceptance circle. |
+| `raspberry_pi/motor_controller/tests/test_navigation_controller.py` | `NavigationController` end-to-end: bearing/heading-error wrapping, 30%-joystick limit, transport-independent telemetry pose ingestion, geofence stop, watchdog stop, `nav_*` command dispatch, **acceptance-radius arrival**, the **overshoot detector** (waypoint counts as reached when the minimum distance was within `engagement_radius = max(3 × acceptance_radius_m, 1.5 m)` and grows again for ≥2 consecutive samples — including a tangential grazing-pass case), and the **inner-wheel-speed guarantee** (anti-pivot floor scaled by `heading_factor = max(0, 1 − |err|/90°)`: at moderate errors the inner wheel rolls forward out of the ESC dead-zone; at ≥90° the floor collapses to 0 so the robot can pivot tightly without scrubbing; the `forward ≥ |turn|·ratio` no-reverse guard always holds). The overshoot test is the regression guard against the endless-pivot bug that occurs when GPS noise + drivetrain inertia keep the vehicle just outside the acceptance circle. |
 
 **Running the suite (from repo root):**
 
@@ -477,8 +484,8 @@ source ~/.bashrc
 # 2. Check sensor hub status
 sudo systemctl status sensor-hub
 
-# 3. Monitor CAN messages
-candump can0
+# 3. Verify the production telemetry stream
+curl -N --max-time 3 http://orangeugv/api/telemetry/stream
 
 # 4. Start web interface (Pi 3)
 python3 web_app.py
@@ -494,7 +501,7 @@ python3 web_app.py
 [15:33:41] 🧭 Heading: 45.2° (Dual-Antenna)
 [15:33:41] 📊 RTK Status: FIXED
 [15:33:41] 📐 Roll: +2.3°, Pitch: -1.8°
-[15:33:41] 🚀 CAN Message sent (ID: 0x123)
+[15:33:41] 🌐 HTTP telemetry stream active
 ```
 
 **Web Interface:**
@@ -519,12 +526,10 @@ IMU_TYPE = 'witmotion'
 IMU_PORT = '/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0'
 IMU_BAUDRATE = 9600
 
-# CAN Configuration
-CAN_INTERFACE = 'can0'           # CAN interface
-CAN_BITRATE = 250000             # Unified 250 kbit/s CAN 2.0 bus
-
-# Telemetry
-CAN_SEND_RATE = 10               # Hz CAN transmit rate
+# Production telemetry
+CAN_ENABLED = False
+WEB_PORT = 80
+# /api/telemetry/stream emits compact NDJSON at approximately 5 Hz
 ```
 
 ### Web App Settings (`web_app.py`)
@@ -533,10 +538,6 @@ CAN_SEND_RATE = 10               # Hz CAN transmit rate
 FLASK_HOST = '0.0.0.0'           # Listen on all interfaces
 FLASK_PORT = 80                  # HTTP port
 DEBUG = False                    # Production mode
-
-# CAN Configuration
-CAN_INTERFACE = 'can0'           # CAN interface
-CAN_BITRATE = 250000             # Unified 250 kbit/s CAN 2.0 bus
 
 # WebSocket Configuration
 UPDATE_RATE = 50                 # Hz (20ms updates)
@@ -593,8 +594,10 @@ RestartSec=5
 User=nicolay
 ```
 
-### CAN Interface Configuration (`can-interface.service`)
-The CAN interface is automatically configured at boot:
+### Legacy CAN Interface Configuration (`can-interface.service`)
+
+This section applies only to the former offline test stand. The production UGV
+must keep this service disabled.
 ```ini
 [Service]
 ExecStart=/bin/bash -c 'ip link set can0 down; ip link set can0 type can bitrate 250000 restart-ms 100; ip link set can0 txqueuelen 1000; ip link set can0 up'
@@ -632,7 +635,7 @@ ExecStart=/bin/bash -c 'ip link set can0 down; ip link set can0 type can bitrate
 3. Confirm configured baudrate is `9600`
 4. Check service logs: `journalctl -u sensor-hub.service -n 50`
 
-#### ❌ "CAN messages not received"
+#### ❌ "CAN messages not received" (legacy test stand only)
 **Cause**: CAN interface or hardware issue
 **Solution**:
 1. Check CAN interface: `ip link show can0`
@@ -740,9 +743,9 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 - **pigpio Library**: http://abyz.me.uk/rpi/pigpio/
 
 ### Hardware Support
-- **Orange Pi Zero 2W**: Allwinner H616 sensor hub with USB-CAN adapter
+- **Orange Pi Zero 2W**: Allwinner H616 sensor hub with HTTP/WiFi telemetry
 - **Raspberry Pi 3**: ARM Cortex-A53 Quad-Core
-- **USB-CAN adapter**: retained for the former test stand and legacy CAN fallback
+- **USB-CAN adapter**: retained only for the former offline test stand
 - **InnoMaker RS485 CAN HAT**: retired; its fixed termination and Device Tree overlay are no longer used
 - **ODrive**: v3.x motor controllers, directly controlled over USB on the main UGV
 - **Holybro UM982**: Dual-antenna RTK-GPS receiver
@@ -760,19 +763,19 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 **🔄 ACTIVE DEVELOPMENT** - This RTK-GPS + WitMotion autonomous UGV system is under active development with a modular architecture featuring dual-antenna positioning, USB-based sensor ingestion, and real-time web interfaces.
 
 **Key Achievements:**
-- ✅ Sensor hub architecture (Orange Pi Zero 2W + USB-CAN adapter)
+- ✅ Sensor hub architecture (Orange Pi Zero 2W + redundant WiFi telemetry)
 - ✅ Main UGV controller with two direct ODrive USB/Fibre links
 - ✅ UGV test stand with USB-CAN adapter and ODrives with integrated CAN
 - ✅ RTK-GPS + IMU integration
-- ✅ JSON-based CAN communication (robust, human-readable)
+- ✅ Redundant JSON/NDJSON telemetry over HTTP/WiFi
 - ✅ Web interface framework with motor control
 - ✅ WitMotion-based IMU telemetry on the sensor hub
 
 **Communication Architecture:**
-- **Sensor Hub → Controller**: JSON CAN messages (50Hz sensor data)
-- **Controller → Sensor Hub**: JSON CAN commands (status requests, restart)
+- **Sensor Hub → Controller**: two persistent NDJSON streams over HTTP/WiFi
+- **Controller → ODrives**: two direct USB/Fibre links
 - **Web Interface**: WebSocket for real-time updates and joystick control
-- **Fallback**: CAN bus remains operational even if WiFi fails
+- **Safety**: short WiFi loss pauses driving; prolonged loss latches a system stop
 
 **Current Focus:**
 - 🗺️ Bing Maps satellite view integration
@@ -781,6 +784,6 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 - 📊 RTK status monitoring
 - 🛤️ Trail visualization
 - 📐 IMU-based orientation display
-- 🎮 Web-based joystick control with CAN enable/disable
+- 🎮 Web-based joystick control with USB/stream status diagnostics
 
 The project is actively being developed with focus on autonomous navigation capabilities and robust communication.

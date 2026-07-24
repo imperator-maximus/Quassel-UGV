@@ -2,17 +2,20 @@
 
 **RTK-GPS + USB-IMU telemetry with real-time web interface for autonomous UGV**
 
-> Hinweis: Der aktuelle produktive Sensor-Hub läuft inzwischen im Verzeichnis **`sensor_hub/`** auf einem **Orange Pi Zero 2W**. Diese Datei beschreibt vor allem den Raspberry-Pi-Controller und ältere Raspberry-Pi-Setup-Schritte.
+> **Produktionsstand 24.07.2026:** SensorHub-Pose ueber zwei parallele
+> HTTP/WiFi-Streams; beide ODrive-Boards ueber zwei direkte USB/Fibre-Kabel.
+> CAN ist auf Haupt-UGV und SensorHub deaktiviert. Weiter unten enthaltene
+> CAN-Anweisungen sind ausschliesslich historische Teststand-Dokumentation.
 
 ## 🎯 Project Overview
 
 **Goal:** Implement autonomous UGV with RTK-GPS positioning, IMU orientation, and real-time web interface.
 
 **Hardware:**
-- **Sensor Hub**: Orange Pi Zero 2W + USB-CAN adapter (currently CANable2)
+- **Sensor Hub**: Orange Pi Zero 2W, ohne aktiven CAN-Adapter
   - Holybro UM982 (Dual-antenna RTK-GPS, USB)
   - WitMotion USB-IMU (USB)
-- **Motor Controller**: Raspberry Pi 3 + USB-CAN adapter (`gs_usb`)
+- **Motor Controller**: Raspberry Pi 3 + zwei direkte ODrive-USB-Verbindungen
   - Motor control (2-channel Hardware-PWM via pigpio)
   - Mower control (Relay + PWM speed control)
   - Light control (Relay)
@@ -20,11 +23,9 @@
   - Web interface with virtual joystick
 
 **Communication:**
-- Protocol: Classical CAN 2.0 on all devices; CAN FD is not used
-- Production CAN bus: 250 kbit/s
-- Former UGV test stand (offline): USB-CAN adapter at 250 kbit/s
-- ODrive/ODESC controllers: integrated CAN interface using SimpleCAN
-- JSON-based Multi-Frame Protocol
+- SensorHub → Raspberry: zwei persistente HTTP/WiFi-NDJSON-Streams
+- Raspberry → ODrives: direkte USB/Fibre-Verbindungen nach Seriennummer/Achse
+- CAN: nur ehemaliger Offline-Teststand, Classical CAN 2.0 bei 250 kbit/s
 - IMU/GPS telemetry updates
 - WebSocket: Real-time web interface
 
@@ -124,15 +125,17 @@ http://raspberrycan/
 curl http://raspberrycan/api/status
 ```
 
-### 3. Hardware Connection
-Connect Sensor Hub to Controller via CAN Bus:
-- **CAN_H** ↔ **CAN_H**
-- **CAN_L** ↔ **CAN_L**
-- **GND** ↔ **GND** (common ground)
+### 3. Produktive Hardware-Verbindungen
+
+- SensorHub und Hauptrechner kommunizieren ueber WLAN; kein CAN-Kabel.
+- ODrive Board A und B sind jeweils direkt per USB mit dem Raspberry verbunden.
+- Die alten CAN-Klemmen und der USB-CAN-Adapter gehoeren nicht zum Produktivpfad.
 
 ## 🔧 Hardware Configuration
 
-### Main-controller USB-CAN Details
+## Historische CAN-Referenz (Offline-Teststand, nicht am UGV anwenden)
+
+### Historische Main-controller USB-CAN Details (nicht produktiv)
 - **Driver:** `gs_usb`
 - **Protocol:** Classical CAN 2.0 (maximum 8 data bytes per frame)
 - **SocketCAN interface:** `can0`
@@ -143,8 +146,8 @@ Connect Sensor Hub to Controller via CAN Bus:
 ```bash
 # Current production sensor hub:
 # - Orange Pi Zero 2W
-# - USB-CAN adapter (currently CANable2) via slcan
-# - Classical CAN 2.0 at 250 kbit/s
+# - kein USB-CAN-Adapter im Produktionsbetrieb
+# - HTTP/WiFi-Telemetrie ueber Port 80/extern 8081
 # - Holybro UM982 via USB serial
 # - WitMotion via USB serial
 #
@@ -304,14 +307,14 @@ curl http://localhost:80
 ### Hardware Setup Complete
 - ✅ USB-CAN adapter detected by `gs_usb`
 - ✅ Legacy MCP2515 Device Tree overlay disabled
-- ✅ CAN interface can0 UP and ready
+- ✅ Legacy test stand: CAN interface `can0` UP and ready
 - ✅ WitMotion USB device detected
 - ✅ UART GPS receiving NMEA data
 
 ### Sensor Hub Telemetry Working
 - ✅ GPS position updates at 50 Hz
 - ✅ IMU orientation data available
-- ✅ CAN messages broadcast to controller
+- ✅ Legacy test stand: CAN messages visible in `candump`
 - ✅ Web interface displays real-time data
 
 ## 🚀 Ready for Production

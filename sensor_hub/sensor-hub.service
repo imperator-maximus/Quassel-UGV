@@ -1,7 +1,7 @@
 [Unit]
-Description=Quassel UGV Sensor Hub (RTK-GPS + WitMotion IMU + CAN)
+Description=Quassel UGV Sensor Hub (RTK-GPS + WitMotion IMU + HTTP telemetry)
 Wants=network-online.target
-After=network-online.target can-interface.service
+After=network-online.target
 
 [Service]
 Type=simple

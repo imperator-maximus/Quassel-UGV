@@ -1,6 +1,6 @@
 # 👑 Quassel UGV - Sensor Hub 👑
 
-RTK-GPS + WitMotion USB-IMU + CAN- und HTTP/WiFi-Telemetrie für den
+RTK-GPS + WitMotion USB-IMU + redundante HTTP/WiFi-Telemetrie für den
 **Orange Pi Zero 2W (DietPi)**.
 
 > Der aktuelle produktive Deploy-Stand steht in **`DEPLOY_ORANGE_PI.md`**.
@@ -15,16 +15,15 @@ RTK-GPS + WitMotion USB-IMU + CAN- und HTTP/WiFi-Telemetrie für den
 - **Web-Interface** - Einfache HTML5 Oberfläche mit Live-Updates
 - **Bing Maps Integration** - Direkter Link zu aktuellen Koordinaten
 - **GPS-NTRIP Bridge** - Automatisches Routing von RTK-Daten zum GPS
-- **CAN-Telemetrie** - JSON-basierte Sensordaten über `can0`
-- **WiFi-Telemetrie** - dieselbe kompakte, korrigierte Pose über
-  `GET /api/telemetry`
+- **WiFi-Telemetrie** - kompakte, korrigierte Pose über zwei parallele
+  persistente Streams auf `GET /api/telemetry/stream`
+- **Legacy-CAN-Code** - vorhanden, aber im Produktionsprofil deaktiviert
 
 ## 📋 Voraussetzungen
 
 ### Hardware
 - Orange Pi Zero 2W
-- DSD TECH SH-C30A USB-CAN-Adapter (`can0` via nativem `gs_usb`/SocketCAN)
-- Classical CAN 2.0 bei 250 kbit/s; CAN FD wird nicht verwendet
+- Kein CAN-Adapter im Produktionsbetrieb
 - Holybro UM982 RTK-GPS per USB (`/dev/serial/by-id/...`)
 - WitMotion USB-IMU (`/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`)
 - stabile 5V-Versorgung
@@ -47,7 +46,7 @@ Die aktuelle, getestete Anleitung steht in **`DEPLOY_ORANGE_PI.md`**.
 
 **NIEMALS Passwörter in config.py speichern!**
 
-Für den aktuellen Orange-Deploy sind **GPS, CAN, WitMotion-IMU und NTRIP/RTK aktiv**.
+Für den aktuellen Orange-Deploy sind **GPS, WitMotion-IMU, HTTP/WiFi und NTRIP/RTK aktiv; CAN ist aus**.
 
 Lege die produktive `.env` mit deinen NTRIP-Credentials an:
 
@@ -96,10 +95,9 @@ http://192.168.178.20/
 
 ## 🔧 Konfiguration
 
-CAN ist optional. Bei WLAN-Telemetrie kann `CAN_ENABLED=0` gesetzt und
-`can-interface.service` deaktiviert werden. `sensor-hub.service` startet dann
-auch ohne angeschlossenen USB-CAN-Adapter; Implementierung und Konfiguration
-für eine spätere Reaktivierung bleiben erhalten.
+Im Produktionsprofil gilt `CAN_ENABLED=0`; `can-interface.service` ist
+deaktiviert und es ist kein USB-CAN-Adapter angeschlossen. Implementierung und
+Konfiguration bleiben nur fuer historische Tests erhalten.
 
 ### config.py
 
@@ -241,6 +239,13 @@ curl http://orangeugv/api/health
 ```
 Gibt: Allgemeiner System-Status
 
+### Produktiver Telemetriestrom
+```bash
+curl -N http://orangeugv/api/telemetry/stream
+```
+Liefert fortlaufend kompakte NDJSON-Pakete. Der Hauptrechner oeffnet zwei
+unabhaengige Verbindungen zu diesem Endpunkt.
+
 ### IMU Status
 ```bash
 curl http://orangeugv/api/imu/status
@@ -250,9 +255,9 @@ Gibt: WitMotion Verbindungsstatus, Orientierung, Rohdaten und Temperatur
 
 ## 🔄 Nächste Schritte
 
-- [x] Orange-Pi-Deploy mit USB-CAN und Classical CAN 2.0 ✅
+- [x] Orange-Pi-Deploy mit redundanter HTTP/WiFi-Telemetrie ✅
 - [x] GPS via USB/by-id ✅
-- [x] CAN JSON-Transport bidirektional ✅
+- [x] Zwei persistente NDJSON-Telemetriestroeme ✅
 - [x] WitMotion USB-IMU integriert ✅
 - [x] RTK/NTRIP produktiv aktiviert ✅
 - [ ] Achs-/Montagerichtung der IMU im Fahrbetrieb validieren

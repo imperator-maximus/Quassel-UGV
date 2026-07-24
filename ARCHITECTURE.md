@@ -1,5 +1,8 @@
 # Quassel UGV - Skalierbare Architektur
 
+Der verbindliche aktuelle Hardware- und Transportstand steht in
+[`CURRENT_PRODUCTION.md`](CURRENT_PRODUCTION.md).
+
 ## 🎯 Vision
 Modulare, erweiterbare Plattform für autonome Rasenmäher mit:
 - Waypoint-Navigation & Pfadplanung
@@ -8,29 +11,30 @@ Modulare, erweiterbare Plattform für autonome Rasenmäher mit:
 - Sicherheitssysteme & Notfallbehandlung
 - Web-Interface & Remote-Steuerung
 
-## Aktuelle Produktionstopologie und CAN-Rueckfall
+## Verbindlicher Produktionsstand (24.07.2026)
 
 Der Haupt-UGV nutzt keinen aktiven CAN-Bus mehr: Der SensorHub liefert seine
 Pose per HTTP/WiFi, und die beiden ODrive-v3.x-Boards sind ueber zwei direkte
 USB/Fibre-Verbindungen mit dem Raspberry Pi verbunden. Die drei verwendeten
 Achsen werden ueber USB-Seriennummer und Achsindex eindeutig zugeordnet.
 
-Der vorhandene Classical-CAN-2.0-Code bleibt als Rueckfall und fuer den
-ehemaligen Teststand erhalten. CAN FD wird nicht verwendet; ein eingesetzter
-CAN-Bus arbeitet einheitlich mit 250 kbit/s.
+Der vorhandene Classical-CAN-2.0-Code bleibt ausschliesslich fuer historische
+Tests und eine moegliche spaetere Neuentwicklung erhalten. Er ist **kein
+automatischer Rueckfallpfad** und darf im produktiven UGV-Profil nicht aktiviert
+werden. CAN FD wird nicht verwendet; ein Legacy-Testbus arbeitet mit 250 kbit/s.
 
 | Einsatz | Aktiver Transport | Profil |
 |---------|-------------------|--------|
-| Orange Pi Zero 2W Sensor Hub → Haupt-UGV | HTTP/WiFi | `GET /api/telemetry` |
+| Orange Pi Zero 2W Sensor Hub → Haupt-UGV | HTTP/WiFi, zwei parallele NDJSON-Streams | `/api/telemetry/stream` |
 | Haupt-UGV → ODrive Board A/B | zwei direkte USB/Fibre-Leitungen | Seriennummer + Axis 0/1 |
 | Ehemaliger UGV-Testrechner (offline) | USB-CAN, SocketCAN `can0` | Classical CAN 2.0, 250 kbit/s |
-| Legacy/Rueckfall | ODrive SimpleCAN | Classical CAN 2.0, 250 kbit/s |
+| Legacy/Testcode, produktiv inaktiv | ODrive SimpleCAN | Classical CAN 2.0, 250 kbit/s |
 
-Die SensorHub-Telemetrie ist transportabhaengig konfigurierbar: `can` nutzt
-den bisherigen Multi-Frame-Stream, `shadow` vergleicht parallel HTTP/WiFi und
-`wifi` verwendet `GET /api/telemetry` als aktive Posequelle. Die aktuelle
-ODrive-Steuerung und -Safety laufen direkt ueber USB; `transport: can` bleibt
-konfigurierbar. Bei ausbleibender aktiver
+Das Produktionsprofil verwendet `sensor_hub.transport: wifi` und
+`odrive_mower.transport: usb`. Der Raspberry haelt zwei unabhaengige
+HTTP-Telemetriestroeme offen, damit ein stockender TCP-Strom den zweiten nicht
+blockiert. `can` und `shadow` existieren nur noch fuer Legacy-Tests. Bei
+ausbleibender aktiver
 SensorHub-Telemetrie pausiert der System-Watchdog nach einer kurzen Frist nur
 Fahrantrieb und Route. Erst nach der langen Ausfallfrist verriegelt er den
 Gesamtstopp inklusive Maehdeck. Nach Rueckkehr der Pose wird eine zuvor aktive

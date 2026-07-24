@@ -65,7 +65,7 @@ CAN_TELEMETRY_ENABLED = _env_flag('CAN_TELEMETRY_ENABLED', True)
 # ============================================================================
 # CAN-BUS KONFIGURATION
 # ============================================================================
-CAN_ENABLED = _env_flag('CAN_ENABLED', True)
+CAN_ENABLED = _env_flag('CAN_ENABLED', False)
 CAN_INTERFACE = os.getenv('CAN_INTERFACE', 'can0')
 CAN_BITRATE = int(os.getenv('CAN_BITRATE', '250000'))
 CAN_SENSOR_HUB_ID = int(os.getenv('CAN_SENSOR_HUB_ID', '0x100'), 0)
