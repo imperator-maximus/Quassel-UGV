@@ -50,6 +50,7 @@ class NavigationController:
         self._track_lookahead_m = float(getattr(config, 'track_lookahead_m', 0.8))
         self._active_index = 0
         self._running = False
+        self._paused = False
         self._state = 'idle'
         self._last_pose_time = 0.0
         self._last_command_time = 0.0
@@ -61,6 +62,14 @@ class NavigationController:
         # plus Zähler aufeinanderfolgender Samples mit wachsender Distanz.
         self._waypoint_min_distance: Optional[float] = None
         self._waypoint_overshoot_count = 0
+        # Goto-Fortschrittswächter. Die Referenz wird erst gesetzt, wenn das
+        # Fahrzeug zum Ziel ausgerichtet ist. So kann die am Fahrzeugheck
+        # sitzende GNSS-Antenne beim Pivot einen kleinen Bogen beschreiben,
+        # ohne fälschlich einen Divergenzstopp auszulösen.
+        self._waypoint_progress_reference: Optional[float] = None
+        self._waypoint_divergence_count = 0
+        self._track_aligning = False
+        self._track_progress_m = 0.0
 
         # State-Feedback an Sensor-Hub/UI: feuert bei jedem Übergang.
         self._state_callback: Optional[Any] = None
@@ -121,11 +130,16 @@ class NavigationController:
             self._track_lookahead_m = lookahead
             self._active_index = 0
             self._running = False
+            self._paused = False
             self._state = 'ready'
             self._last_error = None
             self._last_command = {'x': 0.0, 'y': 0.0}
             self._waypoint_min_distance = None
             self._waypoint_overshoot_count = 0
+            self._waypoint_progress_reference = None
+            self._waypoint_divergence_count = 0
+            self._track_aligning = False
+            self._track_progress_m = 0.0
 
         self._neutral_with_ramping()
         self._emit_state()
@@ -142,6 +156,10 @@ class NavigationController:
             self._last_error = None
             self._waypoint_min_distance = None
             self._waypoint_overshoot_count = 0
+            self._waypoint_progress_reference = None
+            self._waypoint_divergence_count = 0
+            self._track_aligning = False
+            self._track_progress_m = 0.0
         self._emit_state()
 
     def start(self) -> bool:
@@ -158,12 +176,17 @@ class NavigationController:
                 started = False
             else:
                 self._running = True
+                self._paused = False
                 self._state = 'running'
                 self._active_index = min(self._active_index, len(self._waypoints) - 1)
                 self._last_pose_time = time.time()
                 self._last_error = None
                 self._waypoint_min_distance = None
                 self._waypoint_overshoot_count = 0
+                self._waypoint_progress_reference = None
+                self._waypoint_divergence_count = 0
+                self._track_aligning = False
+                self._track_progress_m = 0.0
                 started = True
 
         if started:
@@ -176,14 +199,54 @@ class NavigationController:
         with self._lock:
             was_running = self._running
             self._running = False
+            self._paused = False
             if was_running:
                 self._state = reason
             self._last_command = {'x': 0.0, 'y': 0.0}
 
         self._neutral_with_ramping()
+        if self.safety and hasattr(self.safety, 'deactivate_command_watchdog'):
+            self.safety.deactivate_command_watchdog()
         if was_running:
             self.logger.info('🛑 Navigation gestoppt: %s', reason)
             self._emit_state()
+
+    def pause(self, reason: str = 'paused') -> bool:
+        """Freeze navigation in memory without losing path progress."""
+        with self._lock:
+            if not self._running:
+                return False
+            if self._paused:
+                return True
+            self._paused = True
+            self._state = reason
+            self._last_command = {'x': 0.0, 'y': 0.0}
+
+        self._neutral_with_ramping()
+        if self.safety and hasattr(self.safety, 'deactivate_command_watchdog'):
+            self.safety.deactivate_command_watchdog()
+        self.logger.info('⏸️ Navigation eingefroren: %s', reason)
+        self._emit_state()
+        return True
+
+    def resume(self) -> bool:
+        """Continue an in-memory pause at the exact same waypoint/progress."""
+        if (
+            self.safety
+            and hasattr(self.safety, 'is_motion_allowed')
+            and not self.safety.is_motion_allowed()
+        ):
+            return False
+        with self._lock:
+            if not self._running or not self._paused:
+                return False
+            self._paused = False
+            self._state = 'running'
+            self._last_pose_time = time.time()
+            self._last_error = None
+        self.logger.info('▶️ Navigation aus Speicherpause fortgesetzt')
+        self._emit_state()
+        return True
 
     def shutdown(self) -> None:
         self.stop(reason='shutdown')
@@ -229,6 +292,7 @@ class NavigationController:
             active = self._waypoints[self._active_index].as_dict() if self._waypoints and self._active_index < len(self._waypoints) else None
             return {
                 'running': self._running,
+                'paused': self._paused,
                 'state': self._state,
                 'mode': self._mode,
                 'direction': self._direction,
@@ -244,7 +308,16 @@ class NavigationController:
                     'watchdog_timeout_s': self.config.watchdog_timeout_s,
                     'geofence_radius_m': self.config.geofence_radius_m,
                     'max_joystick': self.config.max_joystick,
+                    'pivot_joystick': self._pivot_turn_level(),
                     'track_lookahead_m': self._track_lookahead_m,
+                    'pivot_heading_threshold_deg': self._pivot_heading_threshold_deg(),
+                    'goto_divergence_limit_m': float(getattr(self.config, 'goto_divergence_limit_m', 0.75)),
+                    'goto_divergence_samples': int(getattr(self.config, 'goto_divergence_samples', 5)),
+                'track_cross_track_limit_m': float(getattr(self.config, 'track_cross_track_limit_m', 1.0)),
+                    'track_alignment_enter_deg': self._track_alignment_enter_deg(),
+                    'track_alignment_exit_deg': self._track_alignment_exit_deg(),
+                    'track_aligning': self._track_aligning,
+                    'track_progress_m': round(self._track_progress_m, 2),
                 },
             }
 
@@ -290,7 +363,7 @@ class NavigationController:
         with self._lock:
             self._last_pose_time = now
             self._last_pose = {'latitude': lat, 'longitude': lon, 'heading_deg': heading}
-            if not self._running or not self._waypoints:
+            if not self._running or self._paused or not self._waypoints:
                 return
             first = self._waypoints[0]
             mode = self._mode
@@ -346,6 +419,14 @@ class NavigationController:
 
         bearing = self.bearing_deg(current, target)
         error = self.heading_error_deg(bearing, heading)
+        if self._goto_is_diverging(distance, error):
+            message = (
+                f'Navigation entfernt sich vom Ziel: Wegpunkt {self._active_index}, '
+                f'Distanz {distance:.2f} m'
+            )
+            self.stop(reason='divergence_stop')
+            self._set_error(message)
+            return
         x, y = self._calculate_command(error, distance)
         self._send_command(x, y)
 
@@ -361,6 +442,8 @@ class NavigationController:
             self._active_index += 1
             self._waypoint_min_distance = None
             self._waypoint_overshoot_count = 0
+            self._waypoint_progress_reference = None
+            self._waypoint_divergence_count = 0
             if self._active_index >= len(self._waypoints):
                 self._running = False
                 self._state = 'completed'
@@ -371,6 +454,8 @@ class NavigationController:
 
         if completed:
             self._neutral_with_ramping()
+            if self.safety and hasattr(self.safety, 'deactivate_command_watchdog'):
+                self.safety.deactivate_command_watchdog()
             self.logger.info('✅ Navigation abgeschlossen')
         self._emit_state()
         return completed
@@ -379,23 +464,107 @@ class NavigationController:
         with self._lock:
             waypoints = list(self._waypoints)
             lookahead = self._track_lookahead_m
+            progress_hint_m = self._track_progress_m
 
         target, progress_m, remaining_m, segment_index, raw_t, cross_track_m = self._pure_pursuit_target(
             current,
             waypoints,
             lookahead,
+            progress_hint_m=progress_hint_m,
         )
+        total_m = progress_m + remaining_m
+
+        with self._lock:
+            self._track_progress_m = max(self._track_progress_m, progress_m)
+            progress_m = self._track_progress_m
 
         distance_to_end = self.distance_m(current, waypoints[-1])
-        if distance_to_end <= float(self.config.acceptance_radius_m) or (segment_index >= len(waypoints) - 2 and raw_t >= 1.0):
+        acceptance_m = float(self.config.acceptance_radius_m)
+        closed_track = (
+            len(waypoints) >= 3
+            and self.distance_m(waypoints[0], waypoints[-1]) <= 0.05
+        )
+        if closed_track:
+            # A rotated contour starts and ends at the selected point. It must
+            # not therefore complete on its very first pose sample. Completion
+            # is allowed only after progress has traversed the whole ring.
+            completed = total_m > acceptance_m and progress_m >= total_m - acceptance_m
+        else:
+            completed = (
+                distance_to_end <= acceptance_m
+                or (segment_index >= len(waypoints) - 2 and raw_t >= 1.0)
+            )
+        if completed:
             self._complete_track()
+            return
+
+        cross_track_limit = max(
+            0.25,
+            float(getattr(self.config, 'track_cross_track_limit_m', 1.0)),
+        )
+        if cross_track_m > cross_track_limit:
+            message = (
+                f'Navigation zu weit vom Pfad entfernt: {cross_track_m:.2f} m '
+                f'(Grenze {cross_track_limit:.2f} m)'
+            )
+            self.stop(reason='cross_track_stop')
+            self._set_error(message)
             return
 
         bearing = self.bearing_deg(current, target)
         if direction == 'reverse':
             bearing = (bearing + 180.0) % 360.0
         error = self.heading_error_deg(bearing, heading)
+
+        # Ein Track darf nicht mit grossem Winkelfehler und nahezu voller
+        # Vorwaertsfahrt angefahren werden. Reines Gegenlaeufig-Pivotieren
+        # funktioniert am realen UGV unter Last jedoch nicht zuverlaessig.
+        # Deshalb richtet er sich rollend um das stehende kurveninnere Rad aus
+        # und faehrt erst unterhalb der Hysterese normal weiter.
+        if direction != 'reverse':
+            enter_deg = self._track_alignment_enter_deg()
+            exit_deg = self._track_alignment_exit_deg()
+            with self._lock:
+                if self._track_aligning:
+                    self._track_aligning = abs(error) > exit_deg
+                elif abs(error) >= enter_deg:
+                    self._track_aligning = True
+                aligning = self._track_aligning
+
+            if aligning:
+                limit = min(0.30, max(0.0, float(self.config.max_joystick)))
+                turn = self._clamp(
+                    error * float(self.config.turn_kp),
+                    -limit,
+                    limit,
+                )
+                # y = |x| * turn/forward haelt das kurveninnere Rad exakt
+                # neutral, waehrend das aeussere Rad mit genug PWM vorwaerts
+                # rollt. Kein Rueckwaertsmoment, kein wirkungsloser Stillstand.
+                rolling_forward = min(limit, abs(turn) * self._turn_to_forward_ratio)
+                self._send_command(turn, rolling_forward)
+                if now - self._last_debug_log >= 1.0:
+                    self._last_debug_log = now
+                    self.logger.info(
+                        '🧭 track-align-roll: seg=%d xtrack=%.2fm hdg=%.1f° err=%.1f° → x=%.3f y=%.3f',
+                        segment_index, cross_track_m, heading, error, turn,
+                        rolling_forward,
+                    )
+                return
+
         x, y = self._calculate_command(error, max(remaining_m, lookahead), direction=direction)
+        if direction != 'reverse':
+            enter_deg = self._track_alignment_enter_deg()
+            exit_deg = self._track_alignment_exit_deg()
+            if abs(error) > exit_deg:
+                span = max(1.0, enter_deg - exit_deg)
+                speed_factor = self._clamp(
+                    (enter_deg - abs(error)) / span,
+                    0.20,
+                    1.0,
+                )
+                limit = min(0.30, max(0.0, float(self.config.max_joystick)))
+                y = min(y, limit * speed_factor)
         self._send_command(x, y)
 
         with self._lock:
@@ -416,6 +585,8 @@ class NavigationController:
             self._active_index = max(0, len(self._waypoints) - 1)
             self._last_command = {'x': 0.0, 'y': 0.0}
         self._neutral_with_ramping()
+        if self.safety and hasattr(self.safety, 'deactivate_command_watchdog'):
+            self.safety.deactivate_command_watchdog()
         self.logger.info('✅ Track-Navigation abgeschlossen')
         self._emit_state()
 
@@ -425,6 +596,7 @@ class NavigationController:
         current: Waypoint,
         waypoints: List[Waypoint],
         lookahead_m: float,
+        progress_hint_m: float = 0.0,
     ) -> Tuple[Waypoint, float, float, int, float, float]:
         origin = waypoints[0]
         path_xy = [cls._to_local_xy(wp, origin) for wp in waypoints]
@@ -435,7 +607,7 @@ class NavigationController:
             total += cls._distance_xy(path_xy[index], path_xy[index + 1])
             lengths.append(total)
 
-        best = None
+        candidates = []
         for index in range(len(path_xy) - 1):
             a = path_xy[index]
             b = path_xy[index + 1]
@@ -449,9 +621,21 @@ class NavigationController:
             proj = (a[0] + ab[0] * t, a[1] + ab[1] * t)
             dist = cls._distance_xy(current_xy, proj)
             progress = lengths[index] + math.sqrt(seg_len_sq) * t
-            candidate = (dist, progress, index, raw_t)
-            if best is None or candidate[0] < best[0]:
-                best = candidate
+            candidates.append((dist, progress, index, raw_t))
+
+        # Prefer the local continuation of the path. On a closed ring the
+        # first and last segment touch at the selected start point; a global
+        # nearest-segment search otherwise jumps directly to the end and
+        # falsely completes the entire contour.
+        backward_tolerance_m = max(0.25, lookahead_m * 0.5)
+        forward_window_m = max(3.0, lookahead_m * 3.0)
+        local_candidates = [
+            candidate for candidate in candidates
+            if candidate[1] >= max(0.0, progress_hint_m - backward_tolerance_m)
+            and candidate[1] <= progress_hint_m + forward_window_m
+        ]
+        pool = local_candidates or candidates
+        best = min(pool, key=lambda candidate: candidate[0]) if pool else None
 
         if best is None:
             return waypoints[-1], 0.0, 0.0, 0, 0.0, 0.0
@@ -508,6 +692,21 @@ class NavigationController:
         heading_factor = max(0.0, 1.0 - abs(heading_error) / 90.0)
         forward = limit * heading_factor * distance_factor
 
+        # Bei großem Richtungsfehler niemals einen fahrenden U-Turn erzwingen.
+        # Das Fahrzeug dreht zunächst auf der Stelle und erhält erst danach
+        # Vorwärtsfahrt. Damit kann ein falscher Anfahrwinkel es nicht in einem
+        # großen Bogen aus der geplanten Fläche tragen.
+        pivot_threshold = self._pivot_heading_threshold_deg()
+        pivoting = direction != 'reverse' and abs(heading_error) >= pivot_threshold
+        if pivoting:
+            # ``turn_factor`` ist am realen UGV kleiner als
+            # ``forward_factor`` (300 vs. 500). Ein x-Limit von 0.30 liefert
+            # deshalb beim Pivot nur 90 us PWM-Offset und bleibt auf Gras in
+            # der Totzone. Skaliere reine Drehungen so, dass beide Raeder
+            # denselben absoluten PWM-Offset wie 30 % Vorwaertsfahrt erhalten.
+            pivot_turn = self._pivot_turn_level()
+            return math.copysign(pivot_turn, turn or heading_error), 0.0
+
         # Innen-Rad-Garantie (anti-Pivot): das kurveninnere Skid-Rad darf
         # nicht rückwärts laufen (Scrubbing). PWM-Mix:
         #   inner = neutral + (y - |x| · turn_factor/forward_factor) · forward_factor
@@ -535,6 +734,59 @@ class NavigationController:
         signed_forward = -forward if direction == 'reverse' else forward
         return turn, self._clamp(signed_forward, -limit, limit)
 
+    def _pivot_heading_threshold_deg(self) -> float:
+        return self._clamp(
+            float(getattr(self.config, 'pivot_heading_threshold_deg', 70.0)),
+            30.0,
+            89.0,
+        )
+
+    def _pivot_turn_level(self) -> float:
+        limit = min(0.30, max(0.0, float(self.config.max_joystick)))
+        ratio = max(0.01, float(self._turn_to_forward_ratio))
+        return self._clamp(limit / ratio, limit, 1.0)
+
+    def _track_alignment_enter_deg(self) -> float:
+        return self._clamp(
+            float(getattr(self.config, 'track_alignment_enter_deg', 25.0)),
+            10.0,
+            60.0,
+        )
+
+    def _track_alignment_exit_deg(self) -> float:
+        enter = self._track_alignment_enter_deg()
+        return self._clamp(
+            float(getattr(self.config, 'track_alignment_exit_deg', 10.0)),
+            2.0,
+            max(2.0, enter - 2.0),
+        )
+
+    def _goto_is_diverging(self, distance: float, heading_error: float) -> bool:
+        """Stoppt eine ausgerichtete Goto-Fahrt, die sich vom Ziel entfernt."""
+        if abs(heading_error) >= self._pivot_heading_threshold_deg():
+            self._waypoint_progress_reference = None
+            self._waypoint_divergence_count = 0
+            return False
+
+        if self._waypoint_progress_reference is None or distance < self._waypoint_progress_reference:
+            self._waypoint_progress_reference = distance
+            self._waypoint_divergence_count = 0
+            return False
+
+        limit_m = max(
+            0.25,
+            float(getattr(self.config, 'goto_divergence_limit_m', 0.75)),
+        )
+        required_samples = max(
+            2,
+            int(getattr(self.config, 'goto_divergence_samples', 5)),
+        )
+        if distance > self._waypoint_progress_reference + limit_m:
+            self._waypoint_divergence_count += 1
+        else:
+            self._waypoint_divergence_count = 0
+        return self._waypoint_divergence_count >= required_samples
+
     def _send_command(self, x: float, y: float) -> None:
         self.motor.set_joystick(x, y, use_ramping=False)
         now = time.time()
@@ -557,8 +809,11 @@ class NavigationController:
     def _check_watchdog(self) -> None:
         with self._lock:
             running = self._running
+            paused = self._paused
             last_pose = self._last_pose_time
-        if running and (not last_pose or time.time() - last_pose > float(self.config.watchdog_timeout_s)):
+        if running and not paused and (
+            not last_pose or time.time() - last_pose > float(self.config.watchdog_timeout_s)
+        ):
             self._set_error('CAN-Pose Watchdog-Timeout')
             self.stop(reason='watchdog')
 

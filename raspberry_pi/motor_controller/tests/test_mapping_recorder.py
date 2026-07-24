@@ -545,6 +545,63 @@ class MappingRecorderTests(unittest.TestCase):
         self.assertEqual(plan["rest_lanes"][0]["coordinates"][0], executable[0]["coordinates"][0])
         self.assertEqual("rest_lane", executable[1]["source_type"])
 
+    def test_selected_start_coordinate_trims_open_segment_exactly(self):
+        manager = MowingPlanManager("/tmp/maps", lambda: self._pose_m(12.0, 0.0, 270.0))
+        plan = self._reverse_transition_plan()
+        selected = self._coord_m(5.0, 0.0)
+
+        executable = manager.executable_segments(
+            plan,
+            start_segment_index=1,
+            start_coordinate=selected,
+            start_pose=self._pose_m(12.0, 0.0, 270.0),
+        )
+
+        self.assertEqual(["positioning", "mow"], [item["type"] for item in executable])
+        self.assertEqual(selected, executable[0]["coordinates"][0])
+        self.assertEqual(selected, executable[1]["coordinates"][0])
+        self.assertAlmostEqual(self._coord_m(0.0, 0.0)[0], executable[1]["coordinates"][-1][0])
+
+    def test_selected_start_coordinate_rotates_closed_ring_without_shortening_it(self):
+        manager = MowingPlanManager("/tmp/maps", lambda: self._pose_m(-2.0, 0.0, 0.0))
+        ring = [
+            self._coord_m(0.0, 0.0),
+            self._coord_m(10.0, 0.0),
+            self._coord_m(10.0, 10.0),
+            self._coord_m(0.0, 10.0),
+            self._coord_m(0.0, 0.0),
+        ]
+        plan = {
+            "success": True,
+            "name": "Brunnen",
+            "map_name": "Brunnen",
+            "sequence": [{
+                "type": "contour",
+                "segment_index": 0,
+                "lane_index": 0,
+                "coordinates": ring,
+                "length_m": 40.0,
+            }],
+            "transitions": [],
+            "rest_lanes": [],
+            "lanes": [],
+            "total_drive_length_m": 40.0,
+        }
+        selected = self._coord_m(5.0, 0.0)
+
+        executable = manager.executable_segments(
+            plan,
+            start_segment_index=0,
+            start_coordinate=selected,
+            start_pose=self._pose_m(-2.0, 0.0, 0.0),
+        )
+
+        self.assertEqual(["positioning", "mow"], [item["type"] for item in executable])
+        self.assertEqual(selected, executable[0]["coordinates"][0])
+        self.assertEqual(selected, executable[1]["coordinates"][0])
+        self.assertEqual(selected, executable[1]["coordinates"][-1])
+        self.assertAlmostEqual(40.0, executable[1]["length_m"], delta=0.1)
+
     def test_reverse_start_uses_nearest_lane_end_without_positioning_loop(self):
         manager = MowingPlanManager("/tmp/maps", lambda: self._pose_m(10.0, 0.0, 270.0))
         plan = self._reverse_transition_plan()
@@ -649,6 +706,43 @@ class MappingRecorderTests(unittest.TestCase):
         self.assertFalse(deep["ok"])
         self.assertEqual("stop", deep["state"])
         self.assertIn("35 cm", deep["reason"])
+
+    def test_nogo_monitor_enforces_outer_map_boundary_without_sub_zones(self):
+        self._assert_shapely_available()
+        ring = [
+            self._coord_m(-2.0, -2.0),
+            self._coord_m(2.0, -2.0),
+            self._coord_m(2.0, 2.0),
+            self._coord_m(-2.0, 2.0),
+            self._coord_m(-2.0, -2.0),
+        ]
+        plan = {
+            "map": {
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {"type": "boundary"},
+                    "geometry": {"type": "Polygon", "coordinates": [ring]},
+                }],
+            },
+            "parameters": {"outer_margin_m": 0.0},
+        }
+        monitor = NoGoZoneMonitor(plan, boundary_tolerance_m=0.35)
+
+        inside = monitor.check_pose(self._pose_m(0.0, 0.0, 0.0))
+        outside = monitor.check_pose(self._pose_m(2.8, 0.0, 0.0))
+
+        self.assertTrue(inside["ok"])
+        self.assertEqual("ok", inside["state"])
+        self.assertFalse(outside["ok"])
+        self.assertEqual("stop", outside["state"])
+        self.assertIn("außerhalb der Mähbegrenzung", outside["reason"])
+
+        runtime_monitor = NoGoZoneMonitor(plan, enforce_outer_boundary=False)
+        runtime_result = runtime_monitor.check_pose(self._pose_m(2.8, 0.0, 0.0))
+
+        self.assertTrue(runtime_result["ok"])
+        self.assertEqual("disabled", runtime_result["state"])
 
     @staticmethod
     def _sample_plan(reverse=False, unsafe=False):

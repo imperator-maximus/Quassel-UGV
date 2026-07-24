@@ -33,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Flask imports
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 import threading
 
 # CAN imports
@@ -227,9 +227,12 @@ class SensorHubApp:
                 # bitrate nicht angeben, da CAN bereits via ip link konfiguriert ist
             )
 
-            # CAN Sender Thread starten (50Hz)
-            self.can_sender_thread = threading.Thread(target=self._can_sender_loop, daemon=True)
-            self.can_sender_thread.start()
+            # CAN Sender Thread starten (50Hz) - nur wenn Telemetrie per CAN aktiv
+            if config.CAN_TELEMETRY_ENABLED:
+                self.can_sender_thread = threading.Thread(target=self._can_sender_loop, daemon=True)
+                self.can_sender_thread.start()
+            else:
+                logger.info("ℹ️  CAN-Telemetrie-Versand deaktiviert (CAN_TELEMETRY_ENABLED=false), Empfang bleibt aktiv")
 
             # CAN Receiver Thread starten
             self.can_receiver_thread = threading.Thread(target=self._can_receiver_loop, daemon=True)
@@ -621,6 +624,34 @@ class SensorHubApp:
                 'gps': status,
                 'timestamp': time.time()
             })
+
+        @self.app.route('/api/telemetry')
+        def api_telemetry():
+            """API: Exakt dieselbe kompakte Pose wie im CAN-Telemetriestrom."""
+            return jsonify(self._get_sensor_data())
+
+        @self.app.route('/api/telemetry/stream')
+        def api_telemetry_stream():
+            """Kontinuierlicher NDJSON-Strom der kompakten Sensor-Pose.
+
+            Der Raspberry haelt damit eine TCP-Verbindung offen, statt fuer
+            jedes 5-Hz-Telemetriepaket den NAT-Hairpin der Fritzbox erneut zu
+            durchlaufen.
+            """
+            def generate():
+                while self.running:
+                    payload = self._get_sensor_data()
+                    yield json.dumps(payload, separators=(',', ':')) + '\n'
+                    time.sleep(0.2)
+
+            return Response(
+                stream_with_context(generate()),
+                content_type='application/x-ndjson',
+                headers={
+                    'Cache-Control': 'no-cache, no-transform',
+                    'X-Accel-Buffering': 'no',
+                },
+            )
         
         @self.app.route('/api/coordinates')
         def api_coordinates():

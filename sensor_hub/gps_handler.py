@@ -117,10 +117,18 @@ class GPSHandler:
         """Liest NMEA-Sätze in Schleife"""
         while self.running:
             try:
-                if self.serial_port and self.serial_port.in_waiting:
-                    line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
-                    if line:
-                        self._parse_nmea(line)
+                serial_port = self.serial_port
+                if serial_port is None:
+                    time.sleep(0.1)
+                    continue
+
+                # readline() blocks until a complete NMEA line arrives or the
+                # configured serial timeout expires.  Checking in_waiting in a
+                # tight loop used to consume an entire CPU core and starved the
+                # SensorHub HTTP telemetry threads.
+                line = serial_port.readline().decode('utf-8', errors='ignore').strip()
+                if line:
+                    self._parse_nmea(line)
             except Exception as e:
                 logger.debug(f"GPS Read-Fehler: {e}")
                 time.sleep(0.1)
@@ -223,4 +231,3 @@ class GPSHandler:
             if self.rtk_status not in ["NO GPS", ""]:
                 return f"https://www.bing.com/maps?cp={self.latitude}~{self.longitude}&lvl=18"
         return "https://www.bing.com/maps"
-

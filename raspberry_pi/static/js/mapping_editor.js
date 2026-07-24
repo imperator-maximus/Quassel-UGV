@@ -26,6 +26,7 @@ var planUiMode = 'map';
 var activePlanName = '';
 var planIsRunning = false;
 var planResumeAvailable = false;
+var planStartAttemptToken = 0;
 var selectedPointIndex = null;
 var manualPointDragIndex = null;
 
@@ -647,37 +648,89 @@ function playLoadedPlan() {
         setPlanStatus('Kein Plan geladen');
         return;
     }
-    if (!confirm('Plan wirklich starten? Der Mäher/Fahrantrieb darf nur unter Aufsicht ausgeführt werden.')) {
+    const start = selectedPlanStart();
+    if (!start) {
+        setPlanStatus('Keine gültige Abfahrposition gewählt');
         return;
     }
-    const useResume = planResumeAvailable === true;
-    const startSegmentIndex = useResume ? null : selectedStartSegmentIndex();
+    const percentText = start.percent.toFixed(1).replace('.', ',');
+    if (!confirm(`Plan ab ${percentText}% starten? Das Fahrzeug fährt zuerst zur pink markierten Position.`)) {
+        return;
+    }
+    const attemptToken = ++planStartAttemptToken;
+    const retryDeadline = Date.now() + 35000;
+    setPlanStatus(`Planstart ab ${percentText}% wird geprüft`);
+    checkAndStartLoadedPlan(false, start.segmentIndex, start.coordinate, attemptToken, retryDeadline);
+}
+
+function resumeLoadedPlan() {
+    if (!activeMapName || !planResumeAvailable) {
+        setPlanStatus('Kein pausierter Plan zum Fortsetzen vorhanden');
+        return;
+    }
+    if (!confirm('Pausierten Plan an der gespeicherten Stelle fortsetzen?')) return;
+    const attemptToken = ++planStartAttemptToken;
+    const retryDeadline = Date.now() + 35000;
+    setPlanStatus('Fortsetzen wird geprüft');
+    checkAndStartLoadedPlan(true, null, null, attemptToken, retryDeadline);
+}
+
+function isTransientRtkStartFailure(data) {
+    const messages = [data?.error, ...(data?.errors || [])].filter(Boolean);
+    return messages.some(message =>
+        message.includes('RTK/GPS-Pose ist nicht aktuell') ||
+        message.includes('Keine aktuelle RTK/GPS-Pose vorhanden')
+    );
+}
+
+function retryPlanStart(useResume, startSegmentIndex, startCoordinate, attemptToken, retryDeadline) {
+    if (attemptToken !== planStartAttemptToken) return;
+    const remainingSeconds = Math.max(0, Math.ceil((retryDeadline - Date.now()) / 1000));
+    setPlanStatus(`Warte auf frische RTK-Daten · noch ${remainingSeconds} s`);
+    setTimeout(
+        () => checkAndStartLoadedPlan(useResume, startSegmentIndex, startCoordinate, attemptToken, retryDeadline),
+        500
+    );
+}
+
+function checkAndStartLoadedPlan(useResume, startSegmentIndex, startCoordinate, attemptToken, retryDeadline) {
+    if (attemptToken !== planStartAttemptToken) return;
     fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan/check`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({plan: lanePreviewPlan, start_segment_index: startSegmentIndex})
+        body: JSON.stringify({start_segment_index: startSegmentIndex, start_coordinate: startCoordinate})
     })
     .then(response => response.json().then(data => ({ok: response.ok, data})))
     .then(result => {
         const errors = result.data.errors || [];
         const warnings = result.data.warnings || [];
         if (!result.ok || result.data.success !== true) {
-            const detail = errors.concat(warnings).join(' · ');
+            if (isTransientRtkStartFailure(result.data) && Date.now() < retryDeadline) {
+                retryPlanStart(useResume, startSegmentIndex, startCoordinate, attemptToken, retryDeadline);
+                return;
+            }
+            const detail = [result.data.error, ...errors, ...warnings].filter(Boolean).join(' · ');
             setPlanStatus(`Play blockiert · ${planSummaryText(result.data.summary || lanePreviewPlan)}${detail ? ' · ' + detail : ''}`);
             return;
         }
+        if (attemptToken !== planStartAttemptToken) return;
         return fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan/execute`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({start_segment_index: startSegmentIndex, resume: useResume})
+            body: JSON.stringify({start_segment_index: startSegmentIndex, start_coordinate: startCoordinate, resume: useResume})
         })
             .then(response => response.json().then(data => ({ok: response.ok, data})))
             .then(executeResult => {
+                if (attemptToken !== planStartAttemptToken) return;
                 if (executeResult.ok && executeResult.data.success) {
                     planIsRunning = true;
                     updateMapModeButton();
                     updateMapsSectionTitle();
                     setPlanStatus('Plan gestartet');
+                    return;
+                }
+                if (isTransientRtkStartFailure(executeResult.data) && Date.now() < retryDeadline) {
+                    retryPlanStart(useResume, startSegmentIndex, startCoordinate, attemptToken, retryDeadline);
                     return;
                 }
                 setPlanStatus(executeResult.data.error || 'Plan-Ausführung nicht gestartet');
@@ -690,6 +743,7 @@ function playLoadedPlan() {
 
 function pausePlanExecution() {
     if (!activeMapName) return;
+    planStartAttemptToken += 1;
     fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan/pause`, {method: 'POST'})
         .then(response => response.json().then(data => ({ok: response.ok, data})))
         .then(result => {
@@ -703,6 +757,7 @@ function pausePlanExecution() {
 }
 
 function stopPlanExecution() {
+    planStartAttemptToken += 1;
     fetch('/api/navigation/stop', {method: 'POST'})
         .then(response => response.json().then(data => ({ok: response.ok, data})))
         .then(result => {
@@ -745,11 +800,15 @@ function setLoadedPlanReady(ok) {
 
 function refreshPlanButtons() {
     const playBtn = document.getElementById('planPlayBtn');
-    if (playBtn) playBtn.disabled = !activeMapName || !lanePreviewPlan || !loadedPlanReady || !rtkAvailable;
+    if (playBtn) playBtn.disabled = planIsRunning || !activeMapName || !lanePreviewPlan || !loadedPlanReady || !rtkAvailable;
     const saveBtn = document.getElementById('planSaveBtn');
     if (saveBtn) saveBtn.disabled = !activeMapName || !lanePreviewPlan || loadedPlanReady;
     const pauseBtn = document.getElementById('planPauseBtn');
     if (pauseBtn) pauseBtn.disabled = !planIsRunning;
+    const resumeBtn = document.getElementById('planResumeBtn');
+    if (resumeBtn) resumeBtn.disabled = planIsRunning || !planResumeAvailable || !rtkAvailable;
+    const slider = document.getElementById('laneProgressSlider');
+    if (slider) slider.disabled = planIsRunning || !lanePreviewPlan;
     updateMapModeButton();
 }
 
@@ -830,18 +889,25 @@ function updateVehiclePose(sensorData, navigationStatus, planExecutionStatus) {
     if (plan.state && plan.state !== 'idle') {
         const segment = plan.current_segment || {};
         const progress = `${plan.active_index || 0}/${plan.total || 0}`;
-        setPlanStatus(`Plan ${plan.state} · ${progress} · ${segment.mode || ''} ${segment.direction || ''}`.trim());
+        const errorDetail = plan.last_error ? ` · ${plan.last_error}` : '';
+        setPlanStatus(`Plan ${plan.state} · ${progress} · ${segment.mode || ''} ${segment.direction || ''}${errorDetail}`.trim());
     } else if (nav.state && nav.state !== 'idle') {
         setPlanStatus(`Navigation ${nav.state} · ${nav.mode || ''} ${nav.direction || ''}`.trim());
     }
 }
 
-function selectedStartSegmentIndex() {
+function selectedPlanStart() {
     if (!lanePreviewPlan) return null;
     const slider = document.getElementById('laneProgressSlider');
-    const fraction = Number(slider?.value || 0) / 100;
+    const percent = Number(slider?.value || 0);
+    const fraction = percent / 100;
     const position = pointAtPlanProgress(lanePreviewPlan, fraction);
-    return position && position.segmentIndex !== undefined ? position.segmentIndex : null;
+    if (!position || position.segmentIndex === undefined) return null;
+    return {
+        segmentIndex: position.segmentIndex,
+        coordinate: [position.lng, position.lat],
+        percent,
+    };
 }
 
 function updateLaneProgressForSegment(segmentIndex) {

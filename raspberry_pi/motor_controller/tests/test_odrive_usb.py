@@ -1,0 +1,211 @@
+import unittest
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from motor_controller.hardware.odrive_usb_mower import ODriveUSBMowerController
+
+
+class FakeAxis:
+    def __init__(self):
+        self.error = 0
+        self.current_state = 1
+        self.feed_count = 0
+        self.config = SimpleNamespace(enable_watchdog=True, watchdog_timeout=1.0)
+        self.controller = SimpleNamespace(
+            error=0,
+            input_vel=0.0,
+            config=SimpleNamespace(vel_limit=100.0),
+        )
+        self.motor = SimpleNamespace(
+            error=0,
+            config=SimpleNamespace(current_lim=30.0),
+            current_control=SimpleNamespace(Iq_setpoint=2.0, Iq_measured=1.5),
+        )
+        self.encoder = SimpleNamespace(error=0)
+        self.sensorless_estimator = SimpleNamespace(
+            error=0, pll_pos=1.25, vel_estimate=10.0
+        )
+
+    def watchdog_feed(self):
+        self.feed_count += 1
+
+    @property
+    def requested_state(self):
+        return self.current_state
+
+    @requested_state.setter
+    def requested_state(self, value):
+        self.current_state = int(value)
+
+
+class FakeBoard:
+    def __init__(self, serial):
+        self.serial_number = int(serial, 16)
+        self.fw_version_major = 0
+        self.fw_version_minor = 5
+        self.fw_version_revision = 6
+        self.hw_version_major = 3
+        self.hw_version_minor = 6
+        self.hw_version_variant = 56
+        self.vbus_voltage = 26.5
+        self.axis0 = FakeAxis()
+        self.axis1 = FakeAxis()
+        self.clear_count = 0
+
+    def clear_errors(self):
+        self.clear_count += 1
+        self.axis0.error = 0
+        self.axis1.error = 0
+
+
+class FakeODriveModule:
+    def __init__(self, boards):
+        self.boards = boards
+
+    def find_any(self, serial_number, timeout):
+        del timeout
+        return self.boards[serial_number]
+
+
+def config_for(serial="386132523135"):
+    return SimpleNamespace(
+        enabled=True,
+        node_id=0,
+        node_ids=[0],
+        usb_axes=[{"node_id": 0, "serial_number": serial, "axis": 0}],
+        usb_connect_timeout_s=0.1,
+        usb_reconnect_interval_s=0.1,
+        usb_watchdog_timeout_s=3.0,
+        axis_state=5,
+        min_rpm=500,
+        max_rpm=5000,
+        default_rpm=500,
+        ramp_rate_rpm_s=300,
+        command_interval_s=0.1,
+        heartbeat_timeout_s=1.0,
+        usb_status_timeout_s=3.0,
+        current_monitor_enabled=True,
+        current_poll_interval_s=0.1,
+        current_poll_while_idle=False,
+        current_response_timeout_s=2.0,
+        current_startup_grace_s=2.0,
+        current_trip_a=25.0,
+        current_trip_duration_s=0.5,
+        current_critical_trip_a=29.0,
+        current_critical_trip_duration_s=0.1,
+        sequential_start_enabled=True,
+    )
+
+
+class ODriveUSBTests(unittest.TestCase):
+    def setUp(self):
+        self.serial = "386132523135"
+        self.board = FakeBoard(self.serial)
+        self.controller = ODriveUSBMowerController(
+            config_for(self.serial),
+            odrive_module=FakeODriveModule({self.serial: self.board}),
+        )
+        self.controller._connect_serial(self.serial)
+
+    def test_refresh_exposes_usb_health_current_and_sensorless_speed(self):
+        self.controller._refresh_node(0)
+
+        status = self.controller.get_status()
+        self.assertEqual(status["transport"], "usb")
+        self.assertEqual(status["odrive_missing_heartbeats"], [])
+        self.assertEqual(status["odrive_currents"][0]["measured_a"], 1.5)
+        self.assertEqual(status["odrive_sensorless"][0]["rpm"], 600.0)
+        self.assertTrue(status["usb_boards"][self.serial]["online"])
+
+    def test_velocity_write_explicitly_feeds_axis_watchdog(self):
+        self.controller._set_node_input_rpm(0, 600)
+
+        self.assertAlmostEqual(self.board.axis0.controller.input_vel, 10.0)
+        self.assertEqual(self.board.axis0.feed_count, 1)
+
+    def test_axis_state_and_limits_use_native_usb_properties(self):
+        self.controller._set_node_limits(0, 12.0)
+        self.controller._set_node_axis_state(0, 5)
+
+        self.assertAlmostEqual(
+            self.board.axis0.controller.config.vel_limit, 5000 / 60, places=5
+        )
+        self.assertEqual(self.board.axis0.motor.config.current_lim, 12.0)
+        self.assertEqual(self.board.axis0.current_state, 5)
+
+    def test_duplicate_or_missing_usb_mapping_is_rejected(self):
+        cfg = config_for(self.serial)
+        cfg.node_ids = [0, 1]
+        with self.assertRaisesRegex(ValueError, "missing=\\[1\\]"):
+            ODriveUSBMowerController(cfg, odrive_module=FakeODriveModule({}))
+
+    def test_watchdog_error_clear_is_fed_and_verified(self):
+        self.board.axis0.error = 0x800
+        self.controller.on_heartbeat(0, 0x800, 1)
+
+        success, error = self.controller.clear_watchdog_errors()
+
+        self.assertTrue(success)
+        self.assertIsNone(error)
+        self.assertEqual(self.controller.odrive_errors[0], 0)
+        self.assertGreaterEqual(self.board.axis0.feed_count, 2)
+
+    def test_waiting_idle_axis_is_eligible_for_feed_during_sequential_start(self):
+        self.controller.running = True
+        self.controller.odrive_states[0] = 1
+
+        self.assertTrue(self.controller._should_feed_idle_watchdog(0))
+
+        self.controller.odrive_states[0] = 5
+        self.assertFalse(self.controller._should_feed_idle_watchdog(0))
+
+    def test_usb_status_timeout_is_independent_from_hardware_watchdog_timeout(self):
+        self.controller.on_heartbeat(0, 0, 1)
+        self.controller.odrive_last_seen[0] -= 1.5
+
+        status = self.controller.get_status()
+
+        self.assertEqual(status["odrive_missing_heartbeats"], [])
+
+    def test_sequential_start_arms_only_the_axis_about_to_start(self):
+        self.board.axis0.config.enable_watchdog = True
+
+        self.controller._prepare_start_transport()
+        self.assertFalse(self.board.axis0.config.enable_watchdog)
+
+        self.controller._prepare_node_start_transport(0)
+        self.assertTrue(self.board.axis0.config.enable_watchdog)
+        self.assertEqual(self.board.axis0.config.watchdog_timeout, 3.0)
+
+    def test_start_finalization_refreshes_stale_usb_status(self):
+        self.controller.running = True
+        self.controller.commanded_rpm = 500
+        self.controller.on_heartbeat(0, 0, 5)
+        self.controller.odrive_last_seen[0] -= 10.0
+
+        self.controller._finalize_start_transport()
+
+        status = self.controller.get_status()
+        self.assertEqual(status["odrive_missing_heartbeats"], [])
+        self.assertAlmostEqual(
+            self.board.axis0.controller.input_vel, 500 / 60, places=5
+        )
+        self.assertGreaterEqual(self.board.axis0.feed_count, 1)
+
+    def test_startup_validation_owns_transient_axis_errors(self):
+        reasons = []
+        self.controller.running = True
+        self.controller.startup_status['active'] = True
+        self.controller.set_system_stop_callback(reasons.append)
+
+        self.controller.on_heartbeat(0, 0x800, 1)
+
+        self.assertEqual(reasons, [])
+        self.assertFalse(self.controller._system_stop_pending)
+
+
+if __name__ == "__main__":
+    unittest.main()

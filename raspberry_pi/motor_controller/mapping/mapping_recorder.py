@@ -248,18 +248,24 @@ class MappingRecorder:
         name: str,
         plan: Optional[Dict[str, Any]] = None,
         start_segment_index: Optional[int] = None,
+        start_coordinate: Optional[List[float]] = None,
         start_pose: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         return self.plans.check_plan(
             name,
             plan,
             start_segment_index=start_segment_index,
+            start_coordinate=start_coordinate,
             start_pose=start_pose,
         )
 
     def check_nogo(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            monitor = NoGoZoneMonitor(plan)
+            # The outer mowing contour defines the planned route, but it is not
+            # a runtime stop zone.  RTK/controller offsets near that contour
+            # must not reject an otherwise valid plan start.  Explicit sub-map
+            # exclusion zones remain enforced with the vehicle footprint.
+            monitor = NoGoZoneMonitor(plan, enforce_outer_boundary=False)
             return monitor.check_pose(self.pose_provider())
         except ValueError as exc:
             return {"ok": True, "state": "disabled", "reason": str(exc)}

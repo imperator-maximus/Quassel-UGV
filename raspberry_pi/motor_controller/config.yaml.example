@@ -49,9 +49,18 @@ mower:
   duty_off: 0              # % (Aus)
 
 odrive_mower:
-  enabled: true            # Haupt-UGV: ODrive/ODESC mit integriertem Classical CAN 2.0
+  enabled: true
+  transport: usb           # Haupt-UGV: zwei direkte ODrive-USB-Verbindungen
   node_id: 0               # Rueckfall fuer Einzelmotor-Betrieb
   node_ids: [0, 1, 2]      # Drei angeschlossene Mähmotor-Nodes; Node 3 ist unbenutzt
+  usb_axes:
+    - {node_id: 0, serial_number: "386132523135", axis: 0}
+    - {node_id: 1, serial_number: "386132523135", axis: 1}
+    - {node_id: 2, serial_number: "387132523135", axis: 0}
+  usb_connect_timeout_s: 5.0
+  usb_reconnect_interval_s: 1.0
+  usb_idle_poll_interval_s: 0.5 # Im Stillstand geringe Fibre-Last
+  usb_startup_hang_timeout_s: 8.0 # Festhängenden nativen USB-Aufruf hart abbrechen
   axis_state: 5            # Legacy sensorless state
   min_rpm: 500             # Sensorless-Teststand: darunter unzuverlaessig
   max_rpm: 5000
@@ -60,11 +69,20 @@ odrive_mower:
   command_interval_s: 0.1  # Set_Input_Vel periodisch senden
   coast_delay_s: 0.5
   start_stagger_s: 0.3     # Mehrere Mäher-Nodes nacheinander starten
-  heartbeat_timeout_s: 1.0
+  sequential_start_enabled: true
+  startup_timeout_s: 2.5
+  startup_retries: 1
+  startup_current_limit_a: 12.0
+  startup_abort_current_a: 12.5
+  startup_min_sensorless_rpm: 120.0
+  startup_stable_duration_s: 0.4
+  operating_current_limit_a: 30.0
+  heartbeat_timeout_s: 1.0        # CAN-Heartbeat; zugleich bisheriger Rückfallwert
+  usb_status_timeout_s: 3.0       # Host-Status; ODrive-Hardware-Watchdog bleibt 1.0 s
   current_monitor_enabled: true
-  current_poll_interval_s: 0.1     # GET_IQ mit 10 Hz je Node
+  current_poll_interval_s: 0.1     # Kommandozyklus; GET_IQ läuft Round-Robin je Node
   current_poll_while_idle: false   # Erst mit konfiguriertem Hardware-Watchdog aktivieren
-  current_response_timeout_s: 0.75 # Fehlende Stromantwort stoppt das Gesamtsystem
+  current_response_timeout_s: 10.0 # Kurze RTR-Lücken tolerieren; danach Gesamtsystem stoppen
   current_startup_grace_s: 2.0     # Sensorless-Anlauf nicht als Blockade werten
   current_trip_a: 25.0             # Unterhalb des ODrive-Hardlimits von 30 A
   current_trip_duration_s: 0.5
@@ -74,6 +92,7 @@ odrive_mower:
 # Classical-CAN-2.0-Konfiguration; CAN FD wird nicht verwendet.
 # Haupt-UGV und ehemaliger UGV-Teststand: einheitlich 250 kbit/s.
 can:
+  enabled: false           # Haupt-UGV: SensorHub ueber WiFi, ODrives ueber USB
   interface: can0
   bitrate: 250000
   motor_controller_id: 0x200  # Eigene CAN-ID
@@ -81,8 +100,18 @@ can:
   max_frame_size: 6           # Bytes Nutzdaten pro Frame
   frame_timeout: 1.0          # Sekunden
 
+# SensorHub-Pose: "can" (legacy), "shadow" (WiFi nur vergleichen) oder
+# "wifi" (WiFi ist aktive Quelle und wird vom Safety-Watchdog überwacht).
+sensor_hub:
+  transport: can
+  wifi_url: http://192.168.178.20/api/telemetry
+  poll_interval_s: 0.2
+  request_timeout_s: 1.5
+  pause_timeout_s: 1.0
+  telemetry_timeout_s: 30.0
+
 # Navigation (S1 Bearing-Hold Wegpunkt-Controller)
-# Pose kommt ausschließlich über CAN-Telemetrie vom Sensor-Hub.
+# Pose kommt über den unter sensor_hub gewählten Transport.
 navigation:
   enabled: true
   watchdog_timeout_s: 1.0      # Stop wenn keine CAN-Pose >1s
@@ -92,6 +121,10 @@ navigation:
   slowdown_radius_m: 0.5       # Vor Ziel abbremsen, Throttle skaliert linear bis 0
   turn_kp: 0.02                # Joystick-X pro Grad Heading-Fehler
   track_lookahead_m: 0.8       # Pure-Pursuit Lookahead für Track-Polyline Testmodus
+  pivot_heading_threshold_deg: 70.0 # Ab hier erst auf der Stelle ausrichten
+  goto_divergence_limit_m: 0.75 # Goto stoppen, wenn die Distanz so weit wächst
+  goto_divergence_samples: 5    # Anzahl aufeinanderfolgender Messungen
+  track_cross_track_limit_m: 1.0 # Track stoppen, wenn Pfadabweichung größer ist
   min_inner_wheel_speed: 0.50  # Innen-Rad-Garantie: kurveninneres Rad rollt mind.
                                # mit 50% von max_joystick vorwärts (≈75 μs über Neutral,
                                # sicher außerhalb der ESC-Totzone). Anti-Pivot, schont Rasen.

@@ -1,8 +1,7 @@
 [Unit]
 Description=Quassel UGV Motor Controller v2.0
-After=network.target pigpiod.service can-interface.service
+After=network.target pigpiod.service
 Requires=pigpiod.service
-Wants=can-interface.service
 
 [Service]
 Type=simple
@@ -10,6 +9,7 @@ User=root
 Group=root
 WorkingDirectory=/home/nicolay
 Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/home/nicolay/.venvs/odrive056/lib/python3.11/site-packages"
 
 # Haupt-Befehl mit Config-Datei
 ExecStart=/usr/bin/python3 -m motor_controller.main --config /home/nicolay/motor_controller/config.yaml

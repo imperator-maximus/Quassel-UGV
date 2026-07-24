@@ -68,10 +68,11 @@ class WebServer:
         self.odrive_mower = None
         
         # Status
-        self.can_enabled = True
+        self.can_enabled = bool(getattr(self.can, 'can_enabled', True))
         self.light_state = False
         self.mower_state = False
         self._plan_lock = threading.Lock()
+        self._resume_lock = threading.Lock()
         self._plan_thread: Optional[threading.Thread] = None
         self._plan_stop_event = threading.Event()
         self._plan_pause_event = threading.Event()
@@ -229,30 +230,54 @@ class WebServer:
         
         @self.app.route('/api/mower/toggle', methods=['POST'])
         def api_mower_toggle():
-            """Schaltet Mäher Ein/Aus"""
-            if self.odrive_mower and self.odrive_mower.enabled:
-                data = request.get_json(silent=True) or {}
-                rpm = data.get('rpm')
-                desired_state = data.get('state')
-                if desired_state is None:
-                    desired_state = data.get('enabled')
-                if desired_state is not None:
-                    desired_state = bool(desired_state)
+            """Setzt den Maehdeck-Zustand ausschliesslich explizit.
 
+            Ein fehlender, unlesbarer oder nicht-boolescher Zustand darf das
+            Maehdeck niemals implizit umschalten oder starten.
+            """
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                return jsonify(self._mower_api_status(
+                    success=False,
+                    error="Gueltiges JSON mit booleschem Feld 'state' erforderlich",
+                )), 400
+
+            if 'state' in data:
+                desired_state = data['state']
+            elif 'enabled' in data:
+                # Expliziter Legacy-Alias; auch hier kein Toggle-Fallback.
+                desired_state = data['enabled']
+            else:
+                return jsonify(self._mower_api_status(
+                    success=False,
+                    error="Boolesches Feld 'state' erforderlich",
+                )), 400
+
+            if not isinstance(desired_state, bool):
+                return jsonify(self._mower_api_status(
+                    success=False,
+                    error="Feld 'state' muss true oder false sein",
+                )), 400
+
+            if self.odrive_mower and self.odrive_mower.enabled:
+                rpm = data.get('rpm')
                 if desired_state is True:
-                    status = self.odrive_mower.start(int(rpm)) if rpm is not None else self.odrive_mower.start()
-                elif desired_state is False:
-                    status = self.odrive_mower.stop()
+                    if rpm is not None:
+                        try:
+                            rpm = int(rpm)
+                        except (TypeError, ValueError):
+                            return jsonify(self._mower_api_status(
+                                success=False,
+                                error="Feld 'rpm' muss eine Ganzzahl sein",
+                            )), 400
+                    status = self.odrive_mower.start(rpm) if rpm is not None else self.odrive_mower.start()
                 else:
-                    if self.odrive_mower.running:
-                        status = self.odrive_mower.stop()
-                    else:
-                        status = self.odrive_mower.start(int(rpm)) if rpm is not None else self.odrive_mower.start()
+                    status = self.odrive_mower.stop()
                 self.mower_state = status['running']
                 return jsonify(self._mower_api_status(success=status.get('success', True), error=status.get('error')))
 
             if self.mower_config and self.mower_config.enabled:
-                self.mower_state = not self.mower_state
+                self.mower_state = desired_state
                 self.gpio.output(self.mower_config.relay_pin, self.mower_state)
 
                 # Wenn ausgeschaltet, PWM auf 0
@@ -528,8 +553,21 @@ class WebServer:
                 map_name,
                 plan=plan,
                 start_segment_index=data.get('start_segment_index'),
+                start_coordinate=data.get('start_coordinate'),
                 start_pose=self.can.get_sensor_data(),
             )
+            if not result.get('success'):
+                self.logger.warning(
+                    "Plan-Check abgelehnt: map=%s start_segment_index=%r "
+                    "start_coordinate=%r browser_plan=%s errors=%s warnings=%s error=%s",
+                    map_name,
+                    data.get('start_segment_index'),
+                    data.get('start_coordinate'),
+                    plan is not None,
+                    result.get('errors'),
+                    result.get('warnings'),
+                    result.get('error'),
+                )
             return jsonify(result), 200 if result.get('success') else 400
 
         @self.app.route('/api/mapping/maps/<map_name>/plan/nogo-check', methods=['POST', 'OPTIONS'])
@@ -560,11 +598,11 @@ class WebServer:
             resume = bool(data.get('resume', False))
             if resume:
                 resume_started = self.resume_plan_execution(map_name)
-                if resume_started.get('success'):
-                    return jsonify(resume_started), 200
+                return jsonify(resume_started), 200 if resume_started.get('success') else 409
             result = self.mapping.check_plan(
                 map_name,
                 start_segment_index=data.get('start_segment_index'),
+                start_coordinate=data.get('start_coordinate'),
                 start_pose=self.can.get_sensor_data(),
             )
             if not result.get('success'):
@@ -629,8 +667,47 @@ class WebServer:
         resume = self._load_resume_state(map_name)
         if not resume:
             return {'success': False, 'error': 'Kein Resume-Punkt vorhanden'}
-        segments = self._resume_segments_from_state(resume)
-        return self.start_plan_execution(segments, resume.get('summary') or {'map_name': map_name}, plan=resume.get('plan'))
+        loaded = self.mapping.load_plan(map_name) if self.mapping else {}
+        if not loaded.get('success'):
+            return loaded or {'success': False, 'error': 'Mähplan nicht gefunden'}
+        plan = loaded.get('plan')
+
+        # New compact resume format: regenerate the remaining route from the
+        # persisted map plan instead of rewriting the full plan plus route
+        # every two seconds. Keep legacy support for existing resume files.
+        source_index = resume.get('source_segment_index')
+        if source_index is not None:
+            checked = self.mapping.check_plan(
+                map_name,
+                plan=plan,
+                start_segment_index=source_index,
+                start_pose=resume.get('pose'),
+            )
+            if not checked.get('success'):
+                return checked
+            segments = checked.get('executable_segments') or []
+            summary = checked.get('summary') or resume.get('summary') or {'map_name': map_name}
+        else:
+            segments = self._resume_segments_from_state(resume)
+            summary = resume.get('summary') or {'map_name': map_name}
+        return self.start_plan_execution(segments, summary, plan=plan)
+
+    def resume_paused_plan_execution(self):
+        """Setzt einen intern pausierten Plan nach Ende des alten Threads fort."""
+        with self._plan_lock:
+            map_name = self._active_plan_map_name
+            plan_thread = self._plan_thread
+        if not map_name:
+            return {'success': False, 'error': 'Kein pausierter Plan vorhanden'}
+        if (
+            plan_thread
+            and plan_thread.is_alive()
+            and plan_thread is not threading.current_thread()
+        ):
+            plan_thread.join(timeout=1.0)
+        if plan_thread and plan_thread.is_alive():
+            return {'success': False, 'error': 'Pausierter Plan wird noch beendet'}
+        return self.resume_plan_execution(map_name)
 
     def pause_plan_execution(self, reason='paused'):
         self._plan_pause_event.set()
@@ -762,7 +839,11 @@ class WebServer:
 
     def _build_nogo_monitor(self, plan):
         try:
-            return NoGoZoneMonitor(plan)
+            # The generated route already follows the mowing contour.  Treat
+            # only explicit exclusion/sub-map polygons as runtime stop zones;
+            # a small RTK/controller offset at the outer contour must not
+            # prevent navigation from starting.
+            return NoGoZoneMonitor(plan, enforce_outer_boundary=False)
         except ValueError as exc:
             self.logger.warning('No-Go-Monitor deaktiviert: %s', exc)
             self._set_plan_status(nogo_status={'ok': True, 'state': 'disabled', 'reason': str(exc)})
@@ -777,54 +858,72 @@ class WebServer:
         return self.mapping.plans.plans_dir / f"{self.mapping.plans._sanitize_name(map_name)}.resume.json"
 
     def _save_resume_state(self, reason='running'):
-        now = time.time()
-        if reason == 'running' and now - self._last_resume_save < 2.0:
-            return
-        self._last_resume_save = now
-        map_name = self._active_plan_map_name
-        if not map_name or not self._active_executable_segments:
-            return
-        status = self.get_plan_execution_status()
-        pose = self.can.get_sensor_data()
-        payload = {
-            'map_name': map_name,
-            'reason': reason,
-            'timestamp': time.time(),
-            'active_index': int(status.get('active_index') or 0),
-            'current_segment': status.get('current_segment'),
-            'pose': pose,
-            'summary': self._active_plan_summary,
-            'executable_segments': self._active_executable_segments,
-        }
-        loaded = self.mapping.load_plan(map_name) if self.mapping else {}
-        if loaded.get('success'):
-            payload['plan'] = loaded.get('plan')
-        path = self._resume_path(map_name)
-        if path is None:
-            return
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
-        except Exception as exc:
-            self.logger.warning('Resume-State konnte nicht gespeichert werden: %s', exc)
+        with self._resume_lock:
+            now = time.time()
+            if reason == 'running' and now - self._last_resume_save < 2.0:
+                return
+            self._last_resume_save = now
+            map_name = self._active_plan_map_name
+            if not map_name or not self._active_executable_segments:
+                return
+            status = self.get_plan_execution_status()
+            pose = self.can.get_sensor_data()
+            active_index = int(status.get('active_index') or 0)
+            current_segment = status.get('current_segment') or {}
+            source_index = current_segment.get('source_index')
+            if source_index is None:
+                # Positioning/transfer segments have no source index. Resume
+                # at the next actual mowing segment and let check_plan create
+                # the short positioning leg from the current pose.
+                for segment in self._active_executable_segments[active_index:]:
+                    if segment.get('source_index') is not None:
+                        source_index = segment.get('source_index')
+                        break
+            payload = {
+                'schema': 'raspberrycan.mowing_resume.v2',
+                'map_name': map_name,
+                'reason': reason,
+                'timestamp': time.time(),
+                'active_index': active_index,
+                'source_segment_index': source_index,
+                'current_segment': current_segment,
+                'pose': pose,
+                'summary': self._active_plan_summary,
+            }
+            path = self._resume_path(map_name)
+            if path is None:
+                return
+            temp_path = path.with_name(f'.{path.name}.tmp')
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temp_path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+                temp_path.replace(path)
+            except Exception as exc:
+                self.logger.warning('Resume-State konnte nicht gespeichert werden: %s', exc)
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _load_resume_state(self, map_name):
         path = self._resume_path(map_name)
         if path is None or not path.exists():
             return None
-        try:
-            return json.loads(path.read_text(encoding='utf-8'))
-        except Exception as exc:
-            self.logger.warning('Resume-State konnte nicht gelesen werden: %s', exc)
-            return None
+        with self._resume_lock:
+            try:
+                return json.loads(path.read_text(encoding='utf-8'))
+            except Exception as exc:
+                self.logger.warning('Resume-State konnte nicht gelesen werden: %s', exc)
+                return None
 
     def _delete_resume_state(self, map_name):
         path = self._resume_path(map_name)
-        if path and path.exists():
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        with self._resume_lock:
+            if path and path.exists():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
 
     def _resume_segments_from_state(self, resume):
         segments = list(resume.get('executable_segments') or [])
@@ -930,11 +1029,23 @@ class WebServer:
     def _mower_api_status(self, success=True, error=None):
         if self.odrive_mower and self.odrive_mower.enabled:
             status = self.odrive_mower.get_status(success=success, error=error)
+            startup_status = status.get('startup_status', {})
+            mower_starting = bool(startup_status.get('active'))
+            # The internal controller marks itself busy before sequential
+            # validation. The UI may say EIN only after every axis has passed
+            # validation and the periodic command thread owns the blades.
+            verified_running = bool(
+                status.get('command_running', status['running'])
+                and not mower_starting
+            )
             return {
                 'success': status['success'],
-                'mower_mode': 'odrive_can',
+                'mower_mode': f"odrive_{status.get('transport', 'can')}",
                 'mower_enabled': status['enabled'],
-                'mower_state': status['running'],
+                'mower_state': verified_running,
+                'mower_command_running': verified_running,
+                'mower_starting': mower_starting,
+                'mower_active_axis_nodes': status.get('active_axis_nodes', []),
                 'mower_speed': status['rpm'],
                 'mower_rpm': status['rpm'],
                 'mower_commanded_rpm': status['commanded_rpm'],
@@ -945,6 +1056,7 @@ class WebServer:
                 'mower_node_id': status['node_id'],
                 'mower_node_ids': status.get('node_ids', [status['node_id']]),
                 'mower_axis_state': status['axis_state'],
+                'error': status['error'],
                 'mower_error': status['error'],
                 'odrive_error': status.get('odrive_error', 0),
                 'odrive_state': status.get('odrive_state', 0),
@@ -953,6 +1065,11 @@ class WebServer:
                 'odrive_missing_heartbeats': status.get('odrive_missing_heartbeats', []),
                 'odrive_heartbeat_ages': status.get('odrive_heartbeat_ages', {}),
                 'odrive_currents': status.get('odrive_currents', {}),
+                'odrive_sensorless': status.get('odrive_sensorless', {}),
+                'mower_startup_status': startup_status,
+                'mower_sequential_start_enabled': status.get(
+                    'sequential_start_enabled', False
+                ),
                 'mower_current_monitor_enabled': status.get('current_monitor_enabled', False),
                 'mower_current_trip_a': status.get('current_trip_a'),
                 'mower_current_trip_duration_s': status.get('current_trip_duration_s'),
@@ -964,6 +1081,9 @@ class WebServer:
             'mower_mode': 'gpio_pwm',
             'mower_enabled': self.mower_config.enabled if self.mower_config else False,
             'mower_state': self.mower_state,
+            'mower_command_running': self.mower_state,
+            'mower_starting': False,
+            'mower_active_axis_nodes': [],
             'mower_speed': speed,
             'mower_rpm': None,
             'mower_commanded_rpm': None,
@@ -982,6 +1102,9 @@ class WebServer:
             'odrive_missing_heartbeats': [],
             'odrive_heartbeat_ages': {},
             'odrive_currents': {},
+            'odrive_sensorless': {},
+            'mower_startup_status': {},
+            'mower_sequential_start_enabled': False,
             'mower_current_monitor_enabled': False,
             'mower_current_trip_a': None,
             'mower_current_trip_duration_s': None,
@@ -991,14 +1114,53 @@ class WebServer:
         """CAN-Interface sowie SensorHub- und ODrive-Erreichbarkeit."""
         expected_nodes = []
         heartbeat_timeout_s = 1.0
+        odrive_transport = None
         if self.odrive_mower and self.odrive_mower.enabled:
             expected_nodes = self.odrive_mower.node_ids
             heartbeat_timeout_s = float(self.odrive_mower.config.heartbeat_timeout_s)
-        return self.can.get_status(
-            expected_odrive_node_ids=expected_nodes,
+            odrive_transport = getattr(self.odrive_mower, 'transport', 'can')
+        status = self.can.get_status(
+            expected_odrive_node_ids=expected_nodes if odrive_transport == 'can' else [],
             sensor_timeout_s=2.0,
             odrive_timeout_s=heartbeat_timeout_s,
         )
+        if odrive_transport == 'usb':
+            mower = self.odrive_mower.get_status()
+            missing = set(mower.get('odrive_missing_heartbeats', []))
+            errors = mower.get('odrive_errors', {})
+            states = mower.get('odrive_states', {})
+            ages = mower.get('odrive_heartbeat_ages', {})
+            currents = mower.get('odrive_currents', {})
+            nodes = {}
+            for node_id in expected_nodes:
+                node_current = currents.get(node_id, currents.get(str(node_id), {}))
+                node_error = errors.get(node_id, errors.get(str(node_id)))
+                nodes[str(node_id)] = {
+                    'online': node_id not in missing,
+                    'age_s': ages.get(node_id, ages.get(str(node_id))),
+                    'error': node_error,
+                    'state': states.get(node_id, states.get(str(node_id))),
+                    'iq_setpoint_a': node_current.get('setpoint_a'),
+                    'iq_measured_a': node_current.get('measured_a'),
+                    'iq_age_s': node_current.get('age_s'),
+                }
+            error_nodes = [node_id for node_id in expected_nodes if nodes[str(node_id)]['error']]
+            online_count = sum(1 for node in nodes.values() if node['online'])
+            status['odrives'] = {
+                'transport': 'usb',
+                'expected_node_ids': list(expected_nodes),
+                'online_count': online_count,
+                'expected_count': len(expected_nodes),
+                'all_online': online_count == len(expected_nodes),
+                'error_node_ids': error_nodes,
+                'all_healthy': online_count == len(expected_nodes) and not error_nodes,
+                'nodes': nodes,
+                'usb_boards': mower.get('usb_boards', {}),
+            }
+            status['network_healthy'] = bool(
+                status['sensor_hub']['online'] and status['odrives']['all_healthy']
+            )
+        return status
 
     def _emit_status_update(self):
         """Sendet Status-Update an alle Clients"""

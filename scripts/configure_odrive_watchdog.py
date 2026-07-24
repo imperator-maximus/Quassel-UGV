@@ -46,7 +46,8 @@ def require_idle(axis, index: int) -> None:
 
 def connect(expected_serial: int | None = None):
     print("Waiting for one ODrive over USB ...", flush=True)
-    board = odrive.find_any(timeout=30)
+    serial_filter = None if expected_serial is None else f"{expected_serial:012X}"
+    board = odrive.find_any(serial_number=serial_filter, timeout=30)
     serial = int(board.serial_number)
     print(f"Found {board_identity(board)}", flush=True)
     if expected_serial is not None and serial != expected_serial:
@@ -60,7 +61,11 @@ def selected_axes(board, nodes: set[int]):
     matches = []
     discovered = []
     for index, axis in enumerate((board.axis0, board.axis1)):
-        node_id = int(axis.config.can.node_id)
+        try:
+            node_id = int(axis.config.can.node_id)
+        except AttributeError:
+            # Older unreleased v3.x firmware exposes the legacy flat field.
+            node_id = int(axis.config.can_node_id)
         discovered.append(node_id)
         if node_id in nodes:
             matches.append((index, node_id, axis))

@@ -6,6 +6,7 @@ Modulare Architektur mit separaten Komponenten
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
@@ -16,8 +17,10 @@ from .config import Config
 from .hardware.gpio_controller import GPIOController
 from .hardware.pwm_controller import PWMController
 from .hardware.odrive_mower import ODriveMowerController
+from .hardware.odrive_usb_mower import ODriveUSBMowerController
 from .hardware.safety_monitor import SafetyMonitor
 from .communication.can_handler import CANHandler
+from .communication.sensor_hub_http import SensorHubHttpClient
 from .control.motor_control import MotorControl
 from .control.joystick_handler import JoystickHandler
 from .navigation.navigation_controller import NavigationController
@@ -46,12 +49,15 @@ class MotorControllerApp:
         self.pwm: PWMController = None
         self.safety: SafetyMonitor = None
         self.can: CANHandler = None
+        self.sensor_hub_http: SensorHubHttpClient = None
         self.odrive_mower: ODriveMowerController = None
         self.motor: MotorControl = None
         self.joystick: JoystickHandler = None
         self.navigation: NavigationController = None
         self.mapping: MappingRecorder = None
         self.web: WebServer = None
+        self._sensor_pause_resume_mode = None
+        self._sensor_recovery_started_monotonic = None
         
         # Shutdown-Flag
         self.running = False
@@ -139,13 +145,47 @@ class MotorControllerApp:
             self.logger.info("Initialisiere CAN-Handler...")
             self.can = CANHandler(self.config.can)
 
-            if self.config.odrive_mower.enabled:
-                self.logger.info("Initialisiere ODrive-Maehdeck-Testmodus...")
-                self.odrive_mower = ODriveMowerController(
-                    self.config.odrive_mower,
-                    self.can,
-                    self.safety,
+            sensor_transport = str(self.config.sensor_hub.transport).strip().lower()
+            if sensor_transport not in ('can', 'shadow', 'wifi'):
+                raise ValueError(
+                    "sensor_hub.transport muss 'can', 'shadow' oder 'wifi' sein"
                 )
+            self.can.set_active_sensor_source(
+                'wifi' if sensor_transport == 'wifi' else 'can'
+            )
+            if sensor_transport in ('shadow', 'wifi'):
+                self.logger.info(
+                    "Initialisiere SensorHub-WiFi-Transport (%s)...",
+                    sensor_transport,
+                )
+                self.sensor_hub_http = SensorHubHttpClient(
+                    self.config.sensor_hub,
+                    self._on_wifi_sensor_data,
+                )
+                self.can.set_sensor_transport_status_callback(
+                    self.sensor_hub_http.get_status
+                )
+
+            if self.config.odrive_mower.enabled:
+                odrive_transport = str(
+                    getattr(self.config.odrive_mower, 'transport', 'can')
+                ).strip().lower()
+                self.logger.info(
+                    "Initialisiere ODrive-Maehdeck ueber %s...", odrive_transport.upper()
+                )
+                if odrive_transport == 'usb':
+                    self.odrive_mower = ODriveUSBMowerController(
+                        self.config.odrive_mower,
+                        self.safety,
+                    )
+                elif odrive_transport == 'can':
+                    self.odrive_mower = ODriveMowerController(
+                        self.config.odrive_mower,
+                        self.can,
+                        self.safety,
+                    )
+                else:
+                    raise ValueError("odrive_mower.transport muss 'can' oder 'usb' sein")
             
             # Motor-Control
             self.logger.info("Initialisiere Motor-Control...")
@@ -157,6 +197,19 @@ class MotorControllerApp:
 
             # Navigation
             if self.config.navigation.enabled:
+                # Der zentrale SensorHub-Watchdog muss zuerst pausieren
+                # koennen. Sonst beendet der lokale Pose-Watchdog den Plan,
+                # bevor die automatische WiFi-Wiederaufnahme greift.
+                pause_timeout = float(self.config.sensor_hub.pause_timeout_s)
+                minimum_nav_timeout = pause_timeout + 1.0
+                if float(self.config.navigation.watchdog_timeout_s) < minimum_nav_timeout:
+                    self.logger.warning(
+                        "Navigation-Watchdog %.1fs ist kuerzer als die "
+                        "SensorHub-Pausenkette; verwende %.1fs",
+                        self.config.navigation.watchdog_timeout_s,
+                        minimum_nav_timeout,
+                    )
+                    self.config.navigation.watchdog_timeout_s = minimum_nav_timeout
                 self.logger.info("Initialisiere Navigation...")
                 self.navigation = NavigationController(
                     self.motor,
@@ -211,15 +264,21 @@ class MotorControllerApp:
         self.safety.set_emergency_stop_callback(self.motor.emergency_stop)
         self.safety.set_system_stop_callback(self._system_safety_stop)
         self.safety.set_can_health_check(self._can_health_check)
+        self.safety.set_motion_hold_check(self._sensor_motion_health_check)
+        self.safety.set_motion_hold_callback(self._sensor_motion_pause)
+        self.safety.set_motion_resume_callback(self._sensor_motion_resume)
 
         # CAN Handler -> Sensor Data (Logging + Navigation-Pose)
         self.can.set_sensor_data_callback(self._on_sensor_data)
 
         # CAN Handler -> ODrive-Heartbeat -> ODriveMowerController
         # Damit erkennt die Web-App ODrive-Fehler (error!=0) in /api/status
-        if self.odrive_mower:
+        if self.odrive_mower and getattr(self.odrive_mower, 'transport', 'can') == 'can':
             self.can.set_odrive_heartbeat_callback(self.odrive_mower.on_heartbeat)
             self.can.set_odrive_iq_callback(self.odrive_mower.on_iq)
+            self.can.set_odrive_sensorless_callback(
+                self.odrive_mower.on_sensorless_estimates
+            )
             self.odrive_mower.set_system_stop_callback(self.safety.trigger_system_stop)
 
         # CAN Handler -> Navigation-Befehle vom Sensor-Hub
@@ -231,13 +290,24 @@ class MotorControllerApp:
     def _on_sensor_data(self, data: dict):
         """Verteilt eingehende Sensor-Hub-Telemetrie auf Logging und Navigation."""
         if self.config.monitor and not self.config.quiet:
-            self.logger.info(f"📡 Sensor-Daten: {data}")
+            # 5 Hz telemetry at INFO filled journald and made targeted fault
+            # analysis unnecessarily expensive. It remains available when the
+            # service is deliberately run with DEBUG logging.
+            self.logger.debug(f"📡 Sensor-Daten: {data}")
         if self.navigation:
             self.navigation.on_pose_update(data)
 
+    def _on_wifi_sensor_data(self, data: dict):
+        """Speist WiFi-Telemetrie in denselben Cache wie CAN-Telemetrie ein."""
+        if self.can:
+            self.can.inject_sensor_data(data, source='wifi')
+
     def _on_navigation_state(self, payload: dict):
         """Sendet Navigation-State über CAN an den Sensor-Hub (UI-Feedback)."""
-        if not self.can:
+        sensor_transport = str(
+            getattr(self.config.sensor_hub, 'transport', 'can')
+        ).strip().lower()
+        if not self.can or sensor_transport == 'wifi':
             return
         try:
             self.can.send_command('nav_status', payload)
@@ -252,15 +322,54 @@ class MotorControllerApp:
             if self.odrive_mower
             else 1.0
         )
+        odrive_transport = (
+            getattr(self.odrive_mower, 'transport', 'can') if self.odrive_mower else None
+        )
+        can_expected_nodes = expected_nodes if odrive_transport == 'can' else []
         status = self.can.get_status(
-            expected_odrive_node_ids=expected_nodes,
-            sensor_timeout_s=1.0,
+            expected_odrive_node_ids=can_expected_nodes,
+            sensor_timeout_s=float(self.config.sensor_hub.telemetry_timeout_s),
             odrive_timeout_s=heartbeat_timeout_s,
         )
-        if not status['interface_online']:
+        sensor_transport = str(
+            getattr(self.config.sensor_hub, 'transport', 'can')
+        ).strip().lower()
+        can_required = sensor_transport in ('can', 'shadow') or odrive_transport == 'can'
+        if can_required and not status['interface_online']:
             return False, "CAN-Interface oder Reader ausgefallen"
-        if not status['sensor_hub']['online']:
-            return False, "SensorHub CAN-Timeout"
+        # SensorHub-Telemetrie ist nur waehrend einer aktiven Fahrt
+        # sicherheitsrelevant. Beim Boot im Stillstand darf ein noch nicht
+        # verfuegbares WLAN keinen permanenten Safety-Latch erzeugen, der
+        # spaeter sogar manuelles Rangieren blockiert.
+        if self._sensor_required_for_motion() and not status['sensor_hub']['online']:
+            transport = status['sensor_hub'].get('transport', 'can').upper()
+            return False, f"SensorHub {transport}-Timeout"
+        if odrive_transport == 'usb':
+            usb_status = self.odrive_mower.get_status()
+            mower_running = bool(usb_status.get('mower_command_running'))
+            startup_active = bool(
+                usb_status.get('mower_startup_status', {}).get('active')
+            )
+            # In IDLE the ODrives are not needed for propulsion. A delayed
+            # sequential Fibre poll must neither stop nor latch the vehicle.
+            # Mower start-up validates every axis itself; once the blades run,
+            # USB health and ODrive errors are again system-critical. The
+            # independently configured 1 s ODrive hardware watchdog remains
+            # active throughout and stops a blade if host commands cease.
+            if not mower_running or startup_active:
+                return True, None
+            offline = list(usb_status.get('odrive_missing_heartbeats', []))
+            if offline:
+                return False, f"ODrive USB-Timeout: nodes {offline}"
+            error_nodes = [
+                int(node_id)
+                for node_id, value in usb_status.get('odrive_errors', {}).items()
+                if int(value) != 0
+            ]
+            if error_nodes:
+                return False, f"ODrive Fehler: nodes {error_nodes}"
+            return True, None
+
         odrives = status['odrives']
         offline = [
             int(node_id)
@@ -272,6 +381,96 @@ class MotorControllerApp:
         if odrives['error_node_ids']:
             return False, f"ODrive Fehler: nodes {odrives['error_node_ids']}"
         return True, None
+
+    def _sensor_motion_health_check(self) -> tuple[bool, str | None]:
+        """Fordert bei kurzer SensorHub-Luecke nur eine Fahrpause an."""
+        if not self._sensor_required_for_motion():
+            self._sensor_recovery_started_monotonic = None
+            return True, None
+        status = self.can.get_status(
+            expected_odrive_node_ids=[],
+            sensor_timeout_s=float(self.config.sensor_hub.pause_timeout_s),
+            odrive_timeout_s=1.0,
+        )
+        if not status['sensor_hub']['online']:
+            self._sensor_recovery_started_monotonic = None
+            transport = status['sensor_hub'].get('transport', 'can').upper()
+            return False, f"SensorHub {transport} kurzzeitig unterbrochen"
+        if self._sensor_pause_resume_mode:
+            now = time.monotonic()
+            if self._sensor_recovery_started_monotonic is None:
+                self._sensor_recovery_started_monotonic = now
+            stable_s = max(
+                0.0,
+                float(getattr(self.config.sensor_hub, 'resume_stable_s', 2.0)),
+            )
+            elapsed = now - self._sensor_recovery_started_monotonic
+            if elapsed < stable_s:
+                return False, (
+                    f"SensorHub-Verbindung stabilisiert sich "
+                    f"({elapsed:.1f}/{stable_s:.1f} s)"
+                )
+        return True, None
+
+    def _sensor_required_for_motion(self) -> bool:
+        """True bei manueller/automatischer Fahrt oder laufender Sensorpause."""
+        plan_running = bool(
+            self.web and self.web.get_plan_execution_status().get('running')
+        )
+        navigation_running = bool(
+            self.navigation and self.navigation.get_status().get('running')
+        )
+        # Manuelles Rangieren verwendet keine SensorHub-Pose. Es besitzt mit
+        # dem Joystick-Timeout einen eigenen Dead-Man-Watchdog und darf nicht
+        # von kurzen WLAN-Luecken gestoppt werden.
+        return bool(
+            plan_running
+            or navigation_running
+            or self._sensor_pause_resume_mode
+        )
+
+    def _sensor_motion_pause(self, reason: str):
+        """Pausiert nur Fahrzeug und Route; das Maehdeck darf weiterlaufen."""
+        self.logger.warning("⏸️ Fahrzeug wird pausiert: %s", reason)
+        plan_running = bool(
+            self.web and self.web.get_plan_execution_status().get('running')
+        )
+        navigation_running = bool(
+            self.navigation and self.navigation.get_status().get('running')
+        )
+        if plan_running:
+            self._sensor_pause_resume_mode = 'plan'
+        elif navigation_running:
+            self._sensor_pause_resume_mode = 'navigation'
+        else:
+            self._sensor_pause_resume_mode = None
+
+        # A short telemetry gap must not rebuild the plan from disk. Freeze
+        # the live navigation object so waypoint index and track progress stay
+        # byte-for-byte unchanged until telemetry is stable again.
+        if self.navigation and navigation_running:
+            self.navigation.pause(reason='sensor_pause')
+        if self.joystick:
+            self.joystick.disable()
+        elif self.motor:
+            self.motor.emergency_stop()
+
+    def _sensor_motion_resume(self):
+        """Setzt eine wegen kurzer Sensorluecke pausierte autonome Fahrt fort."""
+        resume_mode = self._sensor_pause_resume_mode
+        self._sensor_pause_resume_mode = None
+        self._sensor_recovery_started_monotonic = None
+        if not resume_mode or not self.safety.is_motion_allowed():
+            return
+
+        if resume_mode in ('plan', 'navigation') and self.navigation:
+            if self.navigation.resume():
+                self.logger.info(
+                    "▶️ %s nach SensorHub-Pause exakt fortgesetzt",
+                    'Mähplan' if resume_mode == 'plan' else 'Navigation',
+                )
+            else:
+                self.logger.error("In-Memory-Fahrfortsetzung fehlgeschlagen")
 
     def _system_safety_stop(self, reason: str):
         """Stoppt Navigation, Fahrantrieb und alle Maehmotoren."""
@@ -298,6 +497,8 @@ class MotorControllerApp:
             # CAN-Reader starten
             if self.can:
                 self.can.start_reader()
+            if self.sensor_hub_http:
+                self.sensor_hub_http.start()
             if self.odrive_mower:
                 self.odrive_mower.start_monitor()
             
@@ -321,6 +522,18 @@ class MotorControllerApp:
         """Haupt-Loop"""
         try:
             while self.running:
+                startup_hang = self._odrive_usb_startup_hang_reason()
+                if startup_hang:
+                    # A native Fibre property call can block a Python thread
+                    # indefinitely. Neutralise propulsion, then terminate the
+                    # process so systemd can tear down Fibre completely. The
+                    # independent 1 s ODrive watchdog has already disarmed any
+                    # blade whose command stream stopped.
+                    self.logger.critical("ODrive USB-Start haengt: %s", startup_hang)
+                    if self.motor:
+                        self.motor.emergency_stop()
+                    time.sleep(0.2)
+                    os._exit(70)
                 time.sleep(0.1)
         
         except KeyboardInterrupt:
@@ -328,6 +541,28 @@ class MotorControllerApp:
         
         finally:
             self.shutdown()
+
+    def _odrive_usb_startup_hang_reason(self) -> str | None:
+        mower = self.odrive_mower
+        if not mower or getattr(mower, 'transport', 'can') != 'usb':
+            return None
+        status = mower.get_status()
+        startup = status.get('startup_status') or {}
+        if not startup.get('active'):
+            return None
+        started = startup.get('node_started_monotonic') or startup.get('started_monotonic')
+        if started is None:
+            return None
+        timeout_s = max(
+            3.0,
+            float(getattr(mower.config, 'usb_startup_hang_timeout_s', 8.0)),
+        )
+        elapsed = time.monotonic() - float(started)
+        if elapsed <= timeout_s:
+            return None
+        phase = startup.get('phase') or 'unbekannt'
+        node_id = startup.get('node_id')
+        return f"phase={phase} node={node_id} seit {elapsed:.1f}s (Limit {timeout_s:.1f}s)"
     
     def shutdown(self):
         """Fährt alle Komponenten herunter"""
@@ -354,6 +589,10 @@ class MotorControllerApp:
             if self.safety:
                 self.logger.info("Stoppe Safety-Watchdog...")
                 self.safety.cleanup()
+
+            if self.sensor_hub_http:
+                self.logger.info("Stoppe SensorHub-WiFi-Empfang...")
+                self.sensor_hub_http.stop()
 
             if self.odrive_mower:
                 self.logger.info("Stoppe ODrive-Maehdeck...")

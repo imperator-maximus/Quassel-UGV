@@ -50,7 +50,7 @@ pip install python-can
 ### Sensor Hub (Orange Pi Zero 2W)
 - **Holybro UM982 RTK-GPS**: Dual-antenna for position and heading
 - **WitMotion USB-IMU**: IMU with native orientation output
-- **USB-CAN adapter (currently CANable2)**: SocketCAN `can0`, Classical CAN 2.0 at 250 kbit/s
+- **DSD TECH SH-C30A USB-CAN adapter (`gs_usb`)**: SocketCAN `can0`, Classical CAN 2.0 at 250 kbit/s
 - **Sends**: GPS position, heading, RTK status, IMU orientation
 
 ### Controller (Pi 3)
@@ -103,8 +103,9 @@ lsusb
 ip -details link show can0
 ```
 
-All host computers use USB-CAN adapters. The main UGV uses `gs_usb`; the
-Orange Pi CANable2 currently uses `slcand`.
+All host computers use USB-CAN adapters. The main UGV and the Orange Pi
+sensor hub use native `gs_usb`/SocketCAN; `slcand` is no longer part of the
+productive CAN path.
 
 #### "No CAN messages received"
 - Verify CAN wiring (CANH, CANL, GND)

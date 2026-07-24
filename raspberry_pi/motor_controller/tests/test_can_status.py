@@ -75,6 +75,31 @@ class CANStatusTests(unittest.TestCase):
         self.assertFalse(status["sensor_hub"]["online"])
         self.assertIsNone(status["sensor_hub"]["age_s"])
 
+    def test_shadow_wifi_data_does_not_replace_active_can_pose(self):
+        self.handler.inject_sensor_data(
+            {"timestamp": 1.0, "gps": {"lat": 1.0, "lon": 2.0}},
+            source="wifi",
+        )
+
+        status = self.handler.get_status(expected_odrive_node_ids=[0])
+
+        self.assertFalse(status["sensor_hub"]["online"])
+        self.assertEqual(status["sensor_hub"]["transport"], "can")
+        self.assertTrue(status["sensor_hub"]["sources"]["wifi"]["online"])
+        self.assertEqual(self.handler.get_sensor_data(), {})
+
+    def test_wifi_can_be_selected_as_active_sensor_source(self):
+        self.handler.set_active_sensor_source("wifi")
+        payload = {"timestamp": 2.0, "gps": {"lat": 1.0, "lon": 2.0}}
+        self.handler.inject_sensor_data(payload, source="wifi")
+
+        status = self.handler.get_status(expected_odrive_node_ids=[0])
+
+        self.assertTrue(status["sensor_hub"]["online"])
+        self.assertEqual(status["sensor_hub"]["transport"], "wifi")
+        self.assertIsNone(status["sensor_hub"]["can_id"])
+        self.assertEqual(self.handler.get_sensor_data(), payload)
+
     def test_reports_odrive_iq_measurement(self):
         self.handler._record_odrive_heartbeat(2, 0, 1)
         self.handler._record_odrive_iq(2, 12.5, -11.75)

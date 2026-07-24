@@ -8,20 +8,33 @@ Modulare, erweiterbare Plattform für autonome Rasenmäher mit:
 - Sicherheitssysteme & Notfallbehandlung
 - Web-Interface & Remote-Steuerung
 
-## CAN-Hardwaretopologie
+## Aktuelle Produktionstopologie und CAN-Rueckfall
 
-Alle Teilnehmer verwenden **Classical CAN 2.0** mit maximal 8 Datenbytes pro
-Frame. CAN FD wird nicht verwendet.
+Der Haupt-UGV nutzt keinen aktiven CAN-Bus mehr: Der SensorHub liefert seine
+Pose per HTTP/WiFi, und die beiden ODrive-v3.x-Boards sind ueber zwei direkte
+USB/Fibre-Verbindungen mit dem Raspberry Pi verbunden. Die drei verwendeten
+Achsen werden ueber USB-Seriennummer und Achsindex eindeutig zugeordnet.
 
-| Einsatz | CAN-Anbindung | Profil |
-|---------|---------------|--------|
-| Orange Pi Zero 2W Sensor Hub | USB-CAN-Adapter (aktuell CANable2), SocketCAN `can0` | 250 kbit/s |
-| Haupt-UGV-Rechner (Raspberry Pi 3) | USB-CAN-Adapter (`gs_usb`), SocketCAN `can0` | 250 kbit/s |
-| Ehemaliger UGV-Testrechner (offline) | USB-CAN-Adapter, SocketCAN `can0` | 250 kbit/s |
-| ODrive/ODESC | integrierte CAN-Schnittstelle, SimpleCAN | Bitrate des jeweiligen Busses |
+Der vorhandene Classical-CAN-2.0-Code bleibt als Rueckfall und fuer den
+ehemaligen Teststand erhalten. CAN FD wird nicht verwendet; ein eingesetzter
+CAN-Bus arbeitet einheitlich mit 250 kbit/s.
 
-Auf einem gemeinsamen physischen Bus müssen alle Teilnehmer dieselbe Bitrate
-verwenden.
+| Einsatz | Aktiver Transport | Profil |
+|---------|-------------------|--------|
+| Orange Pi Zero 2W Sensor Hub → Haupt-UGV | HTTP/WiFi | `GET /api/telemetry` |
+| Haupt-UGV → ODrive Board A/B | zwei direkte USB/Fibre-Leitungen | Seriennummer + Axis 0/1 |
+| Ehemaliger UGV-Testrechner (offline) | USB-CAN, SocketCAN `can0` | Classical CAN 2.0, 250 kbit/s |
+| Legacy/Rueckfall | ODrive SimpleCAN | Classical CAN 2.0, 250 kbit/s |
+
+Die SensorHub-Telemetrie ist transportabhaengig konfigurierbar: `can` nutzt
+den bisherigen Multi-Frame-Stream, `shadow` vergleicht parallel HTTP/WiFi und
+`wifi` verwendet `GET /api/telemetry` als aktive Posequelle. Die aktuelle
+ODrive-Steuerung und -Safety laufen direkt ueber USB; `transport: can` bleibt
+konfigurierbar. Bei ausbleibender aktiver
+SensorHub-Telemetrie pausiert der System-Watchdog nach einer kurzen Frist nur
+Fahrantrieb und Route. Erst nach der langen Ausfallfrist verriegelt er den
+Gesamtstopp inklusive Maehdeck. Nach Rueckkehr der Pose wird eine zuvor aktive
+autonome Route automatisch am gespeicherten Resume-Punkt fortgesetzt.
 
 ## 📁 Projektstruktur
 

@@ -80,18 +80,29 @@ sudo install -m 644 $remoteMotorServiceTmp /etc/systemd/system/motor-controller-
 sudo systemctl disable --now dronecan-esc.service 2>/dev/null || true
 sudo systemctl stop can-interface.service || true
 sudo systemctl daemon-reload
-sudo systemctl enable can-interface.service motor-controller-v2.service
-sudo systemctl start can-interface.service
+sudo systemctl enable motor-controller-v2.service
+can_enabled=`$(python3 -c 'import yaml; print(str(bool(yaml.safe_load(open("/home/$User/motor_controller/config.yaml")).get("can", {}).get("enabled", True))).lower())')
+if [ "`$can_enabled" = true ]; then
+  sudo systemctl enable can-interface.service
+  sudo systemctl start can-interface.service
+else
+  sudo systemctl disable can-interface.service 2>/dev/null || true
+fi
 cd /home/$User
-python3 -m unittest discover -s motor_controller/tests -v
+PYTHONPATH=/home/$User/.venvs/odrive056/lib/python3.11/site-packages python3 -m unittest discover -s motor_controller/tests -v
 sudo systemctl start motor-controller-v2.service
-sleep 5
-systemctl is-active can-interface.service
+# Two native ODrive/Fibre discoveries take several seconds during startup.
+sleep 15
 systemctl is-active motor-controller-v2.service
-ip -details link show can0
-grep -A2 '^can:' $remoteApp/config.yaml
-curl -s -o /dev/null -w 'root=%{http_code}\n' http://localhost/
-curl -s -o /dev/null -w 'status=%{http_code}\n' http://localhost/api/status
+if [ "`$can_enabled" = true ]; then
+  systemctl is-active can-interface.service
+  ip -details link show can0
+else
+  ! systemctl is-active --quiet can-interface.service
+fi
+grep -A3 '^can:' $remoteApp/config.yaml
+curl -fsS -o /dev/null -w 'root=%{http_code}\n' http://localhost/
+curl -fsS -o /dev/null -w 'status=%{http_code}\n' http://localhost/api/status
 echo backup=`$backup
 "@
 

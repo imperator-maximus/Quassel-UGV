@@ -57,6 +57,10 @@ VEHICLE_GEOMETRY_PATH = os.getenv('VEHICLE_GEOMETRY_PATH', str(Path(__file__).wi
 # TELEMETRIE KONFIGURATION
 # ============================================================================
 CAN_SEND_RATE = int(os.getenv('CAN_SEND_RATE', '10'))
+# Nur der periodische 0x100-Telemetrie-Versand (Empfang von Befehlen bleibt aktiv).
+# Auf False setzen, wenn die Telemetrie per WLAN (/api/telemetry) abgeholt wird,
+# um den gestoerten CAN-Bus zu entlasten.
+CAN_TELEMETRY_ENABLED = _env_flag('CAN_TELEMETRY_ENABLED', True)
 
 # ============================================================================
 # CAN-BUS KONFIGURATION

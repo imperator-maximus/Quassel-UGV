@@ -18,6 +18,12 @@ class NavConfig:
     slowdown_radius_m: float = 0.5
     turn_kp: float = 0.02
     track_lookahead_m: float = 0.8
+    pivot_heading_threshold_deg: float = 70.0
+    goto_divergence_limit_m: float = 0.75
+    goto_divergence_samples: int = 5
+    track_cross_track_limit_m: float = 1.0
+    track_alignment_enter_deg: float = 25.0
+    track_alignment_exit_deg: float = 10.0
     min_inner_wheel_speed: float = 0.15
 
 
@@ -41,6 +47,60 @@ class FakeMotor:
 
 
 class NavigationControllerTests(unittest.TestCase):
+    def test_pause_resume_preserves_track_progress_and_waypoints(self):
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.001},
+        ], mode='track')
+        controller.start()
+        try:
+            controller.on_pose_update({
+                'latitude': 52.0,
+                'longitude': 10.0002,
+                'heading_deg': 90.0,
+            })
+            before = controller.get_status()
+
+            self.assertTrue(controller.pause('sensor_pause'))
+            paused = controller.get_status()
+            self.assertTrue(paused['running'])
+            self.assertTrue(paused['paused'])
+
+            self.assertTrue(controller.resume())
+            after = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertFalse(after['paused'])
+        self.assertEqual(after['state'], 'running')
+        self.assertEqual(after['waypoints'], before['waypoints'])
+        self.assertEqual(
+            after['limits']['track_progress_m'],
+            before['limits']['track_progress_m'],
+        )
+
+    def test_practical_positioning_radius_accepts_26cm_target_distance(self):
+        motor = FakeMotor()
+        controller = NavigationController(
+            motor, NavConfig(acceptance_radius_m=0.40)
+        )
+        controller.set_waypoints([{'latitude': 52.0, 'longitude': 10.0}])
+        controller.start()
+        try:
+            controller.on_pose_update({
+                'latitude': 52.0,
+                'longitude': 10.0 - 0.26 * 1.459e-5,
+                'heading_deg': 90.0,
+            })
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertEqual(status['state'], 'completed')
+        self.assertFalse(status['running'])
+
     def test_bearing_and_heading_error_wrap(self):
         origin = Waypoint(52.0, 10.0)
         east = Waypoint(52.0, 10.001)
@@ -56,14 +116,14 @@ class NavigationControllerTests(unittest.TestCase):
 
         controller.start()
         try:
-            controller.on_pose_update({'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 0.0})
+            controller.on_pose_update({'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 90.0})
+            x, y, use_ramping = motor.commands[-1]
         finally:
             controller.shutdown()
 
-        x, y, use_ramping = motor.commands[-1]
         self.assertLessEqual(abs(x), 0.30)
         self.assertLessEqual(abs(y), 0.30)
-        self.assertTrue(use_ramping)
+        self.assertFalse(use_ramping)
 
     def test_inner_wheel_rolls_forward_at_moderate_heading_error(self):
         """Innen-Rad-Garantie: bei moderatem Heading-Fehler (hier 30°) muss
@@ -95,12 +155,8 @@ class NavigationControllerTests(unittest.TestCase):
         # Forward muss mindestens den No-Reverse-Schutz + Roll-Floor erfüllen
         self.assertGreaterEqual(y, 0.27, f'Forward zu klein: y={y}')
 
-    def test_extreme_heading_error_keeps_inner_wheel_non_reverse(self):
-        """Bei extremem Heading-Fehler (>=90°) wird der Roll-Floor auf 0
-        zurückgenommen (heading_factor=0), damit der Wenderadius schrumpft.
-        Der No-Reverse-Schutz (forward >= |turn|·ratio) bleibt aktiv:
-        Innen-Rad ruht maximal in der ESC-Totzone (inner_pwm = neutral),
-        läuft aber nicht rückwärts."""
+    def test_extreme_heading_error_pivots_without_forward_motion(self):
+        """Bei großem Heading-Fehler darf kein fahrender U-Turn entstehen."""
         motor = FakeMotor()
         controller = NavigationController(
             motor,
@@ -115,16 +171,10 @@ class NavigationControllerTests(unittest.TestCase):
         finally:
             controller.shutdown()
 
-        # Turn am Limit, Forward auf No-Reverse-Schutz reduziert (= |turn|·ratio)
-        self.assertAlmostEqual(abs(x), 0.30, delta=0.001)
-        self.assertAlmostEqual(y, 0.18, delta=0.001)
-        # Innen-Rad genau auf Neutral (deadband, nicht rückwärts)
-        inner_pwm = 1500 + y * 500.0 - abs(x) * 300.0
-        self.assertGreaterEqual(inner_pwm, 1500.0 - 0.5,
-                                f'Innen-Rad rückwärts (Scrubbing!), ist {inner_pwm} μs')
-        # Forward ist reduziert ggü. err=0-Fall (0.30) → Wenderadius schrumpft
-        self.assertLess(y, 0.30,
-                        'Forward muss bei extremem Heading-Fehler reduziert sein')
+        # turn_factor=300 ist kleiner als forward_factor=500. Deshalb wird
+        # x auf 0.50 skaliert: 0.50*300 = 0.30*500 = 150 us PWM-Offset.
+        self.assertAlmostEqual(abs(x), 0.50, delta=0.001)
+        self.assertEqual(y, 0.0)
 
     def test_zero_min_inner_wheel_speed_allows_legacy_pivot(self):
         """Mit min_inner_wheel_speed=0 ist die Innen-Rad-Garantie deaktiviert:
@@ -282,6 +332,31 @@ class NavigationControllerTests(unittest.TestCase):
         self.assertEqual(status['state'], 'running')
         self.assertTrue(status['running'])
 
+    def test_goto_stops_when_aligned_vehicle_moves_away_from_target(self):
+        motor = FakeMotor()
+        controller = NavigationController(
+            motor,
+            NavConfig(goto_divergence_limit_m=0.5, goto_divergence_samples=3),
+        )
+        controller.set_waypoints([{'latitude': 52.0, 'longitude': 10.0002}])
+        controller.start()
+        try:
+            # Ziel liegt östlich, Heading ist korrekt nach Osten, die Pose
+            # bewegt sich aber wiederholt nach Westen und damit vom Ziel weg.
+            for lon in [10.0, 9.999996, 9.999992, 9.999988, 9.999984]:
+                controller.on_pose_update({
+                    'latitude': 52.0,
+                    'longitude': lon,
+                    'heading_deg': 90.0,
+                })
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertFalse(status['running'])
+        self.assertEqual(status['state'], 'divergence_stop')
+        self.assertIn('entfernt sich', status['last_error'])
+
     def test_overshoot_advances_on_grazing_pass_within_15m(self):
         """Tangentialer Streiftreffer mit Min-Distanz ~0.6 m (außerhalb des
         Acceptance-Kreises, aber innerhalb des 1.5 m engagement_radius) muss
@@ -363,6 +438,83 @@ class NavigationControllerTests(unittest.TestCase):
 
         self.assertGreater(x, 0.0)
 
+    def test_track_mode_stops_when_cross_track_error_is_too_large(self):
+        motor = FakeMotor()
+        controller = NavigationController(
+            motor,
+            NavConfig(track_lookahead_m=1.0, track_cross_track_limit_m=0.75),
+        )
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.001},
+        ], mode='track')
+        controller.start()
+        try:
+            controller.on_pose_update({
+                'latitude': 52.00002,
+                'longitude': 10.0001,
+                'heading_deg': 90.0,
+            })
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertFalse(status['running'])
+        self.assertEqual(status['state'], 'cross_track_stop')
+        self.assertIn('Pfad entfernt', status['last_error'])
+
+    def test_track_aligns_by_rolling_around_stationary_inner_wheel(self):
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.001},
+        ], mode='track')
+        controller.start()
+        try:
+            controller.on_pose_update({
+                'latitude': 52.0,
+                'longitude': 10.0,
+                'heading_deg': 0.0,
+            })
+            x, y, _ = motor.commands[-1]
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertGreater(x, 0.0)
+        self.assertGreater(y, 0.0)
+        self.assertAlmostEqual(y, abs(x) * 0.6, delta=0.001)
+        self.assertTrue(status['limits']['track_aligning'])
+
+    def test_track_alignment_uses_hysteresis_then_releases_forward_drive(self):
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.001},
+        ], mode='track')
+        controller.start()
+        try:
+            for heading in (0.0, 70.0, 78.0):
+                controller.on_pose_update({
+                    'latitude': 52.0,
+                    'longitude': 10.0,
+                    'heading_deg': heading,
+                })
+            still_aligning = motor.commands[-1]
+            controller.on_pose_update({
+                'latitude': 52.0,
+                'longitude': 10.0,
+                'heading_deg': 85.0,
+            })
+            released = motor.commands[-1]
+        finally:
+            controller.shutdown()
+
+        self.assertGreater(still_aligning[1], 0.0)
+        self.assertGreater(released[1], still_aligning[1])
+
     def test_track_mode_completes_after_end_projection(self):
         motor = FakeMotor()
         controller = NavigationController(motor, NavConfig(track_lookahead_m=1.0))
@@ -379,6 +531,34 @@ class NavigationControllerTests(unittest.TestCase):
 
         self.assertEqual(status['state'], 'completed')
         self.assertFalse(status['running'])
+
+    def test_closed_track_does_not_complete_at_selected_start_point(self):
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig(track_lookahead_m=1.0))
+        ring = [
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.0001},
+            {'latitude': 52.0001, 'longitude': 10.0001},
+            {'latitude': 52.0001, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.0},
+        ]
+        controller.set_waypoints(ring, mode='track')
+        controller.start()
+        try:
+            controller.on_pose_update({
+                'latitude': 52.0,
+                'longitude': 10.0,
+                'heading_deg': 90.0,
+            })
+            status = controller.get_status()
+            command = motor.commands[-1]
+        finally:
+            controller.shutdown()
+
+        self.assertTrue(status['running'])
+        self.assertEqual(status['state'], 'running')
+        self.assertGreater(command[1], 0.0)
+        self.assertLess(status['limits']['track_progress_m'], 1.0)
 
     def test_nav_set_waypoints_accepts_track_mode(self):
         motor = FakeMotor()

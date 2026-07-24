@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="/static/js/mapping_editor.js"></script>
+    <script src="/static/js/mapping_editor.js?v=20260724-7"></script>
     <style>
         * {
             margin: 0;
@@ -1141,6 +1141,7 @@
                             <div class="map-row">
                                 <button class="mapping-btn primary" onclick="loadSavedPlan()">Plan laden</button>
                                 <button class="mapping-btn primary plan-action-control" id="planPlayBtn" onclick="playLoadedPlan()" disabled>Play</button>
+                                <button class="mapping-btn plan-action-control" id="planResumeBtn" onclick="resumeLoadedPlan()" disabled>Fortsetzen</button>
                                 <button class="mapping-btn plan-action-control" id="planPauseBtn" onclick="pausePlanExecution()">Pause</button>
                                 <button class="mapping-btn danger plan-action-control" onclick="stopPlanExecution()">Stop</button>
                                 <button class="mapping-btn plan-action-control" id="mapEditModeBtn" onclick="returnToMapEditMode()" disabled>Kartenmodus</button>
@@ -1159,7 +1160,7 @@
                                 <strong id="planNoGoStatus">unbekannt</strong>
                             </div>
                             <label class="planner-progress">Abfahrposition: <span id="laneProgressValue">0,0%</span>
-                                <input id="laneProgressSlider" type="range" min="0" max="100" step="0.1" value="0" oninput="updateLaneProgress(Number(this.value))">
+                                <input id="laneProgressSlider" type="range" min="0" max="99.9" step="0.1" value="0" oninput="updateLaneProgress(Number(this.value))">
                                 <span class="sub-list" id="laneProgressDetail">0 m / 0 m</span>
                             </label>
                             <div class="sub-list" id="plannerStatus">Kein Plan geladen</div>
@@ -1419,13 +1420,16 @@
                 ? nodeDetails.join('\n')
                 : 'Noch keine ODrive-Heartbeats empfangen';
             const safetyLatched = safetyStatus.system_stop_latched === true;
+            const motionHeld = safetyStatus.motion_hold_active === true;
             document.getElementById('safetyStatus').className =
-                `status-dot ${safetyLatched ? 'inactive' : 'active'}`;
+                `status-dot ${safetyLatched ? 'inactive' : (motionHeld ? 'warning' : 'active')}`;
             document.getElementById('safetyStatusText').textContent =
-                safetyLatched ? 'STOPP ⚠' : 'Safety OK';
+                safetyLatched ? 'STOPP ⚠' : (motionHeld ? 'PAUSE ⏸' : 'Safety OK');
             document.getElementById('safetyIndicator').title = safetyLatched
                 ? `${safetyStatus.system_stop_reason || 'Sicherheitsstopp'} – zum Rücksetzen klicken`
-                : 'Sicherheitsüberwachung aktiv';
+                : (motionHeld
+                    ? `${safetyStatus.motion_hold_reason || 'Fahrpause'} – wartet auf SensorHub`
+                    : 'Sicherheitsüberwachung aktiv');
             document.getElementById('pwmStatus').className =
                 'status-dot ' + (data.pwm_enabled ? 'active' : 'inactive');
             document.getElementById('monitorStatus').className =
@@ -1433,7 +1437,7 @@
             document.getElementById('lightStatus').className =
                 'status-dot ' + (data.light_state ? 'active' : 'inactive');
             document.getElementById('mowerStatus').className =
-                'status-dot ' + (data.mower_state ? 'active' : 'inactive');
+                'status-dot ' + (data.mower_state ? 'active' : (data.mower_starting ? 'warning' : 'inactive'));
 
             // PWM-Werte aktualisieren
             if (data.current_pwm) {
@@ -1468,7 +1472,7 @@
 
             // Mäher-Button aktualisieren
             if (data.mower_enabled !== undefined) {
-                updateMowerButton(data.mower_state || false);
+                updateMowerButton(data.mower_state || false, data.mower_starting || false);
             }
 
             // Mäher-Modal aktualisieren falls geöffnet
@@ -1492,7 +1496,7 @@
                     if (!response.ok || !data.success) {
                         throw new Error(data.error || 'Safety-Reset nicht möglich');
                     }
-                    updateStatusFromServer();
+                    fetchStatus();
                 })
                 .catch(error => alert('Safety-Reset fehlgeschlagen: ' + error.message));
         }
@@ -1577,10 +1581,13 @@
         }
 
         // Mäher Button aktualisieren
-        function updateMowerButton(mowerState) {
+        function updateMowerButton(mowerState, mowerStarting = false) {
             const btn = document.getElementById('mowerToggleBtn');
 
-            if (mowerState) {
+            if (mowerStarting) {
+                btn.className = 'mower-toggle-btn';
+                btn.innerHTML = '⏳ Mäher STARTET…';
+            } else if (mowerState) {
                 btn.className = 'mower-toggle-btn active';
                 btn.innerHTML = '🌾 Mäher EIN';
             } else {
@@ -1645,8 +1652,9 @@
                     // Status sofort aktualisieren
                     fetchStatus();
                 } else {
-                    console.error('❌ Mäher-Toggle fehlgeschlagen:', data.error || 'Unbekannter Fehler');
-                    alert('Mäher-Toggle fehlgeschlagen: ' + (data.error || 'Unbekannter Fehler'));
+                    const mowerError = data.error || data.mower_error || 'Unbekannter Fehler';
+                    console.error('❌ Mäher-Toggle fehlgeschlagen:', mowerError);
+                    alert('Mäher-Toggle fehlgeschlagen: ' + mowerError);
                 }
             })
             .catch(error => {
@@ -1692,8 +1700,9 @@
                     console.log('✅ Mäher-Drehzahl erfolgreich:', data.mower_rpm + ' rpm');
                     updateMowerModal(data);
                 } else {
-                    console.error('❌ Mäher-Geschwindigkeit fehlgeschlagen:', data.error || 'Unbekannter Fehler');
-                    alert('Mäher-Geschwindigkeit fehlgeschlagen: ' + (data.error || 'Unbekannter Fehler'));
+                    const mowerError = data.error || data.mower_error || 'Unbekannter Fehler';
+                    console.error('❌ Mäher-Geschwindigkeit fehlgeschlagen:', mowerError);
+                    alert('Mäher-Geschwindigkeit fehlgeschlagen: ' + mowerError);
                 }
             })
             .catch(error => {
@@ -1705,9 +1714,10 @@
         // Mäher-Modal UI aktualisieren
         function updateMowerModal(data) {
             const mowerState = data.mower_state || false;
+            const mowerStarting = data.mower_starting || false;
             currentMowerState = mowerState;
             const mowerMode = data.mower_mode || 'gpio_pwm';
-            const isOdrive = mowerMode === 'odrive_can';
+            const isOdrive = mowerMode.startsWith('odrive_');
             const minRpm = data.mower_min_rpm || 0;
             const maxRpm = data.mower_max_rpm || 100;
             const mowerSpeed = isOdrive ? (data.mower_rpm || data.mower_default_rpm || minRpm) : (data.mower_speed || 0);
@@ -1715,16 +1725,19 @@
 
             // Status-Dot im Modal
             document.getElementById('mowerModalStatus').className =
-                'status-dot ' + (mowerState ? 'active' : 'inactive');
+                'status-dot ' + (mowerState ? 'active' : (mowerStarting ? 'warning' : 'inactive'));
 
             // Status-Text
-            document.getElementById('mowerStatusText').textContent = mowerState ? 'Ein' : 'Aus';
+            document.getElementById('mowerStatusText').textContent = mowerStarting ? 'Startet…' : (mowerState ? 'Ein' : 'Aus');
 
             // Power-Button
             const powerBtn = document.getElementById('mowerPowerBtn');
             const powerText = document.getElementById('mowerPowerText');
 
-            if (mowerState) {
+            if (mowerStarting) {
+                powerBtn.className = 'mower-power-btn';
+                powerText.textContent = '⏳ Mäher STARTET…';
+            } else if (mowerState) {
                 powerBtn.className = 'mower-power-btn active';
                 powerText.textContent = '🌾 Mäher AUS';
             } else {
@@ -1752,8 +1765,9 @@
                 document.getElementById('mowerMaxRpmMarker').textContent = '100%';
             }
 
-            const controlsDisabled = isOdrive ? !data.mower_enabled : !mowerState;
+            const controlsDisabled = mowerStarting || (isOdrive ? !data.mower_enabled : !mowerState);
             speedSlider.disabled = controlsDisabled;
+            powerBtn.disabled = mowerRequestPending || mowerStarting;
             if (!mowerSliderActive) {
                 speedSlider.value = mowerSpeed;
                 speedValue.textContent = mowerSpeed;
@@ -1761,8 +1775,10 @@
             }
 
             // Info-Anzeigen
-            document.getElementById('mowerModeStatus').textContent = isOdrive ? 'ODrive CAN' : 'GPIO/PWM';
-            document.getElementById('mowerRelayStatus').textContent = mowerState ? 'EIN' : 'AUS';
+            const odriveTransport = mowerMode.replace('odrive_', '').toUpperCase();
+            document.getElementById('mowerModeStatus').textContent =
+                isOdrive ? `ODrive ${odriveTransport}` : 'GPIO/PWM';
+            document.getElementById('mowerRelayStatus').textContent = mowerStarting ? 'STARTET' : (mowerState ? 'EIN' : 'AUS');
 
             if (isOdrive) {
                 document.getElementById('mowerPwmStatus').textContent = displaySpeed + ' rpm';

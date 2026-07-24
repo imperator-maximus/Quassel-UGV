@@ -63,6 +63,34 @@ else:
 
 
 class GPSHandlerTests(unittest.TestCase):
+    def test_reader_waits_for_serial_data_in_readline(self):
+        gps = GPSHandler('/dev/null', 230400)
+
+        class FakeSerialPort:
+            def __init__(self):
+                self.readline_calls = 0
+
+            @property
+            def in_waiting(self):
+                # The reader must not poll this property.  This also makes the
+                # old busy-loop implementation terminate instead of hanging
+                # the regression test indefinitely.
+                gps.running = False
+                return False
+
+            def readline(self):
+                self.readline_calls += 1
+                gps.running = False
+                return b''
+
+        serial_port = FakeSerialPort()
+        gps.serial_port = serial_port
+        gps.running = True
+
+        gps._reader_loop()
+
+        self.assertEqual(serial_port.readline_calls, 1)
+
     def test_parses_hdt_heading(self):
         gps = GPSHandler('/dev/null', 230400)
 

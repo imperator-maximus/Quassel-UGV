@@ -60,7 +60,7 @@ odrive_mower:
   heartbeat_timeout_s: 1.0
   current_monitor_enabled: true
   current_poll_interval_s: 0.1
-  current_response_timeout_s: 0.75
+  current_response_timeout_s: 10.0
   current_startup_grace_s: 2.0
   current_trip_a: 25.0
   current_trip_duration_s: 0.5
@@ -84,6 +84,10 @@ navigation:
   slowdown_radius_m: 0.5
   turn_kp: 0.02
   track_lookahead_m: 0.8
+  pivot_heading_threshold_deg: 70.0
+  goto_divergence_limit_m: 0.75
+  goto_divergence_samples: 5
+  track_cross_track_limit_m: 1.0
   min_inner_wheel_speed: 0.50
 
 mapping:

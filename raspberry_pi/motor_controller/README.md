@@ -1,14 +1,20 @@
 # Motor Controller v2.0
 
-Modularer Motor Controller für Quassel UGV mit Hardware-PWM, CAN-Bus und Web-Interface.
+Modularer Motor Controller für Quassel UGV mit Hardware-PWM, ODrive-USB,
+legacy CAN und Web-Interface.
 
-## CAN-Hardware
+## Aktuelle ODrive- und SensorHub-Anbindung
 
-- Der Haupt-UGV-Rechner nutzt einen **USB-CAN-Adapter** mit `gs_usb` als `can0`.
+- Der Haupt-UGV-Rechner nutzt **zwei direkte USB/Fibre-Verbindungen** zu den
+  beiden ODrive-Boards. Node 0/1 liegen auf Board A, Node 2 auf Board B.
+- Die SensorHub-Pose kommt im Produktionsprofil per HTTP/WiFi.
+- Der CAN-Dienst des Haupt-UGV ist deaktiviert; der CAN-Code bleibt als
+  konfigurierbarer Rueckfall erhalten.
 - Der ehemalige, inzwischen offline geschaltete UGV-Teststand nutzt einen **USB-CAN-Adapter** als `can0`.
 - Die ODrive/ODESC-Motorcontroller besitzen jeweils eine **integrierte CAN-Schnittstelle** und sprechen SimpleCAN.
 - Alle Teilnehmer verwenden **Classical CAN 2.0** mit maximal 8 Datenbytes pro Frame; CAN FD wird nicht verwendet.
-- Haupt-UGV, Sensor Hub, ODrives und das ehemalige Testprofil sind einheitlich auf **250 kbit/s** eingestellt.
+- Legacy-CAN-Profile verwenden einheitlich **250 kbit/s**.
+- `odrive_mower.transport` kann `usb` (Produktion) oder `can` (Rueckfall) sein.
 
 ## 🚀 Quick Start
 
@@ -88,6 +94,14 @@ can:
   interface: can0
   bitrate: 250000
 
+sensor_hub:
+  transport: shadow  # can | shadow | wifi
+  wifi_url: http://192.168.178.20/api/telemetry
+  poll_interval_s: 0.2
+  request_timeout_s: 1.5
+  pause_timeout_s: 1.0
+  telemetry_timeout_s: 30.0
+
 logging:
   level: INFO
   console: true
@@ -101,7 +115,9 @@ logging:
 - `GET /api/status` - System-Status
 - `POST /api/can/toggle` - CAN Ein/Aus
 - `POST /api/light/toggle` - Licht Ein/Aus
-- `POST /api/mower/toggle` - Mäher Ein/Aus
+- `POST /api/mower/toggle` - Maehdeck nur mit explizitem JSON-Zustand
+  (`{"state": true, "rpm": 500}` oder `{"state": false}`); fehlendes,
+  unlesbares oder nicht-boolesches `state` wird mit HTTP 400 abgelehnt
 - `POST /api/mower/speed` - Mäher-Geschwindigkeit
 - `POST /api/joystick` - Joystick-Input
 - `GET /api/sensor/status` - Sensor-Status anfordern
@@ -144,7 +160,7 @@ sudo systemctl enable pigpiod
 
 ### CAN-Interface nicht verfügbar
 ```bash
-# Haupt-UGV mit USB-CAN, Classical CAN 2.0
+# Nur fuer Legacy/Testprofile mit USB-CAN, Classical CAN 2.0
 sudo ip link set can0 up type can bitrate 250000 restart-ms 100
 ```
 
@@ -169,24 +185,27 @@ export PYTHONPATH=/home/nicolay:$PYTHONPATH
 - Sicherheitsschalter (GPIO 17) stoppt und verriegelt Fahrantrieb und Mähdeck
 - Command-Timeout (2s) stoppt Motoren bei fehlenden Befehlen
 - Joystick-Timeout (1s) stoppt Motoren bei Verbindungsabbruch
-- CAN-Watchdog stoppt das Gesamtsystem bei fehlendem SensorHub, ODrive-Node
-  oder CAN-Reader
-- `GET_IQ` überwacht alle drei Mähmotorströme mit konfigurierbaren Zeitgrenzen
-- Der Strommonitor sendet auch im IDLE alle 100 ms eine ODrive-Abfrage. Dadurch
+- Nach 1 s ohne SensorHub-Pose pausiert der Watchdog nur Fahrantrieb und Route;
+  das Maehdeck darf weiterlaufen. Nach Rueckkehr einer frischen Pose wird eine
+  zuvor aktive autonome Route automatisch am Resume-Punkt fortgesetzt.
+- Erst nach 10 s ohne SensorHub-Pose oder sofort bei fehlender ODrive-USB-Achse
+  verriegelt der Watchdog den Gesamtsystem-Stopp inklusive Maehdeck.
+- Native USB-Telemetrie überwacht alle drei Mähmotorströme mit konfigurierbaren Zeitgrenzen.
+- Der USB-Monitor liest im IDLE alle 100 ms und fuettert den lokalen Watchdog. Dadurch
   bleibt der lokale 1,0-s-ODrive-Watchdog gefüttert; bei Pi-/Kabelausfall läuft
   er ab und disarmt die Achse lokal.
 - Der verriegelte Stopp wird in der Web-Oberfläche angezeigt und kann dort erst
-  nach wiederhergestelltem CAN manuell zurückgesetzt werden.
+  nach wiederhergestellten USB-Verbindungen manuell zurückgesetzt werden.
 
-Die ODrive-Watchdogs werden einmalig per USB gesetzt, jeweils nur mit einem
-angeschlossenen Board und mechanisch gesichertem Mähdeck:
+Die ODrive-Watchdogs sind auf den drei genutzten Achsen mit 1,0 s gespeichert.
+Fuer eine erneute Einrichtung muss der Motor-Controller-Dienst gestoppt sein:
 
 ```bash
 # Board A (Nodes 0 und 1)
-python3 scripts/configure_odrive_watchdog.py apply --nodes 0,1 --timeout 1.0
+python3 scripts/configure_odrive_watchdog.py apply --serial 0x386132523135 --nodes 0,1 --timeout 1.0
 
 # Board B (nur verwendeter Node 2; Node 3 bleibt unverändert)
-python3 scripts/configure_odrive_watchdog.py apply --nodes 2 --timeout 1.0
+python3 scripts/configure_odrive_watchdog.py apply --serial 0x387132523135 --nodes 2 --timeout 1.0
 ```
 
 ## 📊 GPIO-Belegung

@@ -17,7 +17,9 @@ except ImportError:
 
 CMD_SET_AXIS_STATE = 0x007
 CMD_SET_INPUT_VEL = 0x00D
+CMD_SET_LIMITS = 0x00F
 CMD_GET_IQ = 0x014
+CMD_GET_SENSORLESS_ESTIMATES = 0x015
 CMD_CLEAR_ERRORS = 0x018
 
 AXIS_STATE_IDLE = 1
@@ -45,6 +47,20 @@ class ODriveMowerController:
             node_id: {'setpoint_a': None, 'measured_a': None, 'last_seen': 0.0}
             for node_id in self.node_ids
         }
+        self.odrive_sensorless = {
+            node_id: {'position': None, 'velocity': None, 'rpm': None, 'last_seen': 0.0}
+            for node_id in self.node_ids
+        }
+        self.startup_status = {
+            'active': False,
+            'phase': None,
+            'node_id': None,
+            'attempt': 0,
+            'validated_nodes': [],
+            'last_result': None,
+            'started_monotonic': None,
+            'node_started_monotonic': None,
+        }
         self._overcurrent_since = {node_id: None for node_id in self.node_ids}
         self._critical_current_since = {node_id: None for node_id in self.node_ids}
         self._run_started_monotonic = 0.0
@@ -61,6 +77,7 @@ class ODriveMowerController:
         self._startup_watchdog_clear_pending = False
         self._startup_watchdog_clear_done = False
         self._last_poll_error_log = 0.0
+        self._current_poll_index = 0
 
     def _configured_node_ids(self) -> list[int]:
         node_ids = getattr(self.config, "node_ids", None) or []
@@ -120,6 +137,29 @@ class ODriveMowerController:
         turns_per_second = float(rpm) / 60.0
         self._send_all(CMD_SET_INPUT_VEL, struct.pack("<fhh", turns_per_second, 0, 0))
 
+    def _set_node_input_rpm(self, node_id: int, rpm: int) -> None:
+        turns_per_second = float(rpm) / 60.0
+        self._send(
+            node_id,
+            CMD_SET_INPUT_VEL,
+            struct.pack("<fhh", turns_per_second, 0, 0),
+        )
+
+    def _set_node_axis_state(self, node_id: int, state: int) -> None:
+        self._send(node_id, CMD_SET_AXIS_STATE, struct.pack("<I", int(state)))
+
+    def _set_node_limits(self, node_id: int, current_limit_a: float) -> None:
+        velocity_limit_tps = float(self.config.max_rpm) / 60.0
+        self._send(
+            node_id,
+            CMD_SET_LIMITS,
+            struct.pack("<ff", velocity_limit_tps, float(current_limit_a)),
+        )
+
+    def _poll_node_startup(self, node_id: int) -> None:
+        self._send_rtr(node_id, CMD_GET_IQ, dlc=8)
+        self._send_rtr(node_id, CMD_GET_SENSORLESS_ESTIMATES, dlc=8)
+
     def _set_axis_state(self, state: int, stagger_s: float = 0.0) -> None:
         data = struct.pack("<I", int(state))
         errors = []
@@ -133,11 +173,75 @@ class ODriveMowerController:
         if errors:
             raise RuntimeError("; ".join(errors))
 
+    def _active_axis_nodes_locked(self) -> list[int]:
+        """Returns nodes whose latest heartbeat does not report IDLE."""
+        return [
+            node_id
+            for node_id in self.node_ids
+            if self.odrive_states.get(node_id, AXIS_STATE_IDLE) != AXIS_STATE_IDLE
+        ]
+
+    def _request_idle_verified(
+        self,
+        attempts: int = 6,
+        verify_interval_s: float = 0.15,
+    ) -> tuple[list[int], list[str]]:
+        """Requests IDLE repeatedly and verifies it through fresh heartbeats.
+
+        SocketCAN accepting a frame only proves that it was queued locally.
+        A disturbed CAN receiver may miss one Set_Axis_State frame while its
+        transmitted heartbeats remain visible.  A mower stop therefore needs
+        retries plus confirmation from every configured axis.
+        """
+        data = struct.pack("<I", AXIS_STATE_IDLE)
+        pending = list(self.node_ids)
+        send_errors: list[str] = []
+        attempts = max(1, int(attempts))
+        verify_interval_s = max(0.02, float(verify_interval_s))
+
+        for attempt in range(1, attempts + 1):
+            targets = list(self.node_ids) if attempt == 1 else list(pending)
+            for node_id in targets:
+                try:
+                    self._send(node_id, CMD_SET_AXIS_STATE, data)
+                except Exception as exc:
+                    send_errors.append(f"node {node_id}: {exc}")
+
+            deadline = time.monotonic() + verify_interval_s
+            while time.monotonic() < deadline:
+                with self._lock:
+                    pending = self._active_axis_nodes_locked()
+                if not pending:
+                    return [], send_errors
+                time.sleep(0.02)
+
+            self.logger.warning(
+                "ODrive-IDLE noch nicht bestaetigt: attempt=%d/%d nodes=%s",
+                attempt,
+                attempts,
+                pending,
+            )
+
+        with self._lock:
+            pending = self._active_axis_nodes_locked()
+        return pending, send_errors
+
     def _clamp_rpm(self, rpm: int) -> int:
         return max(int(self.config.min_rpm), min(int(self.config.max_rpm), int(rpm)))
 
     def _missing_heartbeats_locked(self) -> list[int]:
-        timeout_s = float(getattr(self.config, "heartbeat_timeout_s", 1.0))
+        timeout_name = (
+            "usb_status_timeout_s"
+            if getattr(self, "transport", "can") == "usb"
+            else "heartbeat_timeout_s"
+        )
+        timeout_s = float(
+            getattr(
+                self.config,
+                timeout_name,
+                getattr(self.config, "heartbeat_timeout_s", 1.0),
+            )
+        )
         now = time.monotonic()
         return [
             node_id
@@ -157,6 +261,204 @@ class ODriveMowerController:
             self.target_rpm = self._clamp_rpm(rpm)
             self.last_error = None
         return self.get_status()
+
+    def _reset_startup_measurements(self, node_id: int) -> None:
+        with self._lock:
+            self.odrive_iq[node_id] = {
+                'setpoint_a': None,
+                'measured_a': None,
+                'last_seen': 0.0,
+            }
+            self.odrive_sensorless[node_id] = {
+                'position': None,
+                'velocity': None,
+                'rpm': None,
+                'last_seen': 0.0,
+            }
+
+    def _startup_snapshot(self, node_id: int) -> dict:
+        with self._lock:
+            return {
+                'error': self.odrive_errors.get(node_id, 0),
+                'state': self.odrive_states.get(node_id, AXIS_STATE_IDLE),
+                'iq': dict(self.odrive_iq[node_id]),
+                'sensorless': dict(self.odrive_sensorless[node_id]),
+                'system_stop_pending': self._system_stop_pending,
+            }
+
+    def _start_node_with_validation(
+        self,
+        node_id: int,
+        already_running: list[int],
+        rpm: int,
+    ) -> tuple[bool, str | None]:
+        timeout_s = float(getattr(self.config, 'startup_timeout_s', 2.5))
+        retries = max(0, int(getattr(self.config, 'startup_retries', 1)))
+        current_limit_a = float(
+            getattr(self.config, 'startup_current_limit_a', 12.0)
+        )
+        abort_current_a = float(
+            getattr(self.config, 'startup_abort_current_a', 12.5)
+        )
+        min_rpm = float(
+            getattr(self.config, 'startup_min_sensorless_rpm', 120.0)
+        )
+        stable_duration_s = float(
+            getattr(self.config, 'startup_stable_duration_s', 0.4)
+        )
+        operating_limit_a = float(
+            getattr(self.config, 'operating_current_limit_a', 30.0)
+        )
+        interval_s = max(0.05, float(self.config.command_interval_s))
+        last_reason = None
+
+        for attempt in range(1, retries + 2):
+            self._reset_startup_measurements(node_id)
+            with self._lock:
+                self.startup_status.update({
+                    'active': True,
+                    'phase': 'node',
+                    'node_id': node_id,
+                    'attempt': attempt,
+                    'node_started_monotonic': time.monotonic(),
+                })
+
+            self._prepare_node_start_transport(node_id)
+            self._send(node_id, CMD_CLEAR_ERRORS)
+            time.sleep(0.1)
+            self._set_node_limits(node_id, current_limit_a)
+            self._set_node_input_rpm(node_id, rpm)
+            self._set_node_axis_state(node_id, self.config.axis_state)
+
+            started = time.monotonic()
+            next_poll = started
+            stable_since = None
+            last_reason = f"Sensorless-Anlauf Timeout node={node_id}"
+
+            while time.monotonic() - started < timeout_s:
+                now = time.monotonic()
+                snapshot = self._startup_snapshot(node_id)
+                if snapshot['system_stop_pending'] or self._stop_event.is_set():
+                    return False, self.last_error or f"Anlauf node={node_id} abgebrochen"
+
+                if snapshot['error']:
+                    last_reason = (
+                        f"ODrive-Anlauffehler node={node_id}: "
+                        f"0x{snapshot['error']:08X}"
+                    )
+                    break
+
+                measured = snapshot['iq']['measured_a']
+                iq_fresh = (
+                    snapshot['iq']['last_seen'] > started and measured is not None
+                )
+                if measured is not None and abs(float(measured)) >= abort_current_a:
+                    last_reason = (
+                        f"ODrive Anlaufstrom node={node_id}: "
+                        f"{abs(float(measured)):.1f} A"
+                    )
+                    break
+
+                estimated_rpm = snapshot['sensorless']['rpm']
+                estimate_fresh = (
+                    snapshot['sensorless']['last_seen'] > started
+                    and estimated_rpm is not None
+                )
+                state_ok = snapshot['state'] == int(self.config.axis_state)
+                if (
+                    iq_fresh
+                    and estimate_fresh
+                    and state_ok
+                    and abs(float(estimated_rpm)) >= min_rpm
+                ):
+                    if stable_since is None:
+                        stable_since = now
+                    elif now - stable_since >= stable_duration_s:
+                        self._set_node_limits(node_id, operating_limit_a)
+                        self.logger.info(
+                            "ODrive-Anlauf bestaetigt: node=%d attempt=%d rpm_est=%.1f iq=%.1f A",
+                            node_id,
+                            attempt,
+                            float(estimated_rpm),
+                            float(measured or 0.0),
+                        )
+                        return True, None
+                else:
+                    stable_since = None
+
+                if now >= next_poll:
+                    for active_node in [*already_running, node_id]:
+                        self._set_node_input_rpm(active_node, rpm)
+                    self._poll_node_startup(node_id)
+                    next_poll = now + interval_s
+                time.sleep(0.02)
+
+            self._set_node_axis_state(node_id, AXIS_STATE_IDLE)
+            self._set_node_limits(node_id, operating_limit_a)
+            self.logger.warning(
+                "ODrive-Anlauf fehlgeschlagen: node=%d attempt=%d reason=%s",
+                node_id,
+                attempt,
+                last_reason,
+            )
+            if attempt <= retries and not self._system_stop_pending:
+                time.sleep(max(0.2, float(getattr(self.config, 'coast_delay_s', 0.5))))
+
+        return False, last_reason
+
+    def _start_sequentially(self, rpm: int) -> tuple[bool, str | None]:
+        validated = []
+        operating_limit_a = float(
+            getattr(self.config, 'operating_current_limit_a', 30.0)
+        )
+        with self._lock:
+            started_monotonic = self.startup_status.get('started_monotonic')
+            self.startup_status = {
+                'active': True,
+                'phase': 'nodes',
+                'node_id': None,
+                'attempt': 0,
+                'validated_nodes': [],
+                'last_result': None,
+                'started_monotonic': started_monotonic,
+                'node_started_monotonic': time.monotonic(),
+            }
+
+        try:
+            self._set_axis_state(AXIS_STATE_IDLE)
+            self._send_all(CMD_CLEAR_ERRORS)
+            time.sleep(0.2)
+            for node_id in self.node_ids:
+                success, error = self._start_node_with_validation(
+                    node_id, validated, rpm
+                )
+                if not success:
+                    return False, error
+                validated.append(node_id)
+                with self._lock:
+                    self.startup_status['validated_nodes'] = list(validated)
+            return True, None
+        finally:
+            with self._lock:
+                complete = len(validated) == len(self.node_ids)
+                self.startup_status.update({
+                    'active': False,
+                    'phase': None,
+                    'node_id': None,
+                    'last_result': 'ok' if complete else 'failed',
+                    'node_started_monotonic': None,
+                })
+            if len(validated) != len(self.node_ids):
+                for node_id in self.node_ids:
+                    try:
+                        self._set_node_axis_state(node_id, AXIS_STATE_IDLE)
+                        self._set_node_limits(node_id, operating_limit_a)
+                    except Exception as exc:
+                        self.logger.error(
+                            "ODrive-Anlauf-Abbruch node=%d fehlgeschlagen: %s",
+                            node_id,
+                            exc,
+                        )
 
     def start(self, rpm: int | None = None) -> Dict[str, Any]:
         with self._op_lock:
@@ -178,6 +480,17 @@ class ODriveMowerController:
                 self.running = True
                 self.commanded_rpm = min(self.target_rpm, self._clamp_rpm(self.config.default_rpm))
                 self.last_error = None
+                startup_started = time.monotonic()
+                self.startup_status = {
+                    'active': True,
+                    'phase': 'prepare',
+                    'node_id': None,
+                    'attempt': 0,
+                    'validated_nodes': [],
+                    'last_result': None,
+                    'started_monotonic': startup_started,
+                    'node_started_monotonic': startup_started,
+                }
                 self._stop_event.clear()
                 self._run_started_monotonic = time.monotonic()
                 self._system_stop_pending = False
@@ -191,18 +504,48 @@ class ODriveMowerController:
                     self._critical_current_since[node_id] = None
 
             try:
+                self._prepare_start_transport()
                 self._require_live_nodes()
-                self._send_all(CMD_CLEAR_ERRORS)
-                time.sleep(0.2)
-                self._set_input_rpm(self.commanded_rpm)
-                self._set_axis_state(
-                    self.config.axis_state,
-                    stagger_s=float(getattr(self.config, "start_stagger_s", 0.0)),
-                )
+                if bool(getattr(self.config, 'sequential_start_enabled', True)):
+                    success, start_error = self._start_sequentially(self.commanded_rpm)
+                    if not success:
+                        raise RuntimeError(start_error or "Sequenzieller Anlauf fehlgeschlagen")
+                else:
+                    self._send_all(CMD_CLEAR_ERRORS)
+                    time.sleep(0.2)
+                    self._prepare_parallel_start_transport()
+                    self._set_input_rpm(self.commanded_rpm)
+                    self._set_axis_state(
+                        self.config.axis_state,
+                        stagger_s=float(getattr(self.config, "start_stagger_s", 0.0)),
+                    )
+                # A sequential USB start can take several seconds. Refresh
+                # every validated axis before the runtime loop performs its
+                # first liveness check; otherwise the first axis appears
+                # stale merely because the later axes were being validated.
+                self._finalize_start_transport()
             except Exception as exc:
+                with self._lock:
+                    self.startup_status.update({
+                        'active': False,
+                        'phase': None,
+                        'node_id': None,
+                        'last_result': 'failed',
+                        'node_started_monotonic': None,
+                    })
+                self._cleanup_failed_start_transport()
                 self._request_system_stop(f"ODrive Start fehlgeschlagen: {exc}")
                 return self.get_status(success=False)
 
+            with self._lock:
+                self._run_started_monotonic = time.monotonic()
+                self.startup_status.update({
+                    'active': False,
+                    'phase': None,
+                    'node_id': None,
+                    'last_result': 'ok',
+                    'node_started_monotonic': None,
+                })
             self._worker = threading.Thread(target=self._command_loop, daemon=True)
             self._worker.start()
             self.logger.info(
@@ -223,21 +566,34 @@ class ODriveMowerController:
                 self.running = False
                 self.commanded_rpm = 0
 
-            try:
-                self._require_live_nodes()
-                # Direkt IDLE setzen – freies Auslaufen, kein aktives Bremsen.
-                #
-                # WICHTIG: brake_resistance ist aktuell 0.0 (kein Bremswider-
-                # stand). Aktives Bremsen per Set_Input_Vel(0) wuerde Rueck-
-                # energie in den DC-Bus treiben -> Ueberspannung -> ODrive-Crash.
-                # IDLE entkoppelt den Regler sofort, der Motor laeuft frei aus.
-                self._set_axis_state(AXIS_STATE_IDLE)
-            except Exception as exc:
-                self.last_error = str(exc)
+            # Direkt und wiederholt IDLE setzen – freies Auslaufen, kein
+            # aktives Bremsen. brake_resistance ist aktuell 0.0; ein aktives
+            # Abbremsen per Set_Input_Vel(0) koennte den DC-Bus ueberladen.
+            pending, send_errors = self._request_idle_verified()
+            if pending:
+                details = f"ODrive-IDLE nicht bestaetigt: nodes {pending}"
+                if send_errors:
+                    details += f"; Sendefehler: {'; '.join(send_errors)}"
+                self.last_error = details
                 return self.get_status(success=False)
 
             self.logger.info("ODrive-Maehdeck gestoppt: nodes=%s", self.node_ids)
             return self.get_status()
+
+    def _prepare_start_transport(self) -> None:
+        """Transport hook executed after the start is visibly marked pending."""
+
+    def _prepare_node_start_transport(self, node_id: int) -> None:
+        """Transport hook immediately before one sequential axis starts."""
+
+    def _prepare_parallel_start_transport(self) -> None:
+        """Transport hook immediately before a non-sequential start."""
+
+    def _finalize_start_transport(self) -> None:
+        """Transport hook after all axes started, before runtime checks begin."""
+
+    def _cleanup_failed_start_transport(self) -> None:
+        """Best-effort transport cleanup after a rejected start."""
 
     def emergency_stop(self, reason: str) -> Dict[str, Any]:
         """Stoppt das Deck sofort und best-effort, auch bei defektem CAN."""
@@ -248,17 +604,20 @@ class ODriveMowerController:
             self.last_error = str(reason)
             self._system_stop_pending = True
 
-        errors = []
-        data = struct.pack("<I", AXIS_STATE_IDLE)
-        for node_id in self.node_ids:
-            try:
-                self._send(node_id, CMD_SET_AXIS_STATE, data)
-            except Exception as exc:
-                errors.append(f"node {node_id}: {exc}")
-        if errors:
-            self.logger.error("ODrive Notstopp nur teilweise gesendet: %s", "; ".join(errors))
+        pending, errors = self._request_idle_verified(attempts=8)
+        if pending:
+            self.logger.critical(
+                "ODrive Notstopp nicht bestaetigt: nodes=%s errors=%s",
+                pending,
+                errors,
+            )
+        elif errors:
+            self.logger.warning(
+                "ODrive Notstopp nach Sendefehlern bestaetigt: %s",
+                "; ".join(errors),
+            )
         self.logger.critical("ODrive-Maehdeck Sicherheitsstopp: %s", reason)
-        return self.get_status(success=not errors)
+        return self.get_status(success=not pending)
 
     def _request_system_stop(self, reason: str) -> None:
         """Verriegelt den lokalen Fehler und fordert asynchron Gesamtstopp an."""
@@ -292,6 +651,17 @@ class ODriveMowerController:
     def _poll_currents(self) -> None:
         for node_id in self.node_ids:
             self._send_rtr(node_id, CMD_GET_IQ, dlc=8)
+
+    def _poll_next_current(self) -> int:
+        """Fragt genau einen Node ab, um RTR/Antwort-Bursts zu vermeiden."""
+        if not self.node_ids:
+            raise RuntimeError("Keine ODrive-Nodes konfiguriert")
+        with self._lock:
+            index = self._current_poll_index % len(self.node_ids)
+            self._current_poll_index = (index + 1) % len(self.node_ids)
+            node_id = self.node_ids[index]
+        self._send_rtr(node_id, CMD_GET_IQ, dlc=8)
+        return node_id
 
     def start_monitor(self) -> None:
         """Startet die Stromueberwachung; IDLE-Polling ist optional."""
@@ -364,6 +734,12 @@ class ODriveMowerController:
         success, error = self.clear_watchdog_errors()
         if not success:
             return success, error
+        pending, send_errors = self._request_idle_verified()
+        if pending:
+            details = f"ODrive-Achsen nicht IDLE: nodes {pending}"
+            if send_errors:
+                details += f"; Sendefehler: {'; '.join(send_errors)}"
+            return False, details
         with self._lock:
             self._system_stop_pending = False
         try:
@@ -440,7 +816,12 @@ class ODriveMowerController:
                 self._require_live_nodes()
                 self._set_input_rpm(rpm)
                 if bool(getattr(self.config, 'current_monitor_enabled', True)):
-                    self._poll_currents()
+                    # Nicht drei RTRs unmittelbar hintereinander senden. Auf
+                    # realer Hardware fielen nach rund 20 s alle GET_IQ-
+                    # Antworten aus, während Heartbeats weiterliefen. Das
+                    # Round-Robin-Polling verteilt Requests und Antworten auf
+                    # drei Kommandozyklen und behält den Fail-Safe bei.
+                    self._poll_next_current()
                     timeout_error = self._check_current_response_timeout(time.monotonic())
                     if timeout_error:
                         self._request_system_stop(timeout_error)
@@ -515,6 +896,28 @@ class ODriveMowerController:
             )
         self._maybe_clear_startup_watchdog_errors()
 
+    def on_sensorless_estimates(
+        self,
+        node_id: int,
+        position: float,
+        velocity: float,
+    ) -> None:
+        """Speichert Sensorless-Schaetzwerte fuer die Anlaufvalidierung."""
+        node_id = int(node_id)
+        if node_id not in self.node_ids:
+            return
+        if not (
+            math.isfinite(float(position)) and math.isfinite(float(velocity))
+        ):
+            return
+        with self._lock:
+            self.odrive_sensorless[node_id] = {
+                'position': float(position),
+                'velocity': float(velocity),
+                'rpm': float(velocity) * 60.0,
+                'last_seen': time.monotonic(),
+            }
+
     def on_heartbeat(self, node_id: int, error: int, state: int) -> None:
         """Verarbeitet ODrive-Heartbeat-Nachrichten vom CAN-Reader.
 
@@ -550,7 +953,11 @@ class ODriveMowerController:
                 # tearing-down: sonst latched jeder Fehler-Heartbeat running
                 # sofort wieder auf False und start() kann den ODrive nie per
                 # Clear_Errors (0x018) entstoeren -> "nur einmal startbar".
-                if prev_error == 0 and self.running:
+                if (
+                    prev_error == 0
+                    and self.running
+                    and not self.startup_status.get('active')
+                ):
                     should_trip = True
                     trip_reason = f"ODrive node={node_id} error=0x{error:08X} state={state}"
                 self.logger.error(
@@ -581,6 +988,7 @@ class ODriveMowerController:
             odrive_state = self.odrive_state
             odrive_errors = dict(self.odrive_errors)
             odrive_states = dict(self.odrive_states)
+            active_axis_nodes = self._active_axis_nodes_locked()
             missing_heartbeats = self._missing_heartbeats_locked()
             heartbeat_ages = {
                 node_id: (
@@ -602,13 +1010,37 @@ class ODriveMowerController:
                 }
                 for node_id in self.node_ids
             }
+            sensorless = {
+                node_id: {
+                    'rpm': self.odrive_sensorless[node_id]['rpm'],
+                    'age_s': (
+                        None
+                        if self.odrive_sensorless[node_id]['last_seen'] <= 0.0
+                        else round(
+                            time.monotonic()
+                            - self.odrive_sensorless[node_id]['last_seen'],
+                            2,
+                        )
+                    ),
+                }
+                for node_id in self.node_ids
+            }
+            startup_status = {
+                **self.startup_status,
+                'validated_nodes': list(self.startup_status['validated_nodes']),
+            }
             status_error = error or self.last_error
             if missing_heartbeats and not status_error:
                 status_error = f"ODrive heartbeat timeout: nodes {missing_heartbeats}"
         return {
             "success": success,
             "enabled": self.enabled,
-            "running": running,
+            # Never report the mower as stopped while a live heartbeat still
+            # says that an axis is active.  ``command_running`` remains the
+            # host-side command-thread state for diagnostics.
+            "running": running or bool(active_axis_nodes),
+            "command_running": running,
+            "active_axis_nodes": active_axis_nodes,
             "rpm": rpm,
             "commanded_rpm": commanded_rpm,
             "min_rpm": int(self.config.min_rpm),
@@ -626,6 +1058,11 @@ class ODriveMowerController:
             "odrive_missing_heartbeats": missing_heartbeats,
             "odrive_heartbeat_ages": heartbeat_ages,
             "odrive_currents": currents,
+            "odrive_sensorless": sensorless,
+            "startup_status": startup_status,
+            "sequential_start_enabled": bool(
+                getattr(self.config, 'sequential_start_enabled', True)
+            ),
             "current_monitor_enabled": bool(getattr(self.config, 'current_monitor_enabled', True)),
             "current_trip_a": float(getattr(self.config, 'current_trip_a', 25.0)),
             "current_trip_duration_s": float(getattr(self.config, 'current_trip_duration_s', 0.5)),

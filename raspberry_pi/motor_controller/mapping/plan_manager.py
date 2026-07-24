@@ -71,6 +71,7 @@ class MowingPlanManager:
         map_name: str,
         plan: Optional[Dict[str, Any]] = None,
         start_segment_index: Optional[int] = None,
+        start_coordinate: Optional[List[float]] = None,
         start_pose: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         loaded = {"plan": plan} if plan is not None else self.load_plan(map_name)
@@ -113,6 +114,7 @@ class MowingPlanManager:
                 executable = self.executable_segments(
                     payload,
                     start_segment_index=start_segment_index,
+                    start_coordinate=start_coordinate,
                     start_pose=start_pose or pose,
                 )
             except ValueError as exc:
@@ -131,6 +133,7 @@ class MowingPlanManager:
         self,
         plan: Dict[str, Any],
         start_segment_index: Optional[int] = None,
+        start_coordinate: Optional[List[float]] = None,
         start_pose: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         if self._unsafe_transition_count(plan) > 0:
@@ -159,10 +162,14 @@ class MowingPlanManager:
         current_end = None
         previous_index = None
         start_coord = self._pose_coord(start_pose)
+        selected_start = self._validated_coord(start_coordinate)
 
         for segment in sequence:
-            coords = self._oriented_track_coords(segment, current_end or start_coord)
-            if current_end is None and start_coord is not None:
+            if current_end is None and selected_start is not None:
+                coords = self._coords_from_selected_start(segment, selected_start)
+            else:
+                coords = self._oriented_track_coords(segment, current_end or start_coord)
+            if current_end is None and selected_start is None and start_coord is not None:
                 trimmed = self._trim_coords_from_point(coords, start_coord, max_distance_m=1.5)
                 if trimmed is not None:
                     coords = trimmed
@@ -227,14 +234,18 @@ class MowingPlanManager:
             direction = segment.get("direction", "forward")
         if direction == "reverse" and not self.reverse_track_supported:
             raise ValueError("Plan enthält Rückwärtssegmente, Ausführung noch nicht unterstützt")
+        track_coords = coordinates or self._coords(segment)
         return {
             "type": "mow",
             "source_type": segment.get("type"),
             "source_index": segment.get("segment_index"),
             "mode": "track",
             "direction": direction,
-            "coordinates": coordinates or self._coords(segment),
-            "length_m": float(segment.get("length_m", 0.0) or 0.0),
+            "coordinates": track_coords,
+            "length_m": sum(
+                self._coord_distance_m(track_coords[index], track_coords[index + 1])
+                for index in range(len(track_coords) - 1)
+            ),
         }
 
     def _transition_segment(
@@ -278,6 +289,70 @@ class MowingPlanManager:
         forward = self._coord_distance_m(coords[0], target)
         reverse = self._coord_distance_m(coords[-1], target)
         return list(reversed(coords)) if reverse < forward else coords
+
+    def _coords_from_selected_start(
+        self,
+        segment: Dict[str, Any],
+        point: List[float],
+    ) -> List[List[float]]:
+        """Start the first route segment at the exact UI-selected path point."""
+        coords = self._coords(segment)
+        if len(coords) < 2:
+            raise ValueError("Gewählte Abfahrposition hat keinen fahrbaren Pfad")
+
+        best_index = min(
+            range(len(coords) - 1),
+            key=lambda index: self._point_to_line_distance_m(point, coords[index], coords[index + 1]),
+        )
+        distance = self._point_to_line_distance_m(point, coords[best_index], coords[best_index + 1])
+        if distance > 1.0:
+            raise ValueError("Gewählte Abfahrposition liegt nicht auf dem gewählten Pfad")
+
+        if self._is_closed(coords):
+            open_ring = coords[:-1]
+            next_index = (best_index + 1) % len(open_ring)
+            rotated = open_ring[next_index:] + open_ring[:next_index]
+            return [point] + rotated + [point]
+
+        trimmed = [point] + coords[best_index + 1:]
+        if len(trimmed) < 2 or self._coord_distance_m(trimmed[0], trimmed[-1]) < 0.02:
+            raise ValueError("Gewählte Abfahrposition liegt am Ende des Plans")
+        return trimmed
+
+    @staticmethod
+    def _point_to_line_distance_m(point: List[float], start: List[float], end: List[float]) -> float:
+        """Approximate point-to-segment distance in a local metric projection."""
+        import math
+
+        latitude = math.radians(float(point[1]))
+        lon_scale = 111320.0 * max(0.01, math.cos(latitude))
+        lat_scale = 110540.0
+        ax = (float(start[0]) - float(point[0])) * lon_scale
+        ay = (float(start[1]) - float(point[1])) * lat_scale
+        bx = (float(end[0]) - float(point[0])) * lon_scale
+        by = (float(end[1]) - float(point[1])) * lat_scale
+        dx = bx - ax
+        dy = by - ay
+        denominator = dx * dx + dy * dy
+        if denominator <= 1e-12:
+            return math.hypot(ax, ay)
+        t = max(0.0, min(1.0, -(ax * dx + ay * dy) / denominator))
+        return math.hypot(ax + t * dx, ay + t * dy)
+
+    @staticmethod
+    def _validated_coord(coord: Optional[List[float]]) -> Optional[List[float]]:
+        if coord is None:
+            return None
+        if not isinstance(coord, (list, tuple)) or len(coord) < 2:
+            raise ValueError("start_coordinate muss [Längengrad, Breitengrad] sein")
+        try:
+            lon = float(coord[0])
+            lat = float(coord[1])
+        except (TypeError, ValueError):
+            raise ValueError("start_coordinate enthält ungültige Werte")
+        if not (-180.0 <= lon <= 180.0 and -90.0 <= lat <= 90.0):
+            raise ValueError("start_coordinate liegt außerhalb gültiger Grenzen")
+        return [lon, lat]
 
     def _trim_coords_from_point(
         self,

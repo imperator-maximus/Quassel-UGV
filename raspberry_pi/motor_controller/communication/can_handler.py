@@ -40,7 +40,7 @@ class CANHandler:
         # CAN-Bus
         self.can_available = CAN_AVAILABLE
         self.can_bus: Optional[can.interface.Bus] = None
-        self.can_enabled = True
+        self.can_enabled = bool(getattr(config, 'enabled', True))
         
         # Protokoll
         self.protocol = CANProtocol(
@@ -57,6 +57,11 @@ class CANHandler:
         self._sensor_data: Dict[str, Any] = {}
         self._sensor_data_lock = threading.Lock()
         self._last_sensor_data_monotonic = 0.0
+        self._active_sensor_source = 'can'
+        self._sensor_sources: Dict[str, Dict[str, Any]] = {
+            'can': {'data': {}, 'last_seen_monotonic': 0.0},
+            'wifi': {'data': {}, 'last_seen_monotonic': 0.0},
+        }
 
         # Empfangene ODrive/ODESC-Heartbeats. Diese Erfassung ist absichtlich
         # unabhaengig von der Maehdeck-Steuerung, damit die Web-Oberflaeche den
@@ -71,8 +76,10 @@ class CANHandler:
         self.navigation_command_callback: Optional[Callable] = None
         self.odrive_heartbeat_callback: Optional[Callable] = None
         self.odrive_iq_callback: Optional[Callable] = None
+        self.odrive_sensorless_callback: Optional[Callable] = None
+        self.sensor_transport_status_callback: Optional[Callable] = None
 
-        if self.can_available:
+        if self.can_available and self.can_enabled:
             self._init_can_bus()
     
     def _init_can_bus(self):
@@ -91,6 +98,9 @@ class CANHandler:
     
     def start_reader(self):
         """Startet CAN-Reader-Thread"""
+        if not self.can_enabled:
+            self.logger.info("CAN-Reader deaktiviert (kein CAN-Teilnehmer konfiguriert)")
+            return
         if self.reader_running:
             self.logger.warning("CAN-Reader läuft bereits")
             return
@@ -143,7 +153,7 @@ class CANHandler:
                     if json_str:
                         try:
                             data = json.loads(json_str)
-                            self._process_sensor_data(data)
+                            self._process_sensor_data(data, source='can')
                             error_count = 0  # Reset bei Erfolg
                         
                         except json.JSONDecodeError as e:
@@ -181,6 +191,23 @@ class CANHandler:
                         except Exception as e:
                             self.logger.error(f"❌ ODrive-IQ Callback Fehler: {e}")
 
+                # ODrive CAN-Simple GET_SENSORLESS_ESTIMATES (cmd 0x15):
+                # [float32 position estimate][float32 velocity estimate].
+                elif (
+                    (msg.arbitration_id & 0x1F) == 0x15
+                    and not getattr(msg, 'is_remote_frame', False)
+                    and len(msg.data) >= 8
+                ):
+                    node_id = msg.arbitration_id >> 5
+                    position, velocity = struct.unpack("<ff", bytes(msg.data[:8]))
+                    if self.odrive_sensorless_callback:
+                        try:
+                            self.odrive_sensorless_callback(node_id, position, velocity)
+                        except Exception as e:
+                            self.logger.error(
+                                f"❌ ODrive-Sensorless Callback Fehler: {e}"
+                            )
+
                 # Alte Buffers aufräumen
                 self.protocol.cleanup_old_buffers()
             
@@ -199,7 +226,7 @@ class CANHandler:
         
         self.logger.info("CAN-Reader-Loop beendet")
     
-    def _process_sensor_data(self, data: Dict[str, Any]):
+    def _process_sensor_data(self, data: Dict[str, Any], source: str = 'can'):
         """
         Verarbeitet Daten vom Sensor Hub (Thread-Safe).
 
@@ -219,9 +246,20 @@ class CANHandler:
                 self.logger.debug(f"📡 Nav-Command ohne Listener verworfen: {cmd}")
             return
 
+        source = str(source).strip().lower()
+        if source not in ('can', 'wifi'):
+            raise ValueError(f"Unbekannte SensorHub-Quelle: {source}")
+
+        now = time.monotonic()
         with self._sensor_data_lock:
+            self._sensor_sources[source] = {
+                'data': dict(data),
+                'last_seen_monotonic': now,
+            }
+            if source != self._active_sensor_source:
+                return
             self._sensor_data = data
-            self._last_sensor_data_monotonic = time.monotonic()
+            self._last_sensor_data_monotonic = now
 
         # Callback aufrufen
         if self.sensor_data_callback:
@@ -229,6 +267,21 @@ class CANHandler:
                 self.sensor_data_callback(data)
             except Exception as e:
                 self.logger.error(f"❌ Sensor-Data Callback Fehler: {e}")
+
+    def inject_sensor_data(self, data: Dict[str, Any], source: str = 'wifi') -> None:
+        """Speist Telemetrie eines alternativen Transports ein."""
+        self._process_sensor_data(data, source=source)
+
+    def set_active_sensor_source(self, source: str) -> None:
+        """Waehlt CAN oder WiFi als alleinige Quelle fuer Regelung/Safety."""
+        source = str(source).strip().lower()
+        if source not in ('can', 'wifi'):
+            raise ValueError("SensorHub-Quelle muss 'can' oder 'wifi' sein")
+        with self._sensor_data_lock:
+            self._active_sensor_source = source
+            cached = self._sensor_sources[source]
+            self._sensor_data = dict(cached['data'])
+            self._last_sensor_data_monotonic = cached['last_seen_monotonic']
     
     def get_sensor_data(self) -> Dict[str, Any]:
         """
@@ -340,6 +393,17 @@ class CANHandler:
         """
         self.odrive_iq_callback = callback
 
+    def set_odrive_sensorless_callback(self, callback: Callable):
+        """Setzt den Listener fuer Sensorless-Schaetzwerte (cmd 0x15).
+
+        Signature: callback(node_id: int, position: float, velocity: float)
+        """
+        self.odrive_sensorless_callback = callback
+
+    def set_sensor_transport_status_callback(self, callback: Callable):
+        """Registriert Detailstatus eines alternativen Sensortransports."""
+        self.sensor_transport_status_callback = callback
+
     def _record_odrive_heartbeat(self, node_id: int, error: int, state: int):
         """Speichert den letzten Heartbeat eines ODrive-Knotens."""
         with self._odrive_heartbeats_lock:
@@ -380,8 +444,21 @@ class CANHandler:
         now = time.monotonic()
         with self._sensor_data_lock:
             sensor_last_seen = self._last_sensor_data_monotonic
+            active_sensor_source = self._active_sensor_source
+            source_snapshot = {
+                source: dict(record)
+                for source, record in self._sensor_sources.items()
+            }
         sensor_age = None if sensor_last_seen <= 0.0 else max(0.0, now - sensor_last_seen)
         sensor_online = sensor_age is not None and sensor_age <= float(sensor_timeout_s)
+        sensor_sources = {}
+        for source, record in source_snapshot.items():
+            last_seen = float(record.get('last_seen_monotonic', 0.0))
+            age = None if last_seen <= 0.0 else max(0.0, now - last_seen)
+            sensor_sources[source] = {
+                'online': age is not None and age <= float(sensor_timeout_s),
+                'age_s': None if age is None else round(age, 2),
+            }
 
         expected_nodes = [] if expected_odrive_node_ids is None else [
             int(node_id) for node_id in expected_odrive_node_ids
@@ -431,6 +508,12 @@ class CANHandler:
         all_expected_online = bool(expected_nodes) and len(expected_online) == len(expected_nodes)
         all_expected_healthy = all_expected_online and not expected_error_nodes
         interface_online = bool(self.can_available and self.can_enabled and self.reader_running)
+        wifi_client_status = None
+        if self.sensor_transport_status_callback:
+            try:
+                wifi_client_status = self.sensor_transport_status_callback()
+            except Exception as exc:
+                wifi_client_status = {'online': False, 'last_error': str(exc)}
 
         return {
             'can_available': self.can_available,
@@ -443,7 +526,10 @@ class CANHandler:
             'sensor_hub': {
                 'online': sensor_online,
                 'age_s': None if sensor_age is None else round(sensor_age, 2),
-                'can_id': self.config.sensor_hub_id,
+                'transport': active_sensor_source,
+                'can_id': self.config.sensor_hub_id if active_sensor_source == 'can' else None,
+                'sources': sensor_sources,
+                'wifi_client': wifi_client_status,
             },
             'odrives': {
                 'expected_node_ids': expected_nodes,

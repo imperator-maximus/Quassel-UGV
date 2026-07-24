@@ -1,6 +1,7 @@
 # 👑 Quassel UGV - Sensor Hub 👑
 
-RTK-GPS + WitMotion USB-IMU + CAN-Telemetrie für den **Orange Pi Zero 2W (DietPi)**.
+RTK-GPS + WitMotion USB-IMU + CAN- und HTTP/WiFi-Telemetrie für den
+**Orange Pi Zero 2W (DietPi)**.
 
 > Der aktuelle produktive Deploy-Stand steht in **`DEPLOY_ORANGE_PI.md`**.
 
@@ -15,12 +16,14 @@ RTK-GPS + WitMotion USB-IMU + CAN-Telemetrie für den **Orange Pi Zero 2W (DietP
 - **Bing Maps Integration** - Direkter Link zu aktuellen Koordinaten
 - **GPS-NTRIP Bridge** - Automatisches Routing von RTK-Daten zum GPS
 - **CAN-Telemetrie** - JSON-basierte Sensordaten über `can0`
+- **WiFi-Telemetrie** - dieselbe kompakte, korrigierte Pose über
+  `GET /api/telemetry`
 
 ## 📋 Voraussetzungen
 
 ### Hardware
 - Orange Pi Zero 2W
-- USB-CAN-Adapter, aktuell CANable2 (`can0` via `slcand`)
+- DSD TECH SH-C30A USB-CAN-Adapter (`can0` via nativem `gs_usb`/SocketCAN)
 - Classical CAN 2.0 bei 250 kbit/s; CAN FD wird nicht verwendet
 - Holybro UM982 RTK-GPS per USB (`/dev/serial/by-id/...`)
 - WitMotion USB-IMU (`/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`)
@@ -92,6 +95,11 @@ http://192.168.178.20/
 - **Koordinaten** - Latitude, Longitude mit Bing Maps Link
 
 ## 🔧 Konfiguration
+
+CAN ist optional. Bei WLAN-Telemetrie kann `CAN_ENABLED=0` gesetzt und
+`can-interface.service` deaktiviert werden. `sensor-hub.service` startet dann
+auch ohne angeschlossenen USB-CAN-Adapter; Implementierung und Konfiguration
+für eine spätere Reaktivierung bleiben erhalten.
 
 ### config.py
 

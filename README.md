@@ -7,7 +7,7 @@ A professional autonomous UGV system with an Orange-Pi-based sensor hub, RTK-GPS
 This project implements a complete autonomous UGV system featuring:
 - **Dual-antenna RTK-GPS** (Holybro UM982) for precise positioning and heading
 - **WitMotion USB-IMU** for roll/pitch/yaw orientation
-- **CAN Bus Integration** for sensor and motor telemetry
+- **CAN Bus Integration** for motor telemetry plus configurable CAN/WiFi SensorHub telemetry
 - **Real-time Web Interface** with Bing Maps satellite view
 - **Modular Architecture** with Orange Pi Zero 2W sensor hub and Pi 3 controller
 
@@ -29,18 +29,16 @@ This project implements a complete autonomous UGV system featuring:
 │  │  └─ USB Serial (/dev/serial/by-id)   │
 │  ├─ WitMotion USB-IMU                   │
 │  │  └─ USB Serial (/dev/serial/by-id)   │
-│  └─ USB-CAN Adapter (CANable2)          │
-│     └─ SocketCAN can0, Classical CAN 2.0│
+│  └─ SensorHub HTTP API                  │
 └─────────────────────────────────────────┘
             │
-            │ CAN Bus
+            │ HTTP/WiFi telemetry
             ▼
 ┌─────────────────────────────────────────┐
 │  CHASSIS (Pi 3 + Motor Control)         │
 │  ├─ WebApp (Python-based)               │
-│  ├─ USB-CAN Adapter (gs_usb)            │
-│  │  └─ SocketCAN can0, Classical CAN 2.0│
-│  ├─ ODrive(s) with integrated CAN       │
+│  ├─ 2× direct ODrive USB/Fibre          │
+│  │  └─ 3 used axes by serial + index    │
 │  └─ WLAN Access Point                   │
 └─────────────────────────────────────────┘
             │
@@ -49,17 +47,17 @@ This project implements a complete autonomous UGV system featuring:
     [ Browser-Client ]
 ```
 
-### CAN Hardware Assignment
+### Production Transport Assignment
 
 All CAN participants use **Classical CAN 2.0** with standard 8-byte data
 frames. CAN FD is not used.
 
-| System | CAN hardware | SocketCAN | Bitrate/profile |
-|--------|--------------|-----------|-----------------|
-| Production sensor hub | Orange Pi Zero 2W + USB-CAN adapter (currently CANable2) | `can0` | 250 kbit/s |
-| Main UGV controller | Raspberry Pi 3 + USB-CAN adapter (`gs_usb`) | `can0` | 250 kbit/s |
-| Former UGV test stand (offline) | Raspberry Pi + USB-CAN adapter | `can0` | 250 kbit/s |
-| ODrive motor controllers | Integrated CAN interface, SimpleCAN protocol | CAN node | Same bitrate as the connected bus |
+| System | Active transport | Profile |
+|--------|------------------|---------|
+| Production sensor hub → main UGV | HTTP/WiFi | `/api/telemetry` |
+| Main UGV → ODrive boards | Two direct USB/Fibre links | serial number + axis index |
+| Former UGV test stand (offline) | USB-CAN `can0` | Classical CAN 2.0, 250 kbit/s |
+| Legacy ODrive fallback | Integrated SimpleCAN | Classical CAN 2.0, 250 kbit/s |
 
 ### Physical Vehicle Layout
 
@@ -86,7 +84,7 @@ frames. CAN FD is not used.
 |-----------|----------|-----------|
 | UM982 GPS | RTK Position + Dual-Antenna Heading | USB Serial /dev/serial/by-id |
 | WitMotion USB-IMU | 9-DoF IMU incl. orientation frames | USB Serial |
-| USB-CAN adapter (CANable2) | Classical CAN 2.0 gateway | SocketCAN can0 |
+| DSD TECH SH-C30A USB-CAN adapter (`gs_usb`) | Classical CAN 2.0 gateway | SocketCAN can0 |
 | `sensor_hub_app.py` | Web API + CAN telemetry + sensor status | Systemd Service |
 
 **Data Flow:**
@@ -99,8 +97,8 @@ frames. CAN FD is not used.
 | Component | Function |
 |-----------|----------|
 | Python WebApp | Flask/FastAPI |
-| USB-CAN adapter (`gs_usb`) | Classical CAN 2.0 via SocketCAN `can0` |
-| CAN Listener | Receives sensor data and ODrive messages |
+| ODrive USB/Fibre | Controls three axes and reads errors/current directly |
+| SensorHub HTTP client | Receives RTK/IMU telemetry over WiFi |
 | WebSocket/SSE | Real-time push to browser |
 | Bing Maps API | Map display |
 
@@ -184,7 +182,7 @@ python3 web_app.py
 
 ### Sensor Hub (Orange Pi Zero 2W)
 - **MCU**: Allwinner H616
-- **CAN Interface**: USB-CAN adapter, currently CANable2 (`can0`, Classical CAN 2.0)
+- **CAN Interface**: DSD TECH SH-C30A via native `gs_usb` (`can0`, Classical CAN 2.0)
 - **GPS**: Holybro UM982 (Dual-antenna RTK)
   - USB serial via `/dev/serial/by-id/...`
 - **IMU**: WitMotion USB-IMU
@@ -194,7 +192,7 @@ python3 web_app.py
 
 ### Controller (Pi 3)
 - **MCU**: Broadcom BCM2837 (ARM Cortex-A53 Quad-Core)
-- **CAN Interface**: USB-CAN adapter (`gs_usb`, Classical CAN 2.0)
+- **Mower interface**: two direct USB/Fibre links to ODrive Board A/B
 - **Motor Control**: GPIO 18/19 (Hardware-PWM)
 - **Operating System**: Raspberry Pi OS (Debian-based)
 - **Network**: WiFi + SSH access (nicolay@raspberrycan)
@@ -203,7 +201,7 @@ python3 web_app.py
 **USB Devices:**
 - **Holybro UM982**: USB serial GNSS (`/dev/serial/by-id/...`)
 - **WitMotion IMU**: USB serial IMU (`/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`)
-- **USB-CAN adapter (CANable2)**: `can0` via `slcan-can0.service`
+- **USB-CAN adapter (DSD TECH SH-C30A)**: native `gs_usb` as `can0` via `can-interface.service`
 
 **Reserved/System Pins:**
 - The USB-CAN adapter does not occupy the Orange Pi SPI header.
@@ -249,13 +247,13 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
 - **Smoothing Factor**: 15x PWM period (excellent filtering)
 - **Ripple**: <1% of output voltage
 
-### CAN Bus Configuration
+### Legacy CAN Bus Configuration
 - **Protocol**: Classical CAN 2.0; CAN FD is not used
-- **Unified bitrate**: 250 kbit/s on Orange Pi USB-CAN, main-controller USB-CAN, USB-CAN test profile and connected ODrives
+- **Unified bitrate**: 250 kbit/s on all legacy/test CAN participants
 - **Frames**: maximum 8 data bytes; the JSON protocol is split across multiple Classical CAN frames
 - **Termination**: 120Ω resistor on both ends
 - **Ground**: Common ground connection required
-- **Interface**: `can0` on Orange Pi, main Raspberry Pi and UGV test Raspberry Pi
+- **Main UGV**: CAN disabled; SensorHub uses WiFi and ODrives use direct USB
 - **TX Queue**: Configured with txqueuelen=1000 for improved buffer performance
 
 ### JSON CAN Protocol
@@ -325,14 +323,16 @@ GPIO12 (PWM) ----[1kΩ]----+-----> Analog Output (to Mower Controller)
 - **Hardware-PWM independence** (continues running if Python crashes)
 - **Command timeout monitoring** (2-second timeout → automatic neutral)
 - **Emergency stop functionality** with signal handlers
-- **CAN fail-safe**: loss of SensorHub telemetry, an ODrive heartbeat, or the
-  SocketCAN reader latches a system stop for drive and mower deck
-- **Mower overcurrent monitor**: CANSimple `GET_IQ` is polled at 10 Hz for
+- **Two-stage SensorHub fail-safe**: a short telemetry loss pauses drive and
+  route while leaving the mower deck running; a sustained loss latches the
+  full stop. An autonomous route resumes automatically after fresh telemetry;
+  ODrive USB loss still stops immediately.
+- **Mower overcurrent monitor**: native USB telemetry is polled at 10 Hz for
   nodes 0/1/2; 25 A for 0.5 s or 29 A for 0.1 s latches the same stop
 - **Local ODrive watchdog**: each used axis must have a 1.0 s watchdog enabled,
-  so the mower disarms even when a broken CAN cable prevents an IDLE command
+  so the mower disarms even when a broken USB link prevents an IDLE command
 - **Manual reset**: the web UI shows `STOPP`; reset is accepted only after the
-  CAN network is healthy and no non-watchdog ODrive error remains
+  all USB axes are healthy and no non-watchdog ODrive error remains
 - **Service integration** with automatic restart on failure
 
 ## 🎮 System Commands
@@ -372,11 +372,10 @@ tail -f /var/log/ugv_app.log
 ```
 Sensor Hub (Orange Pi Zero 2W)   Main UGV Controller (Pi 3)
 ├─ GPS (UM982)                   ├─ Web Interface
-├─ IMU (WitMotion USB)           ├─ Motor Control
-└─ USB-CAN Adapter               └─ USB-CAN Adapter (gs_usb)
-        │                                │
-        └──── Classical CAN 2.0 Bus ─────┤
-                   (250 kbit/s)          └─ ODrive(s), integrated CAN
+├─ IMU (WitMotion USB)           ├─ Vehicle PWM control
+└─ HTTP telemetry ─── WiFi ─────┤
+                                 ├─ USB ─ ODrive Board A (axes 0/1)
+                                 └─ USB ─ ODrive Board B (axis 0)
                         │
                         ▼
                   [ Browser Client ]
@@ -743,9 +742,9 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 ### Hardware Support
 - **Orange Pi Zero 2W**: Allwinner H616 sensor hub with USB-CAN adapter
 - **Raspberry Pi 3**: ARM Cortex-A53 Quad-Core
-- **USB-CAN adapter**: Classical CAN 2.0 interface for Orange Pi, main UGV controller and former test stand
+- **USB-CAN adapter**: retained for the former test stand and legacy CAN fallback
 - **InnoMaker RS485 CAN HAT**: retired; its fixed termination and Device Tree overlay are no longer used
-- **ODrive**: motor controller with integrated Classical CAN 2.0 interface
+- **ODrive**: v3.x motor controllers, directly controlled over USB on the main UGV
 - **Holybro UM982**: Dual-antenna RTK-GPS receiver
 - **WitMotion USB-IMU**: IMU sensor with native orientation output
 
@@ -762,7 +761,7 @@ This project evolved from an Orange Cube-based implementation to the current RTK
 
 **Key Achievements:**
 - ✅ Sensor hub architecture (Orange Pi Zero 2W + USB-CAN adapter)
-- ✅ Main UGV controller with USB-CAN adapter (`gs_usb`)
+- ✅ Main UGV controller with two direct ODrive USB/Fibre links
 - ✅ UGV test stand with USB-CAN adapter and ODrives with integrated CAN
 - ✅ RTK-GPS + IMU integration
 - ✅ JSON-based CAN communication (robust, human-readable)
