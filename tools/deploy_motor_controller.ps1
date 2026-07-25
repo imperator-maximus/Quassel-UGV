@@ -25,6 +25,9 @@ function Invoke-Step {
     Write-Host ""
     Write-Host "==> $Name" -ForegroundColor Cyan
     & $Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "Step '$Name' failed with exit code $LASTEXITCODE"
+    }
 }
 
 Set-Location $repoRoot
@@ -47,15 +50,33 @@ Invoke-Step "Prepare remote staging directory" {
 
 Invoke-Step "Upload motor-controller package, template, and static assets" {
     scp -4 -r "raspberry_pi/motor_controller/." "${remote}:$remoteTmp/"
+    if ($LASTEXITCODE -ne 0) { throw "Motor-controller upload failed" }
     scp -4 "raspberry_pi/templates/index.html" "${remote}:$remoteTmp/index.html"
+    if ($LASTEXITCODE -ne 0) { throw "Template upload failed" }
     scp -4 -r "raspberry_pi/static/." "${remote}:$remoteStaticTmp/"
+    if ($LASTEXITCODE -ne 0) { throw "Static asset upload failed" }
     scp -4 "raspberry_pi/can-interface.service" "${remote}:$remoteCanServiceTmp"
+    if ($LASTEXITCODE -ne 0) { throw "CAN service upload failed" }
     scp -4 "raspberry_pi/motor-controller-v2.service" "${remote}:$remoteMotorServiceTmp"
+    if ($LASTEXITCODE -ne 0) { throw "Motor service upload failed" }
     scp -4 "scripts/configure_odrive_watchdog.py" "${remote}:$remoteODriveWatchdogTmp"
 }
 
 $deployCommand = @"
 set -e
+staging_test_root=/tmp/ugv_deploy_test_root
+rm -rf "`$staging_test_root"
+mkdir -p "`$staging_test_root"
+ln -s $remoteTmp "`$staging_test_root/motor_controller"
+mkdir -p /tmp/templates
+cp $remoteTmp/index.html /tmp/templates/index.html
+mkdir -p /tmp/static
+cp -a $remoteStaticTmp/. /tmp/static/
+cd "`$staging_test_root"
+if ! PYTHONPATH="`$staging_test_root:/home/$User/.venvs/odrive056/lib/python3.11/site-packages" python3 -m unittest discover -s motor_controller/tests -v; then
+  echo 'Remote staging tests failed; running installation was not changed.' >&2
+  exit 1
+fi
 ts=`$(date +%Y%m%d_%H%M%S)
 backup=/home/$User/backup/motor_controller_`$ts
 mkdir -p /home/$User/backup
@@ -88,8 +109,6 @@ if [ "`$can_enabled" = true ]; then
 else
   sudo systemctl disable can-interface.service 2>/dev/null || true
 fi
-cd /home/$User
-PYTHONPATH=/home/$User/.venvs/odrive056/lib/python3.11/site-packages python3 -m unittest discover -s motor_controller/tests -v
 sudo systemctl start motor-controller-v2.service
 # Two native ODrive/Fibre discoveries take several seconds during startup.
 sleep 15

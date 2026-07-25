@@ -124,6 +124,39 @@ logging:
 - `POST /api/joystick` - Joystick-Input
 - `GET /api/sensor/status` - Sensor-Status anfordern
 - `POST /api/sensor/restart` - Sensor Hub neu starten
+- `POST /api/mapping/maps/<name>/plan/simulate` - einen Plan ohne Hardware mit
+  dem produktiven Navigationscontroller und einem kinematischen Fahrzeugmodell
+  simulieren
+
+## Offline-Fahrtsimulation
+
+Die Kartenansicht bietet fuer jeden berechneten oder geladenen Plan
+`Fahrt simulieren`. Die Simulation arbeitet auf den tatsaechlich ausfuehrbaren
+Segmenten nach Startpunktauswahl, Ringrotation und Uebergangsrouting. Sie nutzt
+den produktiven `NavigationController`; nur Motoren und Posequelle werden durch
+ein einfaches Skid-Steer-Modell ersetzt.
+
+Das Ergebnis enthaelt und visualisiert:
+
+- simulierte Fahrspur fuer Vorwaerts-, Rueckwaerts- und Uebergangssegmente,
+- Fahrzeug-Footprint an der End- oder Stopposition,
+- Segmentzustand, Fahrzeit und tatsaechliche Strecke,
+- No-Go-Warnungen und denselben Footprint-Stopp wie bei der realen Ausfuehrung.
+
+Das Modell ist keine Gras-/Reifen-Physiksimulation. Es dient als reproduzierbare
+Vorpruefung fuer Segmentreihenfolge, Uebergaenge, Startposition, Controller-
+Verhalten und Sicherheitsabstaende. Feldtests bleiben fuer Traktion, Schlupf,
+Nachlauf und reale Motorreaktion erforderlich.
+
+### Geplante Coverage-Optimierung
+
+Schmale Restkeile, in die keine mindestens 2 m lange reine Restbahn passt,
+bleiben derzeit unbefahren. Eine kuenftige Planerstrategie darf solche Bahnen
+in bereits durch Konturfahrten gemaehte Innenbereiche verlaengern. Der doppelt
+gemaehte Anteil ist dabei ein erlaubter Verbindungskorridor und macht die
+eigentliche Restbahn lang genug fuer eine stabile Vor-/Rueckwaertsfahrt. Diese
+Strategie soll optional bleiben und im Simulator anhand von Restflaeche,
+Doppelmaehstrecke, Wendungen und Sicherheitsabstand verglichen werden.
 
 ## 🔧 Features
 

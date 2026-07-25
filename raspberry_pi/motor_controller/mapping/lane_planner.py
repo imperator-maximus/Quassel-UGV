@@ -81,6 +81,7 @@ class LanePlanner:
         mow_area = main_poly.difference(sub_union) if sub_union is not None else main_poly
         if mow_area.is_empty:
             return {"success": False, "error": "Mähfläche ist nach Sub-Puffer leer"}
+        vehicle_blocked = TransitionRouter.blocked_for_vehicle(sub_union)
 
         plan = MowingPlan(
             name=name,
@@ -98,7 +99,15 @@ class LanePlanner:
                 exterior_xy = list(poly.exterior.coords)
                 lane_line = LineString(exterior_xy)
                 lane_coverage = lane_line.buffer(self.parameters.cut_width_m / 2.0, cap_style=2, join_style=2)
-                if sub_union is not None and lane_line.intersects(sub_union.buffer(self.parameters.cut_width_m / 2.0)):
+                protected = (
+                    vehicle_blocked
+                    if vehicle_blocked is not None and not vehicle_blocked.is_empty
+                    else (
+                        sub_union.buffer(self.parameters.cut_width_m / 2.0)
+                        if sub_union is not None else None
+                    )
+                )
+                if protected is not None and lane_line.intersects(protected):
                     plan.skipped_sharp_lanes += 1
                     continue
                 exterior = xy_ring_to_latlon(exterior_xy, origin_lat, origin_lon)
@@ -152,6 +161,8 @@ class LanePlanner:
             if sub_contours:
                 covered_area = unary_union(covered_geometries) if covered_geometries else None
                 rest_area = mow_area.difference(covered_area) if covered_area else mow_area
+        if vehicle_blocked is not None and not vehicle_blocked.is_empty:
+            rest_area = rest_area.difference(vehicle_blocked)
         if not rest_area.is_empty:
             plan.rest_lanes = self._generate_rest_lanes(rest_area, LineString, origin_lat, origin_lon)
             for rest_lane in plan.rest_lanes:
@@ -182,12 +193,12 @@ class LanePlanner:
             return sub_contours
 
         spacing = self.parameters.spacing_m
-        cut_half = self.parameters.cut_width_m / 2.0
         allowed_area = mow_area.buffer(0.02)
-        protected = sub_union.buffer(cut_half)
-        for sub_poly in iter_polygons(sub_union):
+        vehicle_blocked = TransitionRouter.blocked_for_vehicle(sub_union)
+        protected = vehicle_blocked if vehicle_blocked is not None else sub_union
+        for sub_poly in iter_polygons(protected):
             for offset_index in range(self.parameters.sub_contour_count):
-                offset_m = cut_half + 0.03 + offset_index * spacing
+                offset_m = 0.05 + offset_index * spacing
                 route_poly = sub_poly.buffer(offset_m)
                 if route_poly.is_empty:
                     continue

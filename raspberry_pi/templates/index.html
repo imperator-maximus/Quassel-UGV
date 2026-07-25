@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="/static/js/mapping_editor.js?v=20260724-7"></script>
+    <script src="/static/js/mapping_editor.js?v=20260725-18"></script>
     <style>
         * {
             margin: 0;
@@ -951,6 +951,54 @@
             width: 100%;
         }
 
+        .active-plan-label {
+            color: #ffd700;
+            font-weight: bold;
+        }
+
+        .plan-info-disclosure {
+            border-top: 1px solid rgba(212, 175, 55, 0.22);
+            padding-top: 7px;
+        }
+
+        .plan-info-disclosure summary {
+            color: #d4af37;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        .simulation-speed {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #d4af37;
+            font-size: 0.9em;
+            font-weight: bold;
+        }
+
+        .simulation-speed select {
+            flex: 1;
+            padding: 7px;
+            border-radius: 8px;
+            border: 1px solid rgba(212, 175, 55, 0.45);
+            background: rgba(0, 0, 0, 0.25);
+            color: #f5f5dc;
+        }
+
+        #planSimulationControls {
+            display: grid;
+            gap: 8px;
+        }
+
+        #planSimulationControls[hidden] {
+            display: none !important;
+        }
+
+        .simulation-legend {
+            color: #d8ffd8;
+            font-size: 0.82em;
+        }
+
         .point-item.active {
             background: rgba(212, 175, 55, 0.22);
             color: #ffd700;
@@ -981,9 +1029,9 @@
             <button class="mower-toggle-btn" id="mowerToggleBtn" onclick="openMowerModal()">🌾 Mäher</button>
         </div>
         <div class="status-bar" id="statusBar">
-            <div class="status-indicator">
-                <div class="status-dot" id="canStatus"></div>
-                <span>CAN Bus</span>
+            <div class="status-indicator" id="rtkInfoIndicator">
+                <div class="status-dot" id="rtkInfoStatus"></div>
+                <span id="rtkInfoStatusText">RTK unbekannt</span>
             </div>
             <div class="status-indicator" id="sensorHubCanIndicator">
                 <div class="status-dot" id="sensorHubCanStatus"></div>
@@ -1139,32 +1187,63 @@
                         </div>
                         <div class="area-summary">
                             <div class="map-row">
-                                <button class="mapping-btn primary" onclick="loadSavedPlan()">Plan laden</button>
+                                <button class="mapping-btn primary" id="planLoadBtn" onclick="loadSavedPlan()">Plan laden</button>
                                 <button class="mapping-btn primary plan-action-control" id="planPlayBtn" onclick="playLoadedPlan()" disabled>Play</button>
                                 <button class="mapping-btn plan-action-control" id="planResumeBtn" onclick="resumeLoadedPlan()" disabled>Fortsetzen</button>
                                 <button class="mapping-btn plan-action-control" id="planPauseBtn" onclick="pausePlanExecution()">Pause</button>
                                 <button class="mapping-btn danger plan-action-control" onclick="stopPlanExecution()">Stop</button>
                                 <button class="mapping-btn plan-action-control" id="mapEditModeBtn" onclick="returnToMapEditMode()" disabled>Kartenmodus</button>
                             </div>
-                            <div class="map-row">
-                                <select class="map-select" id="planSelect" onchange="selectSavedPlan()">
+                            <div class="sub-list" id="planPlayStatus">Play gesperrt · zuerst einen Plan laden</div>
+                            <label class="planner-field">Gespeicherten Plan auswählen
+                                <select class="map-select" id="planSelect">
                                     <option value="">Kein gespeicherter Plan</option>
                                 </select>
-                            </div>
-                            <div class="mapping-status-line">
-                                <span>RTK:</span>
-                                <strong id="planRtkStatus">unbekannt</strong>
-                            </div>
+                            </label>
+                            <div class="mapping-status-line"><span>Aktiver Plan:</span> <strong class="active-plan-label" id="activePlanLabel">Kein Plan geladen</strong></div>
                             <div class="mapping-status-line">
                                 <span>No-Go:</span>
                                 <strong id="planNoGoStatus">unbekannt</strong>
                             </div>
                             <label class="planner-progress">Abfahrposition: <span id="laneProgressValue">0,0%</span>
-                                <input id="laneProgressSlider" type="range" min="0" max="99.9" step="0.1" value="0" oninput="updateLaneProgress(Number(this.value))">
+                                <input id="laneProgressSlider" type="range" min="0" max="99.9" step="0.1" value="0" oninput="updateLaneProgress(Number(this.value)); invalidateLaneSimulationSelection()">
                                 <span class="sub-list" id="laneProgressDetail">0 m / 0 m</span>
                             </label>
-                            <div class="sub-list" id="plannerStatus">Kein Plan geladen</div>
-                            <div class="sub-list" id="planStatus">Kein Plan geladen</div>
+                            <div id="planSimulationControls" hidden>
+                                <label class="sub-list">
+                                    <input id="simulationUseCurrentPose" type="checkbox" onchange="invalidateLaneSimulationSelection()">
+                                    Simulierte Anfahrt ab aktueller RTK-Position
+                                </label>
+                                <label class="simulation-speed">Simulationstempo
+                                    <select id="simulationSpeed">
+                                        <option value="1">1×</option>
+                                        <option value="5">5×</option>
+                                        <option value="10" selected>10×</option>
+                                        <option value="20">20×</option>
+                                        <option value="50">50×</option>
+                                    </select>
+                                </label>
+                                <label class="simulation-speed">Simulationsumfang
+                                    <select id="simulationScope" onchange="invalidateLaneSimulationSelection()">
+                                        <option value="1">1 Plansegment</option>
+                                        <option value="3" selected>3 Plansegmente</option>
+                                        <option value="5">5 Plansegmente</option>
+                                        <option value="all">Gesamter Restplan</option>
+                                    </select>
+                                </label>
+                                <div class="simulation-legend">Berechnete Reglerspur: Magenta vorwärts · Blau rückwärts · Orange Übergang/Anfahrt · gewählter Ausschnitt</div>
+                                <div class="map-row">
+                                    <button class="mapping-btn primary" id="planSimulateBtn" onclick="simulateLanePlan()" disabled>Simulation starten</button>
+                                    <button class="mapping-btn" id="planSimulationPauseBtn" onclick="toggleLaneSimulationPause()" disabled>Pause</button>
+                                    <button class="mapping-btn danger" id="planSimulationStopBtn" onclick="stopLaneSimulation()" disabled>Abbrechen</button>
+                                </div>
+                                <div class="sub-list" id="planSimulationStatus">Noch nicht simuliert</div>
+                            </div>
+                            <details class="plan-info-disclosure">
+                                <summary>Planinformationen</summary>
+                                <div class="sub-list" id="plannerStatus">Kein Plan geladen</div>
+                                <div class="sub-list" id="planStatus">Kein Plan geladen</div>
+                            </details>
                         </div>
                         <div class="point-list map-edit-control" id="pointList"></div>
                     </div>
@@ -1387,15 +1466,7 @@
             const safetyStatus = data.safety_status || {};
             const expectedOdrives = odriveStatus.expected_count || 0;
             const onlineOdrives = odriveStatus.online_count || 0;
-            const interfaceOnline = canStatus.interface_online === true;
-
             // Status-Dots aktualisieren
-            document.getElementById('canStatus').className =
-                'status-dot ' + (interfaceOnline ? 'active' : 'inactive');
-            document.getElementById('canStatus').title = interfaceOnline
-                ? `${canStatus.interface || 'can0'} aktiv, ${(canStatus.bitrate || 0) / 1000} kbit/s`
-                : 'CAN-Interface nicht aktiv';
-
             document.getElementById('sensorHubCanStatus').className =
                 'status-dot ' + (sensorHubStatus.online ? 'active' : 'inactive');
             document.getElementById('sensorHubCanStatusText').textContent =

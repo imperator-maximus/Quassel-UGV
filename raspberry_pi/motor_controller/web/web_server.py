@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..mapping.nogo_monitor import NoGoZoneMonitor
+from ..simulation.path_simulator import MowingPathSimulator, SimulationParameters
 
 try:
     from flask import Flask, render_template, jsonify, request
@@ -73,6 +74,14 @@ class WebServer:
         self.mower_state = False
         self._plan_lock = threading.Lock()
         self._resume_lock = threading.Lock()
+        self._simulation_lock = threading.Lock()
+        self._simulation_state_lock = threading.Lock()
+        self._simulation_cancel_event = threading.Event()
+        self._simulation_state = {
+            'running': False,
+            'phase': 'idle',
+            'started_at': None,
+        }
         self._plan_thread: Optional[threading.Thread] = None
         self._plan_stop_event = threading.Event()
         self._plan_pause_event = threading.Event()
@@ -556,6 +565,17 @@ class WebServer:
                 start_coordinate=data.get('start_coordinate'),
                 start_pose=self.can.get_sensor_data(),
             )
+            self._bind_expected_route(result, data)
+            if result.get('success'):
+                self.logger.info(
+                    "Plan-Check bereit: map=%s start_segment_index=%r start_coordinate=%r "
+                    "route=%s segments=%s",
+                    map_name,
+                    data.get('start_segment_index'),
+                    data.get('start_coordinate'),
+                    result.get('route_signature'),
+                    self._route_log_summary(result.get('executable_segments') or []),
+                )
             if not result.get('success'):
                 self.logger.warning(
                     "Plan-Check abgelehnt: map=%s start_segment_index=%r "
@@ -587,6 +607,205 @@ class WebServer:
             result = self.mapping.check_nogo(plan)
             return jsonify({'success': True, 'nogo_status': result})
 
+        @self.app.route('/api/mapping/maps/<map_name>/plan/simulate', methods=['POST', 'OPTIONS'])
+        def api_mapping_map_plan_simulate(map_name):
+            """Runs the production navigation controller without hardware."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping:
+                return jsonify({'success': False, 'error': 'Mapping deaktiviert'}), 503
+            if not self.navigation or not getattr(self.navigation, 'config', None):
+                return jsonify({'success': False, 'error': 'Navigation deaktiviert'}), 503
+            if self._plan_status.get('running'):
+                return jsonify({
+                    'success': False,
+                    'safe': False,
+                    'state': 'simulation_busy',
+                    'reason': 'Simulation ist während einer realen Planfahrt deaktiviert',
+                }), 409
+            if not self._simulation_lock.acquire(blocking=False):
+                # A closed/reloaded browser cannot abort its old synchronous
+                # request. Supersede that orphaned calculation and briefly
+                # wait for the simulator's cancellation checkpoint.
+                self._simulation_cancel_event.set()
+                if not self._simulation_lock.acquire(timeout=2.0):
+                    return jsonify({
+                        'success': False,
+                        'safe': False,
+                        'state': 'simulation_busy',
+                        'reason': 'Vorherige Simulation wird noch beendet – bitte erneut starten',
+                        'simulation_status': self._get_simulation_state(),
+                    }), 409
+            data = request.get_json(silent=True) or {}
+            self._simulation_cancel_event.clear()
+            self._set_simulation_state({
+                'running': True,
+                'phase': 'route_building',
+                'started_at': time.time(),
+                'map_name': map_name,
+                'step_count': 0,
+            })
+            try:
+                plan = data.get('plan') if isinstance(data.get('plan'), dict) else None
+                if plan is None:
+                    loaded = self.mapping.load_plan(map_name)
+                    if not loaded.get('success'):
+                        return jsonify(loaded), 404
+                    plan = loaded.get('plan')
+                start_pose = data.get('start_pose') if isinstance(data.get('start_pose'), dict) else None
+                if data.get('use_current_pose') is True and self.can:
+                    start_pose = self.can.get_sensor_data()
+                try:
+                    simulator = MowingPathSimulator(
+                        self.mapping.plans,
+                        self.navigation.config,
+                        getattr(self.motor, 'pwm_config', None),
+                    )
+                    result = simulator.simulate(
+                        plan,
+                        start_segment_index=data.get('start_segment_index'),
+                        start_coordinate=data.get('start_coordinate'),
+                        start_heading_deg=data.get('start_heading_deg'),
+                        start_pose=start_pose,
+                        parameters=SimulationParameters.from_payload(data.get('parameters')),
+                        max_source_segments=data.get('max_source_segments'),
+                        cancel_event=self._simulation_cancel_event,
+                        progress_callback=self._set_simulation_state,
+                    )
+                    self.logger.info(
+                        "Plan-Simulation: map=%s start_segment_index=%r start_coordinate=%r "
+                        "current_pose=%s route=%s segments=%s safe=%s state=%s",
+                        map_name,
+                        data.get('start_segment_index'),
+                        data.get('start_coordinate'),
+                        data.get('use_current_pose') is True,
+                        result.get('route_signature'),
+                        self._route_log_summary(result.get('segments') or []),
+                        result.get('safe'),
+                        result.get('state'),
+                    )
+                except (TypeError, ValueError) as exc:
+                    result = {
+                        'success': False,
+                        'safe': False,
+                        'state': 'simulation_error',
+                        'reason': str(exc),
+                    }
+            finally:
+                final_state = {
+                    'running': False,
+                    'phase': result.get('state', 'finished') if 'result' in locals() else 'error',
+                    'finished_at': time.time(),
+                }
+                self._set_simulation_state(final_state)
+                self._simulation_lock.release()
+            return jsonify(result), 200 if result.get('success') else 400
+
+        @self.app.route('/api/mapping/maps/<map_name>/plan/simulate/status', methods=['GET'])
+        def api_mapping_map_plan_simulate_status(map_name):
+            return jsonify({'success': True, **self._get_simulation_state()})
+
+        @self.app.route('/api/mapping/maps/<map_name>/plan/simulate/cancel', methods=['POST', 'OPTIONS'])
+        def api_mapping_map_plan_simulate_cancel(map_name):
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            state = self._get_simulation_state()
+            self._simulation_cancel_event.set()
+            return jsonify({
+                'success': True,
+                'cancel_requested': bool(state.get('running')),
+            })
+
+        @self.app.route('/api/mapping/maps/<map_name>/plan/playback', methods=['POST', 'OPTIONS'])
+        def api_mapping_map_plan_playback(map_name):
+            """Compiles the exact executable route for fast browser playback."""
+            if request.method == 'OPTIONS':
+                return ('', 204)
+            if not self.mapping or not getattr(self.mapping, 'plans', None):
+                return jsonify({'success': False, 'error': 'Mapping deaktiviert'}), 503
+            data = request.get_json(silent=True) or {}
+            plan = data.get('plan') if isinstance(data.get('plan'), dict) else None
+            if plan is None:
+                loaded = self.mapping.load_plan(map_name)
+                if not loaded.get('success'):
+                    return jsonify(loaded), 404
+                plan = loaded.get('plan')
+
+            plan_name = plan.get('map_name', plan.get('name', ''))
+            sanitize = self.mapping.plans._sanitize_name
+            if sanitize(plan_name) != sanitize(map_name):
+                return jsonify({
+                    'success': False,
+                    'error': 'Plan passt nicht zur aktuell gewählten Karte',
+                }), 400
+
+            start_coordinate = data.get('start_coordinate')
+            use_current_pose = data.get('use_current_pose') is True
+            continuation_pose = data.get('continuation_pose')
+            if isinstance(continuation_pose, dict):
+                start_pose = continuation_pose
+                start_coordinate = None
+            elif use_current_pose:
+                start_pose = self.can.get_sensor_data() if self.can else None
+                if self.mapping.plans._pose_coord(start_pose) is None:
+                    return jsonify({
+                        'success': False,
+                        'error': 'Keine aktuelle RTK/GPS-Pose für die simulierte Anfahrt vorhanden',
+                    }), 400
+            else:
+                try:
+                    selected = self.mapping.plans._validated_coord(start_coordinate)
+                except ValueError as exc:
+                    return jsonify({'success': False, 'error': str(exc)}), 400
+                if selected is None:
+                    return jsonify({
+                        'success': False,
+                        'error': 'Keine Abfahrposition gewählt',
+                    }), 400
+                # Starting on the slider position must not create a fictitious
+                # positioning leg. The selected coordinate is the simulated pose.
+                start_pose = {'longitude': selected[0], 'latitude': selected[1]}
+
+            try:
+                chunk_size = max(1, min(20, int(data.get('max_source_segments', 8))))
+                segments = self.mapping.plans.executable_segments(
+                    plan,
+                    start_segment_index=data.get('start_segment_index'),
+                    start_coordinate=start_coordinate,
+                    start_pose=start_pose,
+                    max_source_segments=chunk_size,
+                    # Playback is preview-only. Legacy unsafe transitions may
+                    # therefore be recalculated by the runtime router here;
+                    # real execution remains blocked by check_plan().
+                    allow_unsafe_plan=True,
+                )
+            except (TypeError, ValueError) as exc:
+                return jsonify({'success': False, 'error': str(exc)}), 400
+
+            source_sequence = [
+                item for item in plan.get('sequence') or []
+                if self.mapping.plans._coords(item)
+                and int(item.get('segment_index', -1)) >= int(data.get('start_segment_index') or 0)
+            ]
+            remaining_source = source_sequence[chunk_size:]
+            next_source_segment_index = (
+                int(remaining_source[0].get('segment_index')) if remaining_source else None
+            )
+            total_length_m = sum(float(item.get('length_m', 0.0) or 0.0) for item in segments)
+            return jsonify({
+                'success': True,
+                'map_name': map_name,
+                'executable_segments': segments,
+                'executable_segment_count': len(segments),
+                'total_length_m': round(total_length_m, 2),
+                'source_segment_count': min(chunk_size, len(source_sequence)),
+                'has_more': bool(remaining_source),
+                'next_source_segment_index': next_source_segment_index,
+                'summary': self.mapping.plans.summarize_plan(plan),
+                'vehicle': {'length_m': 1.15, 'width_m': 0.79},
+                'start_mode': 'current_rtk' if use_current_pose else 'selected_position',
+            })
+
         @self.app.route('/api/mapping/maps/<map_name>/plan/execute', methods=['POST', 'OPTIONS'])
         def api_mapping_map_plan_execute(map_name):
             """Ausführung ist vorbereitet, startet aber nicht ohne separate Freigabe."""
@@ -605,8 +824,18 @@ class WebServer:
                 start_coordinate=data.get('start_coordinate'),
                 start_pose=self.can.get_sensor_data(),
             )
+            self._bind_expected_route(result, data)
             if not result.get('success'):
                 return jsonify({'success': False, 'error': 'Planprüfung fehlgeschlagen', **result}), 400
+            self.logger.info(
+                "Plan-Execute gebunden: map=%s start_segment_index=%r start_coordinate=%r "
+                "route=%s segments=%s",
+                map_name,
+                data.get('start_segment_index'),
+                data.get('start_coordinate'),
+                result.get('route_signature'),
+                self._route_log_summary(result.get('executable_segments') or []),
+            )
             loaded = self.mapping.load_plan(map_name)
             plan = loaded.get('plan') if loaded.get('success') else None
             started = self.start_plan_execution(result.get('executable_segments', []), result.get('summary') or {}, plan)
@@ -632,6 +861,58 @@ class WebServer:
             self.stop_plan_execution(clear_resume=True)
             self.navigation.stop()
             return jsonify({'success': True, **self.navigation.get_status()})
+
+    def _set_simulation_state(self, update):
+        with self._simulation_state_lock:
+            self._simulation_state.update(dict(update or {}))
+
+    def _get_simulation_state(self):
+        with self._simulation_state_lock:
+            state = dict(self._simulation_state)
+        started_at = state.get('started_at')
+        if state.get('running') and started_at:
+            state['wall_time_s'] = round(max(0.0, time.time() - started_at), 1)
+        return state
+
+    def _bind_expected_route(self, result, data):
+        """Bind Play to the exact controller route most recently simulated."""
+        expected = data.get('expected_route_signature')
+        if not expected or not result.get('success'):
+            return
+        try:
+            count = int(data.get('expected_route_segment_count'))
+        except (TypeError, ValueError):
+            count = 0
+        executable = result.get('executable_segments') or []
+        if count < 1 or count > len(executable):
+            result['success'] = False
+            result.setdefault('errors', []).append(
+                'Simulationssignatur hat keinen gültigen Routenhorizont'
+            )
+            return
+        actual = self.mapping.plans.route_signature(executable[:count])
+        result['route_signature'] = actual
+        result['route_signature_segment_count'] = count
+        if actual != str(expected):
+            result['success'] = False
+            result.setdefault('errors', []).append(
+                'Abfahrposition, Fahrzeugausrichtung oder Route haben sich seit der Simulation geändert; bitte erneut simulieren'
+            )
+
+    @staticmethod
+    def _route_log_summary(segments):
+        return [
+            {
+                'type': item.get('type'),
+                'source': item.get('source_index'),
+                'direction': item.get('direction'),
+                'length_m': round(float(
+                    item.get('length_m', item.get('planned_length_m', 0.0)) or 0.0
+                ), 2),
+                'state': item.get('state'),
+            }
+            for item in list(segments)[:8]
+        ]
 
     def start_plan_execution(self, executable_segments, summary, plan=None):
         if not self.navigation:
@@ -675,7 +956,7 @@ class WebServer:
         # New compact resume format: regenerate the remaining route from the
         # persisted map plan instead of rewriting the full plan plus route
         # every two seconds. Keep legacy support for existing resume files.
-        source_index = resume.get('source_segment_index')
+        source_index = self._resume_source_index(plan, resume)
         if source_index is not None:
             checked = self.mapping.check_plan(
                 map_name,
@@ -691,6 +972,23 @@ class WebServer:
             segments = self._resume_segments_from_state(resume)
             summary = resume.get('summary') or {'map_name': map_name}
         return self.start_plan_execution(segments, summary, plan=plan)
+
+    @staticmethod
+    def _resume_source_index(plan, resume):
+        source_index = resume.get('source_segment_index')
+        current_segment = resume.get('current_segment') or {}
+        if source_index is None or current_segment.get('type') == 'mow':
+            return source_index
+        # Transition indices identify the lane they leave. Resuming that
+        # index would mow the completed lane again. Advance old and new
+        # compact snapshots to the next actual source segment instead.
+        following_indices = sorted({
+            int(item.get('segment_index'))
+            for item in (plan.get('sequence') or [])
+            if item.get('segment_index') is not None
+            and int(item.get('segment_index')) > int(source_index)
+        })
+        return following_indices[0] if following_indices else None
 
     def resume_paused_plan_execution(self):
         """Setzt einen intern pausierten Plan nach Ende des alten Threads fort."""
@@ -871,11 +1169,12 @@ class WebServer:
             active_index = int(status.get('active_index') or 0)
             current_segment = status.get('current_segment') or {}
             source_index = current_segment.get('source_index')
-            if source_index is None:
-                # Positioning/transfer segments have no source index. Resume
-                # at the next actual mowing segment and let check_plan create
-                # the short positioning leg from the current pose.
-                for segment in self._active_executable_segments[active_index:]:
+            if current_segment.get('type') != 'mow':
+                # Transition indices refer to the lane they leave, not the
+                # lane that follows. Resume at the next actual mowing segment
+                # and let check_plan route there from the persisted pose.
+                source_index = None
+                for segment in self._active_executable_segments[active_index + 1:]:
                     if segment.get('source_index') is not None:
                         source_index = segment.get('source_index')
                         break

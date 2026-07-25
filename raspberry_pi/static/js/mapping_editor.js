@@ -15,10 +15,22 @@ var lanePreviewLayers = [];
 var lanePreviewLaneLayers = [];
 var lanePreviewRestLayers = [];
 var lanePreviewConnectorLayers = [];
+var laneSimulationLayers = [];
+var laneSimulationResult = null;
+var laneSimulationRunning = false;
+var laneSimulationTimer = null;
+var laneSimulationAnimationFrame = null;
+var laneSimulationPlayback = null;
+var laneSimulationPaused = false;
+var laneSimulationAbortController = null;
+var laneSimulationMarker = null;
+var laneSimulationFootprint = null;
 var lanePreviewPlan = null;
+var lanePreviewSource = 'none';
 var laneProgressMarker = null;
 var vehicleMarker = null;
 var vehicleHeadingLine = null;
+var latestVehiclePose = null;
 var savedPlans = [];
 var loadedPlanReady = false;
 var rtkAvailable = false;
@@ -27,6 +39,7 @@ var activePlanName = '';
 var planIsRunning = false;
 var planResumeAvailable = false;
 var planStartAttemptToken = 0;
+var planLoadRunning = false;
 var selectedPointIndex = null;
 var manualPointDragIndex = null;
 
@@ -401,7 +414,7 @@ function generateLanePreview() {
                 setPlannerStatus(result.data.error || 'Bahnenplanung fehlgeschlagen');
                 return;
             }
-            renderLanePreview(result.data);
+            renderLanePreview(result.data, 'preview');
             setLoadedPlanReady(false);
             refreshPlanButtons();
         })
@@ -411,9 +424,11 @@ function generateLanePreview() {
         });
 }
 
-function renderLanePreview(plan) {
+function renderLanePreview(plan, source = 'preview') {
     clearLanePreview(false);
+    setSimulationStatus('Noch nicht simuliert');
     lanePreviewPlan = plan;
+    lanePreviewSource = source;
     setLoadedPlanReady(false);
     const lanes = plan.lanes || [];
     lanes.forEach(lane => {
@@ -508,16 +523,19 @@ function renderLanePreview(plan) {
     const subContours = (plan.sequence || []).filter(segment => segment.type === 'sub_contour').length;
     setPlannerStatus(`${plan.lane_count} Ringe · ${subContours} Sub-Konturen · ${plan.rest_lane_count || 0} Restbahnen · ${transitionText} · ${formatArea(plan.mow_length_m || 0)} m Ringfahrt · ${formatArea(plan.rest_length_m || 0)} m Restfläche`);
     setPlanStatus(planSummaryText(plan));
+    updateActivePlanLabel();
     refreshPlanButtons();
 }
 
 function clearLanePreview(resetStatus = true) {
+    clearLaneSimulation(false);
     lanePreviewLayers.forEach(layer => layer.remove());
     lanePreviewLayers = [];
     lanePreviewLaneLayers = [];
     lanePreviewRestLayers = [];
     lanePreviewConnectorLayers = [];
     lanePreviewPlan = null;
+    lanePreviewSource = 'none';
     setLoadedPlanReady(false);
     if (laneProgressMarker) {
         laneProgressMarker.remove();
@@ -532,8 +550,461 @@ function clearLanePreview(resetStatus = true) {
     if (resetStatus) {
         setPlannerStatus('Kein Plan geladen');
         setPlanStatus('Kein Plan geladen');
+        setSimulationStatus('Noch nicht simuliert');
     }
+    updateActivePlanLabel();
     refreshPlanButtons();
+}
+
+function simulateLanePlan() {
+    if (laneSimulationRunning) return;
+    if (!activeMapName || !lanePreviewPlan) {
+        setSimulationStatus('Kein Plan für Simulation geladen');
+        return;
+    }
+    const start = selectedPlanStart();
+    if (!start) {
+        setSimulationStatus('Keine gültige Simulations-Startposition');
+        return;
+    }
+    const useCurrentPose = document.getElementById('simulationUseCurrentPose')?.checked === true;
+    if (useCurrentPose && (!rtkAvailable || latestVehiclePose === null)) {
+        setSimulationStatus('Für die simulierte Anfahrt ist ein aktueller RTK-Fix erforderlich');
+        return;
+    }
+    laneSimulationRunning = true;
+    clearLaneSimulation(false);
+    laneSimulationRunning = true;
+    laneSimulationAbortController = new AbortController();
+    refreshPlanButtons();
+    const startLabel = useCurrentPose
+        ? 'ab aktueller RTK-Position'
+        : 'ab gewählter Abfahrposition';
+    const scopeValue = document.getElementById('simulationScope')?.value || '3';
+    const maxSourceSegments = scopeValue === 'all' ? null : Number(scopeValue);
+    const scopeLabel = maxSourceSegments === null
+        ? 'gesamter Restplan'
+        : `nächste ${maxSourceSegments} Plansegmente`;
+    setSimulationStatus(`Reglersimulation wird berechnet · ${startLabel} · ${scopeLabel}`);
+    const requestPayload = {
+        start_segment_index: start.segmentIndex,
+        start_coordinate: start.coordinate,
+        use_current_pose: useCurrentPose,
+        parameters: {
+            step_s: 0.1,
+            sample_distance_m: 0.15,
+            sample_interval_s: 0.2,
+            max_steps: 120000,
+        },
+    };
+    if (maxSourceSegments !== null) requestPayload.max_source_segments = maxSourceSegments;
+    if (lanePreviewSource !== 'saved') requestPayload.plan = lanePreviewPlan;
+    laneSimulationTimer = window.setInterval(pollLaneSimulationStatus, 750);
+    fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan/simulate`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(requestPayload),
+        signal: laneSimulationAbortController.signal,
+    })
+        .then(parseJsonResponse)
+        .then(result => {
+            if (!result.ok || !result.data.success) {
+                setSimulationStatus(result.data.reason || result.data.error || 'Simulation fehlgeschlagen');
+                laneSimulationRunning = false;
+                return;
+            }
+            renderLaneSimulation(result.data);
+        })
+        .catch(error => {
+            if (error.name === 'AbortError') return;
+            laneSimulationRunning = false;
+            setSimulationStatus(error.message);
+        })
+        .finally(() => {
+            if (laneSimulationTimer !== null) {
+                window.clearInterval(laneSimulationTimer);
+                laneSimulationTimer = null;
+            }
+            refreshPlanButtons();
+        });
+}
+
+function pollLaneSimulationStatus() {
+    if (!laneSimulationRunning || laneSimulationPlayback || !activeMapName) return;
+    fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan/simulate/status`)
+        .then(parseJsonResponse)
+        .then(result => {
+            if (!laneSimulationRunning || laneSimulationPlayback || !result.ok) return;
+            const status = result.data || {};
+            if (status.phase === 'route_building') {
+                setSimulationStatus(
+                    `Ausführbare Route wird erstellt · ${Number(status.wall_time_s || 0).toFixed(1).replace('.', ',')} s`
+                );
+                return;
+            }
+            if (status.phase === 'simulating') {
+                const current = Number(status.executable_index || 0) + 1;
+                const total = Number(status.executable_segment_count || 0);
+                setSimulationStatus(
+                    `Reglersimulation wird berechnet · Abschnitt ${current}/${total || '?'} · ` +
+                    `${formatArea(status.actual_length_m || 0)} m · simulierte Zeit ` +
+                    `${Number(status.elapsed_s || 0).toFixed(1).replace('.', ',')} s`
+                );
+            }
+        })
+        .catch(() => {});
+}
+
+function renderLaneSimulation(result) {
+    clearLaneSimulation(false, false);
+    const samples = (result.trajectory || []).filter(item => (
+        Number.isFinite(Number(item.longitude))
+        && Number.isFinite(Number(item.latitude))
+        && Number.isFinite(Number(item.time_s))
+    ));
+    laneSimulationResult = result;
+    laneSimulationPlayback = {
+        samples,
+        currentTimeS: 0,
+        totalTimeS: samples.length ? Number(samples[samples.length - 1].time_s) : 0,
+        sampleIndex: 0,
+        lastTimestamp: null,
+        vehicleLengthM: Number(result.parameters?.vehicle_length_m || 1.15),
+        vehicleWidthM: Number(result.parameters?.vehicle_width_m || 0.79),
+    };
+    if (!samples.length) {
+        laneSimulationRunning = false;
+        setSimulationStatus(result.reason || 'Die Reglersimulation enthält keine Fahrzeugbewegung');
+        refreshPlanButtons();
+        return;
+    }
+    drawLaneSimulationTrajectory(samples);
+    laneSimulationPaused = false;
+    laneSimulationRunning = true;
+    updateLaneSimulationPose(0);
+    laneSimulationAnimationFrame = window.requestAnimationFrame(animateLaneSimulation);
+    refreshPlanButtons();
+}
+
+function drawLaneSimulationTrajectory(samples) {
+    const groups = [];
+    samples.forEach(sample => {
+        let group = groups[groups.length - 1];
+        if (!group || group.executableIndex !== sample.executable_index) {
+            group = {
+                executableIndex: sample.executable_index,
+                type: sample.type,
+                direction: sample.direction,
+                coordinates: [],
+            };
+            groups.push(group);
+        }
+        group.coordinates.push([Number(sample.latitude), Number(sample.longitude)]);
+    });
+    groups.forEach(group => {
+        if (group.coordinates.length < 2) return;
+        const isTransfer = group.type === 'transition' || group.type === 'positioning';
+        const reverse = group.direction === 'reverse';
+        const color = isTransfer ? '#ff5a00' : (reverse ? '#25c6ff' : '#ff00ff');
+        const layer = L.polyline(group.coordinates, {
+            color,
+            weight: isTransfer ? 8 : 5,
+            opacity: 0.90,
+            dashArray: isTransfer ? '10 5' : (reverse ? '8 5' : null),
+        }).addTo(mapEditor);
+        const type = isTransfer
+            ? `Anfahrt/Übergang ${reverse ? 'rückwärts' : 'vorwärts'}`
+            : (reverse ? 'Rückwärts' : 'Vorwärts');
+        layer.bindTooltip(`Berechnete Fahrzeugspur · ${type} · Abschnitt ${Number(group.executableIndex) + 1}`);
+        laneSimulationLayers.push(layer);
+    });
+}
+
+function appendLaneSimulationSegments(executableSegments) {
+    const playback = laneSimulationPlayback;
+    if (!playback) return;
+    const executableOffset = Number(laneSimulationResult?.executable_segment_count || 0);
+    executableSegments.forEach((segment, chunkIndex) => {
+        const executableIndex = executableOffset + chunkIndex;
+        const coords = segment.coordinates || [];
+        if (coords.length < 2) return;
+        const isTransfer = segment.type === 'transition' || segment.type === 'positioning';
+        const isTransition = segment.type === 'transition';
+        const isReverse = segment.direction === 'reverse';
+        const color = isTransfer ? '#ff5a00' : (isReverse ? '#25c6ff' : '#ff00ff');
+        const layer = L.polyline(coords.map(coord => [coord[1], coord[0]]), {
+            color,
+            weight: isTransfer ? 8 : 4,
+            opacity: isTransfer ? 1.0 : 0.72,
+            dashArray: isTransfer ? '10 5' : (isReverse ? '8 5' : null),
+        }).addTo(mapEditor);
+        const type = isTransfer
+            ? `Übergang/Anfahrt ${isReverse ? 'rückwärts' : 'vorwärts'}`
+            : (isReverse ? 'Rückwärts' : 'Vorwärts');
+        layer.bindTooltip(`Ausführbare Route · ${type} · Abschnitt ${executableIndex + 1}`);
+        laneSimulationLayers.push(layer);
+        if (isTransition) {
+            const markerCoord = coords[Math.floor(coords.length / 2)];
+            const marker = L.circleMarker([markerCoord[1], markerCoord[0]], {
+                radius: 6,
+                color: '#ffffff',
+                weight: 2,
+                fillColor: '#ff5a00',
+                fillOpacity: 1.0,
+            }).addTo(mapEditor);
+            marker.bindTooltip(`Übergang · Abschnitt ${executableIndex + 1}`);
+            laneSimulationLayers.push(marker);
+        }
+        for (let index = 0; index < coords.length - 1; index += 1) {
+            const lengthM = distanceLatLngM(coords[index], coords[index + 1]);
+            if (lengthM <= 0.001) continue;
+            playback.legs.push({
+                a: coords[index],
+                b: coords[index + 1],
+                startM: playback.totalLengthM,
+                endM: playback.totalLengthM + lengthM,
+                lengthM,
+                segment,
+                executableIndex,
+            });
+            playback.totalLengthM += lengthM;
+        }
+    });
+}
+
+function clearLaneSimulation(resetStatus = true, abortRequest = true) {
+    if (laneSimulationAnimationFrame !== null) {
+        window.cancelAnimationFrame(laneSimulationAnimationFrame);
+        laneSimulationAnimationFrame = null;
+    }
+    if (laneSimulationTimer !== null) {
+        window.clearInterval(laneSimulationTimer);
+        laneSimulationTimer = null;
+    }
+    if (abortRequest && laneSimulationAbortController !== null) {
+        laneSimulationAbortController.abort();
+    }
+    laneSimulationAbortController = null;
+    laneSimulationLayers.forEach(layer => layer.remove());
+    laneSimulationLayers = [];
+    laneSimulationResult = null;
+    laneSimulationPlayback = null;
+    laneSimulationMarker = null;
+    laneSimulationFootprint = null;
+    laneSimulationPaused = false;
+    laneSimulationRunning = false;
+    if (resetStatus) setSimulationStatus('Noch nicht simuliert');
+}
+
+function invalidateLaneSimulationSelection() {
+    // A simulation belongs to one exact slider position and start mode. Do
+    // not leave Play visually armed after either input changes.
+    clearLaneSimulation(true);
+    refreshPlanButtons();
+}
+
+function animateLaneSimulation(timestamp) {
+    if (!laneSimulationRunning || !laneSimulationPlayback) return;
+    if (laneSimulationPaused) {
+        laneSimulationPlayback.lastTimestamp = timestamp;
+        laneSimulationAnimationFrame = window.requestAnimationFrame(animateLaneSimulation);
+        return;
+    }
+    if (laneSimulationPlayback.lastTimestamp === null) {
+        laneSimulationPlayback.lastTimestamp = timestamp;
+    }
+    const elapsedS = Math.max(0, Math.min(0.25, (timestamp - laneSimulationPlayback.lastTimestamp) / 1000));
+    laneSimulationPlayback.lastTimestamp = timestamp;
+    const speedFactor = Number(document.getElementById('simulationSpeed')?.value || 10);
+    laneSimulationPlayback.currentTimeS = Math.min(
+        laneSimulationPlayback.totalTimeS,
+        laneSimulationPlayback.currentTimeS + elapsedS * speedFactor
+    );
+    updateLaneSimulationPose(laneSimulationPlayback.currentTimeS);
+    if (laneSimulationPlayback.currentTimeS >= laneSimulationPlayback.totalTimeS) {
+        laneSimulationRunning = false;
+        laneSimulationAnimationFrame = null;
+        laneSimulationAbortController = null;
+        if (laneSimulationResult.safe !== true) {
+            setSimulationStatus(
+                `Reglersimulation STOP · ${laneSimulationResult.reason || laneSimulationResult.state || 'unbekannter Grund'} · ` +
+                `${formatArea(laneSimulationResult.actual_length_m || 0)} m gefahren`
+            );
+            refreshPlanButtons();
+            return;
+        }
+        setSimulationStatus(
+            `Reglersimulation abgeschlossen · ${formatArea(laneSimulationResult.actual_length_m || 0)} m · ` +
+            `${laneSimulationResult.executable_segment_count || 0} ausführbare Abschnitte · ` +
+            `${laneSimulationResult.source_segment_limit ? `${laneSimulationResult.source_segment_limit} Plansegmente` : 'gesamter Restplan'}`
+        );
+        refreshPlanButtons();
+        return;
+    }
+    laneSimulationAnimationFrame = window.requestAnimationFrame(animateLaneSimulation);
+}
+
+function requestNextLaneSimulationChunk() {
+    const playback = laneSimulationPlayback;
+    if (!playback || !playback.hasMore || playback.loadingMore || !laneSimulationRunning) return;
+    const lastLeg = playback.legs[playback.legs.length - 1];
+    if (!lastLeg || playback.nextSegmentIndex === null || playback.nextSegmentIndex === undefined) return;
+    playback.loadingMore = true;
+    const requestPayload = {
+        start_segment_index: playback.nextSegmentIndex,
+        continuation_pose: {longitude: lastLeg.b[0], latitude: lastLeg.b[1]},
+        max_source_segments: 2,
+    };
+    if (lanePreviewSource !== 'saved') requestPayload.plan = lanePreviewPlan;
+    fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan/playback`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(requestPayload),
+        signal: laneSimulationAbortController?.signal,
+    })
+        .then(parseJsonResponse)
+        .then(result => {
+            if (!laneSimulationRunning || !laneSimulationPlayback) return;
+            if (!result.ok || !result.data.success) {
+                throw new Error(result.data.error || 'Nächster Routenabschnitt konnte nicht erstellt werden');
+            }
+            appendLaneSimulationSegments(result.data.executable_segments || []);
+            laneSimulationResult.executable_segment_count += Number(result.data.executable_segment_count || 0);
+            playback.hasMore = result.data.has_more === true;
+            playback.nextSegmentIndex = result.data.next_source_segment_index;
+            playback.chunksLoaded += 1;
+            playback.loadingMore = false;
+            requestNextLaneSimulationChunk();
+        })
+        .catch(error => {
+            if (error.name === 'AbortError') return;
+            playback.loadingMore = false;
+            playback.hasMore = false;
+            playback.terminalError = error.message;
+        });
+}
+
+function updateLaneSimulationPose(simulationTimeS) {
+    const playback = laneSimulationPlayback;
+    if (!playback) return;
+    const samples = playback.samples;
+    while (
+        playback.sampleIndex < samples.length - 2
+        && Number(samples[playback.sampleIndex + 1].time_s) < simulationTimeS
+    ) {
+        playback.sampleIndex += 1;
+    }
+    while (
+        playback.sampleIndex > 0
+        && Number(samples[playback.sampleIndex].time_s) > simulationTimeS
+    ) {
+        playback.sampleIndex -= 1;
+    }
+    const a = samples[playback.sampleIndex];
+    const b = samples[Math.min(samples.length - 1, playback.sampleIndex + 1)];
+    const spanS = Math.max(0.001, Number(b.time_s) - Number(a.time_s));
+    const fraction = Math.max(0, Math.min(1, (simulationTimeS - Number(a.time_s)) / spanS));
+    const longitude = Number(a.longitude) + (Number(b.longitude) - Number(a.longitude)) * fraction;
+    const latitude = Number(a.latitude) + (Number(b.latitude) - Number(a.latitude)) * fraction;
+    const headingDelta = ((Number(b.heading_deg) - Number(a.heading_deg) + 540) % 360) - 180;
+    const heading = (Number(a.heading_deg) + headingDelta * fraction + 360) % 360;
+    const latLng = [latitude, longitude];
+    if (!laneSimulationMarker) {
+        laneSimulationMarker = L.marker(latLng, {
+            icon: vehicleIcon(heading),
+            zIndexOffset: 3000,
+        }).addTo(mapEditor);
+        laneSimulationLayers.push(laneSimulationMarker);
+    } else {
+        laneSimulationMarker.setLatLng(latLng);
+        laneSimulationMarker.setIcon(vehicleIcon(heading));
+    }
+    const footprint = footprintLatLngs(latitude, longitude, heading, playback.vehicleLengthM, playback.vehicleWidthM);
+    if (!laneSimulationFootprint) {
+        laneSimulationFootprint = L.polygon(footprint, {
+            color: '#00ff9d',
+            weight: 3,
+            fillColor: '#00ff9d',
+            fillOpacity: 0.20,
+        }).addTo(mapEditor);
+        laneSimulationLayers.push(laneSimulationFootprint);
+    } else {
+        laneSimulationFootprint.setLatLngs(footprint);
+    }
+    const sample = fraction < 0.5 ? a : b;
+    const isTransfer = sample.type === 'transition' || sample.type === 'positioning';
+    const reverse = sample.direction === 'reverse';
+    const type = isTransfer
+        ? `Anfahrt/Übergang ${reverse ? 'rückwärts' : 'vorwärts'}`
+        : (reverse ? 'Rückwärts' : 'Vorwärts');
+    const progress = playback.totalTimeS > 0 ? simulationTimeS / playback.totalTimeS * 100 : 100;
+    const commandX = Number(sample.command_x || 0).toFixed(2).replace('.', ',');
+    const commandY = Number(sample.command_y || 0).toFixed(2).replace('.', ',');
+    setSimulationStatus(
+        `${laneSimulationPaused ? 'Reglersimulation pausiert' : 'Reglersimulation läuft'} · ` +
+        `${progress.toFixed(1).replace('.', ',')}% · t=${simulationTimeS.toFixed(1).replace('.', ',')} s · ` +
+        `${type} · Abschnitt ${Number(sample.executable_index) + 1} · Regler x=${commandX} y=${commandY}`
+    );
+}
+
+function toggleLaneSimulationPause() {
+    if (!laneSimulationRunning || !laneSimulationPlayback) return;
+    laneSimulationPaused = !laneSimulationPaused;
+    laneSimulationPlayback.lastTimestamp = null;
+    updateLaneSimulationPose(laneSimulationPlayback.currentTimeS);
+    refreshPlanButtons();
+}
+
+function stopLaneSimulation() {
+    if (activeMapName) {
+        fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan/simulate/cancel`, {
+            method: 'POST',
+            keepalive: true,
+        }).catch(() => {});
+    }
+    clearLaneSimulation(false);
+    setSimulationStatus('Simulation abgebrochen');
+    refreshPlanButtons();
+}
+
+function bearingDegrees(a, b) {
+    const latitude = (a[1] + b[1]) / 2 * Math.PI / 180;
+    const east = (b[0] - a[0]) * Math.cos(latitude);
+    const north = b[1] - a[1];
+    return (Math.atan2(east, north) * 180 / Math.PI + 360) % 360;
+}
+
+function footprintLatLngs(latitude, longitude, headingDeg, lengthM, widthM) {
+    const heading = headingDeg * Math.PI / 180;
+    const frontEast = Math.sin(heading);
+    const frontNorth = Math.cos(heading);
+    const rightEast = Math.cos(heading);
+    const rightNorth = -Math.sin(heading);
+    const halfLength = lengthM / 2;
+    const halfWidth = widthM / 2;
+    return [[1, 1], [1, -1], [-1, -1], [-1, 1]].map(([front, right]) => {
+        const eastM = front * halfLength * frontEast + right * halfWidth * rightEast;
+        const northM = front * halfLength * frontNorth + right * halfWidth * rightNorth;
+        const lat = latitude + northM / 6371000 * 180 / Math.PI;
+        const lon = longitude + eastM / (6371000 * Math.max(0.01, Math.cos(latitude * Math.PI / 180))) * 180 / Math.PI;
+        return [lat, lon];
+    });
+}
+
+function setSimulationStatus(message) {
+    const el = document.getElementById('planSimulationStatus');
+    if (el) el.textContent = message;
+}
+
+function parseJsonResponse(response) {
+    return response.json().then(data => ({ok: response.ok, data}));
+}
+
+function formatDuration(seconds) {
+    const total = Math.max(0, Math.round(Number(seconds || 0)));
+    const minutes = Math.floor(total / 60);
+    const rest = total % 60;
+    return minutes > 0 ? `${minutes} min ${rest} s` : `${rest} s`;
 }
 
 function saveLanePlan() {
@@ -553,6 +1024,8 @@ function saveLanePlan() {
                 return;
             }
             setLoadedPlanReady(true);
+            lanePreviewSource = 'saved';
+            updateActivePlanLabel();
             setPlannerStatus(`Plan gespeichert · ${planSummaryText(result.data.summary || result.data.plan || lanePreviewPlan)}`);
             refreshPlanList().then(() => {
                 const select = document.getElementById('planSelect');
@@ -568,6 +1041,9 @@ function refreshPlanList() {
         .then(response => response.json())
         .then(data => {
             savedPlans = data.plans || [];
+            if (!planIsRunning && activeMapName) {
+                planResumeAvailable = savedPlanHasResume(activeMapName);
+            }
             const select = document.getElementById('planSelect');
             if (!select) return savedPlans;
             const current = select.value || activeMapName;
@@ -587,6 +1063,12 @@ function refreshPlanList() {
         .catch(() => savedPlans);
 }
 
+function savedPlanHasResume(mapName) {
+    return Boolean(mapName) && savedPlans.some(
+        plan => plan.map_name === mapName && plan.resume_available === true
+    );
+}
+
 function selectSavedPlan() {
     const selected = document.getElementById('planSelect')?.value;
     if (!selected) return;
@@ -594,11 +1076,15 @@ function selectSavedPlan() {
 }
 
 function loadSavedPlan() {
+    if (planLoadRunning) return;
     const mapName = document.getElementById('planSelect')?.value || activeMapName;
     if (!mapName) {
         setPlanStatus('Keine Karte oder kein Plan gewählt');
         return;
     }
+    planLoadRunning = true;
+    refreshPlanButtons();
+    setPlanStatus('Plan wird geladen...');
     fetch(`/api/mapping/maps/${encodeURIComponent(mapName)}/plan/load`)
         .then(response => response.json().then(data => ({ok: response.ok, data})))
         .then(result => {
@@ -606,26 +1092,25 @@ function loadSavedPlan() {
                 setPlanStatus(result.data.error || 'Plan laden fehlgeschlagen');
                 return;
             }
-            if (mapName !== activeMapName) {
-                loadMap(mapName).then(() => {
-                    renderLanePreview(result.data.plan);
-                    setLoadedPlanReady(true);
-                    planResumeAvailable = savedPlans.some(plan => plan.map_name === mapName && plan.resume_available === true);
-                    enterPlanUiMode(mapName);
-                    refreshPlanButtons();
-                    refreshNoGoCheck(mapName, result.data.plan);
-                });
-            } else {
-                renderLanePreview(result.data.plan);
+            const activateLoadedPlan = () => {
+                renderLanePreview(result.data.plan, 'saved');
                 setLoadedPlanReady(true);
-                planResumeAvailable = savedPlans.some(plan => plan.map_name === mapName && plan.resume_available === true);
+                planResumeAvailable = savedPlanHasResume(mapName);
                 enterPlanUiMode(mapName);
                 refreshPlanButtons();
                 refreshNoGoCheck(mapName, result.data.plan);
+                setPlanStatus(`Plan geladen · ${planSummaryText(result.data.summary || result.data.plan)}`);
+            };
+            if (mapName !== activeMapName) {
+                return loadMap(mapName).then(activateLoadedPlan);
             }
-            setPlanStatus(`Plan geladen · ${planSummaryText(result.data.summary || result.data.plan)}`);
+            activateLoadedPlan();
         })
-        .catch(error => setPlanStatus(error.message));
+        .catch(error => setPlanStatus(error.message))
+        .finally(() => {
+            planLoadRunning = false;
+            refreshPlanButtons();
+        });
 }
 
 function refreshNoGoCheck(mapName, plan) {
@@ -654,13 +1139,34 @@ function playLoadedPlan() {
         return;
     }
     const percentText = start.percent.toFixed(1).replace('.', ',');
-    if (!confirm(`Plan ab ${percentText}% starten? Das Fahrzeug fährt zuerst zur pink markierten Position.`)) {
+    const simulationNote = laneSimulationRunning ? ' Die laufende Simulation wird dafür beendet.' : '';
+    if (!confirm(`Plan ab ${percentText}% starten? Das Fahrzeug fährt zuerst zur pink markierten Position.${simulationNote}`)) {
         return;
     }
     const attemptToken = ++planStartAttemptToken;
     const retryDeadline = Date.now() + 35000;
-    setPlanStatus(`Planstart ab ${percentText}% wird geprüft`);
-    checkAndStartLoadedPlan(false, start.segmentIndex, start.coordinate, attemptToken, retryDeadline);
+    const beginPreflight = () => {
+        if (attemptToken !== planStartAttemptToken) return;
+        setPlanStatus(`Planstart ab ${percentText}% wird geprüft`);
+        checkAndStartLoadedPlan(false, start.segmentIndex, start.coordinate, attemptToken, retryDeadline);
+    };
+    if (laneSimulationRunning) {
+        setPlanStatus('Laufende Simulation wird für den realen Start beendet');
+        cancelLaneSimulationForPlanStart().finally(beginPreflight);
+        return;
+    }
+    beginPreflight();
+}
+
+function cancelLaneSimulationForPlanStart() {
+    const mapName = activeMapName;
+    clearLaneSimulation(false);
+    setSimulationStatus('Simulation für realen Planstart beendet');
+    if (!mapName) return Promise.resolve();
+    return fetch(`/api/mapping/maps/${encodeURIComponent(mapName)}/plan/simulate/cancel`, {
+        method: 'POST',
+        keepalive: true,
+    }).catch(() => {});
 }
 
 function resumeLoadedPlan() {
@@ -698,7 +1204,10 @@ function checkAndStartLoadedPlan(useResume, startSegmentIndex, startCoordinate, 
     fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan/check`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({start_segment_index: startSegmentIndex, start_coordinate: startCoordinate})
+        body: JSON.stringify({
+            start_segment_index: startSegmentIndex,
+            start_coordinate: startCoordinate,
+        })
     })
     .then(response => response.json().then(data => ({ok: response.ok, data})))
     .then(result => {
@@ -717,7 +1226,11 @@ function checkAndStartLoadedPlan(useResume, startSegmentIndex, startCoordinate, 
         return fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan/execute`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({start_segment_index: startSegmentIndex, start_coordinate: startCoordinate, resume: useResume})
+            body: JSON.stringify({
+                start_segment_index: startSegmentIndex,
+                start_coordinate: startCoordinate,
+                resume: useResume,
+            })
         })
             .then(response => response.json().then(data => ({ok: response.ok, data})))
             .then(executeResult => {
@@ -749,6 +1262,8 @@ function pausePlanExecution() {
         .then(result => {
             planIsRunning = false;
             planResumeAvailable = true;
+            const savedPlan = savedPlans.find(plan => plan.map_name === activeMapName);
+            if (savedPlan) savedPlan.resume_available = true;
             updateMapModeButton();
             updateMapsSectionTitle();
             setPlanStatus(result.ok ? 'Pause gesetzt' : (result.data.error || 'Pause fehlgeschlagen'));
@@ -763,6 +1278,8 @@ function stopPlanExecution() {
         .then(result => {
             planIsRunning = false;
             planResumeAvailable = false;
+            const savedPlan = savedPlans.find(plan => plan.map_name === activeMapName);
+            if (savedPlan) savedPlan.resume_available = false;
             updateMapModeButton();
             updateMapsSectionTitle();
             setPlanStatus(result.ok ? 'Stop gesendet' : (result.data.error || 'Stop fehlgeschlagen'));
@@ -798,17 +1315,59 @@ function setLoadedPlanReady(ok) {
     loadedPlanReady = ok === true;
 }
 
+function planPlayAvailability() {
+    if (planIsRunning) return {ready: false, reason: 'Planfahrt läuft bereits'};
+    if (!activeMapName || !lanePreviewPlan) return {ready: false, reason: 'zuerst einen Plan laden'};
+    if (!loadedPlanReady) return {ready: false, reason: 'zuerst den gespeicherten Plan laden'};
+    if (!rtkAvailable) return {ready: false, reason: 'RTK FIXED ist erforderlich'};
+    return {ready: true, reason: 'Plan ist startbereit · Simulation optional'};
+}
+
 function refreshPlanButtons() {
+    const simulationControls = document.getElementById('planSimulationControls');
+    if (simulationControls) simulationControls.hidden = !lanePreviewPlan;
+    const loadBtn = document.getElementById('planLoadBtn');
+    if (loadBtn) {
+        loadBtn.disabled = planLoadRunning;
+        loadBtn.textContent = planLoadRunning ? 'Plan wird geladen…' : 'Plan laden';
+    }
     const playBtn = document.getElementById('planPlayBtn');
-    if (playBtn) playBtn.disabled = planIsRunning || !activeMapName || !lanePreviewPlan || !loadedPlanReady || !rtkAvailable;
+    const playAvailability = planPlayAvailability();
+    if (playBtn) {
+        playBtn.disabled = !playAvailability.ready;
+        playBtn.title = playAvailability.reason;
+    }
+    const playStatus = document.getElementById('planPlayStatus');
+    if (playStatus) {
+        playStatus.textContent = `${playAvailability.ready ? 'Play bereit' : 'Play gesperrt'} · ${playAvailability.reason}`;
+        playStatus.style.color = playAvailability.ready ? '#90EE90' : '#ffb3a7';
+    }
     const saveBtn = document.getElementById('planSaveBtn');
     if (saveBtn) saveBtn.disabled = !activeMapName || !lanePreviewPlan || loadedPlanReady;
     const pauseBtn = document.getElementById('planPauseBtn');
     if (pauseBtn) pauseBtn.disabled = !planIsRunning;
     const resumeBtn = document.getElementById('planResumeBtn');
     if (resumeBtn) resumeBtn.disabled = planIsRunning || !planResumeAvailable || !rtkAvailable;
+    const simulateBtn = document.getElementById('planSimulateBtn');
+    if (simulateBtn) {
+        simulateBtn.disabled = laneSimulationRunning || planIsRunning || !activeMapName || !lanePreviewPlan;
+        simulateBtn.textContent = laneSimulationRunning ? 'Simulation läuft…' : 'Simulation starten';
+    }
+    const simulationPauseBtn = document.getElementById('planSimulationPauseBtn');
+    if (simulationPauseBtn) {
+        simulationPauseBtn.disabled = !laneSimulationRunning || !laneSimulationPlayback;
+        simulationPauseBtn.textContent = laneSimulationPaused ? 'Fortsetzen' : 'Pause';
+    }
+    const simulationStopBtn = document.getElementById('planSimulationStopBtn');
+    if (simulationStopBtn) simulationStopBtn.disabled = !laneSimulationRunning;
     const slider = document.getElementById('laneProgressSlider');
-    if (slider) slider.disabled = planIsRunning || !lanePreviewPlan;
+    if (slider) slider.disabled = laneSimulationRunning || planIsRunning || !lanePreviewPlan;
+    const currentPoseCheckbox = document.getElementById('simulationUseCurrentPose');
+    if (currentPoseCheckbox) currentPoseCheckbox.disabled = laneSimulationRunning || planIsRunning;
+    const simulationSpeed = document.getElementById('simulationSpeed');
+    if (simulationSpeed) simulationSpeed.disabled = planIsRunning;
+    const simulationScope = document.getElementById('simulationScope');
+    if (simulationScope) simulationScope.disabled = laneSimulationRunning || planIsRunning;
     updateMapModeButton();
 }
 
@@ -840,6 +1399,19 @@ function setPlanStatus(message) {
     if (el) el.textContent = message;
 }
 
+function updateActivePlanLabel() {
+    const el = document.getElementById('activePlanLabel');
+    if (!el) return;
+    if (!lanePreviewPlan) {
+        el.textContent = 'Kein Plan geladen';
+        return;
+    }
+    const name = lanePreviewPlan.map_name || lanePreviewPlan.name || activeMapName || 'Unbenannt';
+    el.textContent = lanePreviewSource === 'saved'
+        ? `${name} · gespeichert`
+        : `${name} · Vorschau (ungespeichert)`;
+}
+
 function planSummaryText(plan) {
     const sequence = plan.segment_count ?? ((plan.sequence || []).length);
     const unsafe = plan.unsafe_transition_count || 0;
@@ -849,9 +1421,11 @@ function planSummaryText(plan) {
 }
 
 function updateVehiclePose(sensorData, navigationStatus, planExecutionStatus) {
-    if (!mapEditor || !sensorData) return;
+    if (!sensorData) return;
     const pose = normalizePose(sensorData);
+    latestVehiclePose = pose;
     updateRtkStatus(sensorData);
+    if (!mapEditor) return;
     if (!pose) return;
     const latLng = [pose.latitude, pose.longitude];
     if (!vehicleMarker) {
@@ -876,15 +1450,23 @@ function updateVehiclePose(sensorData, navigationStatus, planExecutionStatus) {
     const nav = navigationStatus || {};
     const plan = planExecutionStatus || {};
     planIsRunning = plan.running === true || plan.state === 'running';
-    planResumeAvailable = plan.resume_available === true || ['paused', 'rtk_lost'].includes(plan.state || '');
+    const planState = plan.state || '';
+    if (['stopped', 'completed'].includes(planState)) {
+        planResumeAvailable = false;
+    } else {
+        planResumeAvailable = plan.resume_available === true ||
+            ['paused', 'rtk_lost'].includes(planState) ||
+            (!planIsRunning && savedPlanHasResume(activeMapName));
+    }
     if (planIsRunning && planUiMode !== 'plan') {
         enterPlanUiMode((plan.summary && plan.summary.map_name) || activePlanName || activeMapName || 'Plan');
     }
     updateMapModeButton();
     updateMapsSectionTitle();
     updateNoGoStatus(plan.nogo_status);
-    if (planIsRunning && plan.current_segment && plan.current_segment.source_index !== undefined) {
-        updateLaneProgressForSegment(plan.current_segment.source_index);
+    const sourceIndex = plan.current_segment?.source_index;
+    if (planIsRunning && sourceIndex !== null && sourceIndex !== undefined && Number.isFinite(Number(sourceIndex))) {
+        updateLaneProgressForSegment(Number(sourceIndex));
     }
     if (plan.state && plan.state !== 'idle') {
         const segment = plan.current_segment || {};
@@ -917,13 +1499,23 @@ function updateLaneProgressForSegment(segmentIndex) {
     const total = sequence.reduce((sum, segment) => sum + Number(segment.length_m || 0), 0);
     if (total <= 0) return;
     let travelled = 0;
+    let activeSegment = null;
     for (const segment of sequence) {
-        if (Number(segment.segment_index || 0) >= Number(segmentIndex)) {
+        const currentIndex = Number(segment.segment_index ?? 0);
+        if (currentIndex >= Number(segmentIndex)) {
+            if (currentIndex === Number(segmentIndex)) activeSegment = segment;
             break;
         }
         travelled += Number(segment.length_m || 0);
     }
-    updateLaneProgress((travelled / total) * 100);
+    if (!activeSegment) return;
+    // Do not round-trip an exact segment boundary through a percentage. A
+    // floating-point value a few micrometres below the boundary selects the
+    // preceding ring. Move the live marker 5 cm into the actual source
+    // segment, while the manually selected slider position remains exact.
+    const segmentLength = Number(activeSegment.length_m || 0);
+    const insideOffset = Math.min(0.05, Math.max(0, segmentLength / 2));
+    updateLaneProgress(((travelled + insideOffset) / total) * 100);
 }
 
 function escapeHtml(value) {
@@ -959,11 +1551,12 @@ function updateRtkStatus(sensorData) {
     const gps = sensorData && sensorData.gps && typeof sensorData.gps === 'object' ? sensorData.gps : {};
     const status = String((sensorData && sensorData.rtk_status) || gps.rtk_status || 'unbekannt');
     rtkAvailable = ['RTK FIXED', 'FIXED'].includes(status.trim().toUpperCase());
-    const el = document.getElementById('planRtkStatus');
-    if (el) {
-        el.textContent = status;
-        el.style.color = rtkAvailable ? '#34a853' : '#ff6b6b';
-    }
+    const dot = document.getElementById('rtkInfoStatus');
+    if (dot) dot.className = `status-dot ${rtkAvailable ? 'active' : 'inactive'}`;
+    const text = document.getElementById('rtkInfoStatusText');
+    if (text) text.textContent = status.trim().toUpperCase().startsWith('RTK') ? status : `RTK ${status}`;
+    const indicator = document.getElementById('rtkInfoIndicator');
+    if (indicator) indicator.title = rtkAvailable ? 'RTK-Fix verfügbar' : 'Kein RTK-Fix verfügbar';
     refreshPlanButtons();
 }
 
@@ -1057,7 +1650,10 @@ function pointAtPlanProgress(plan, fraction) {
     let remaining = target;
     for (const segment of sequence) {
         const segmentLength = Number(segment.length_m || 0);
-        if (remaining <= segmentLength || segment === sequence[sequence.length - 1]) {
+        // An exact sequence boundary belongs to the segment that starts
+        // there. Otherwise the live status highlights the preceding ring
+        // while the executor is already driving the first rest lane.
+        if (remaining < segmentLength || segment === sequence[sequence.length - 1]) {
             return pointAtLineDistance(segment.coordinates, remaining, segment, target, total, segmentLength);
         }
         remaining -= segmentLength;
@@ -1264,6 +1860,10 @@ window.MappingEditor = {
     deleteSelectedPoint,
     generateLanePreview,
     saveLanePlan,
+    simulateLanePlan,
+    toggleLaneSimulationPause,
+    stopLaneSimulation,
+    clearLaneSimulation,
     clearLanePreview,
     updateLaneProgress,
     refreshPlanList,

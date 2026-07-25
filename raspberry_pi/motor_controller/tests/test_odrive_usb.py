@@ -206,6 +206,25 @@ class ODriveUSBTests(unittest.TestCase):
         self.assertEqual(reasons, [])
         self.assertFalse(self.controller._system_stop_pending)
 
+    def test_delayed_idle_disarms_and_clears_watchdog_after_stop(self):
+        self.board.axis0.current_state = 5
+        self.board.axis0.config.enable_watchdog = True
+        self.controller.on_heartbeat(0, 0, 5)
+
+        self.controller._schedule_or_run_watchdog_cleanup({"active_axis_nodes": [0]})
+
+        self.assertTrue(self.controller._watchdog_cleanup_pending)
+        self.assertTrue(self.board.axis0.config.enable_watchdog)
+
+        self.board.axis0.current_state = 1
+        self.board.axis0.error = 0x800
+        self.controller.on_heartbeat(0, 0x800, 1)
+        self.controller._cleanup_idle_watchdogs_if_ready()
+
+        self.assertFalse(self.controller._watchdog_cleanup_pending)
+        self.assertFalse(self.board.axis0.config.enable_watchdog)
+        self.assertEqual(self.controller.odrive_errors[0], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

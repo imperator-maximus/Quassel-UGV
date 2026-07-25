@@ -31,7 +31,10 @@ werden. CAN FD wird nicht verwendet; ein Legacy-Testbus arbeitet mit 250 kbit/s.
 | Legacy/Testcode, produktiv inaktiv | ODrive SimpleCAN | Classical CAN 2.0, 250 kbit/s |
 
 Das Produktionsprofil verwendet `sensor_hub.transport: wifi` und
-`odrive_mower.transport: usb`. Der Raspberry haelt zwei unabhaengige
+`odrive_mower.transport: usb`. Der SensorHub-Telemetriepfad kann wahlweise
+ueber WLAN oder einen USB-Gadget-Link (CDC-ECM, 10.66.0.0/24) laufen; die
+Umstellung erfolgt manuell per `sensor_hub.wifi_url`, siehe
+`raspberry_pi/USB_GADGET_LINK.md`. Der Raspberry haelt zwei unabhaengige
 HTTP-Telemetriestroeme offen, damit ein stockender TCP-Strom den zweiten nicht
 blockiert. `can` und `shadow` existieren nur noch fuer Legacy-Tests. Bei
 ausbleibender aktiver

@@ -176,6 +176,10 @@ class NavigationConfig:
     # wieder, wenn die kleinere Austrittsschwelle erreicht ist.
     track_alignment_enter_deg: float = 25.0
     track_alignment_exit_deg: float = 10.0
+    # Bei weniger als 15 cm Track-Fortschritt in 10 s neutral stoppen und
+    # den Stillstand sichtbar melden, statt wirkungslose PWM weiterzusenden.
+    track_stall_timeout_s: float = 10.0
+    track_stall_min_progress_m: float = 0.15
     # Innen-Rad-Garantie gegen reine Pivots: untere Schranke der Vorwärts-
     # Geschwindigkeit des inneren (kurveninneren) Skid-Rads, ausgedrückt
     # als Bruchteil von ``max_joystick``. 0.0 = legacy (Pivot erlaubt),
@@ -400,6 +404,8 @@ class Config:
                 'track_cross_track_limit_m': self.navigation.track_cross_track_limit_m,
                 'track_alignment_enter_deg': self.navigation.track_alignment_enter_deg,
                 'track_alignment_exit_deg': self.navigation.track_alignment_exit_deg,
+                'track_stall_timeout_s': self.navigation.track_stall_timeout_s,
+                'track_stall_min_progress_m': self.navigation.track_stall_min_progress_m,
                 'min_inner_wheel_speed': self.navigation.min_inner_wheel_speed
             },
             'mapping': {

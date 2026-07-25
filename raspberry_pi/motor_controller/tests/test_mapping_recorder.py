@@ -467,6 +467,29 @@ class MappingRecorderTests(unittest.TestCase):
         )]
         self.assertFalse(LineString(routed_xy).intersects(sub_union))
 
+    def test_transition_router_routes_around_vehicle_footprint_clearance(self):
+        LineString, Polygon = self._assert_shapely_available()
+        mow_area = Polygon([(0, 0), (10, 0), (10, 10), (0, 10)])
+        sub_union = Polygon([(4, 4), (6, 4), (6, 6), (4, 6)])
+        router = TransitionRouter(
+            mow_area.difference(sub_union), sub_union, LineString, 0.0, 0.0
+        )
+        meters_to_deg = 1.0 / 111320.0
+
+        transition = router.plan_between(
+            [2.0 * meters_to_deg, 3.7 * meters_to_deg],
+            [8.0 * meters_to_deg, 3.7 * meters_to_deg],
+        )
+
+        self.assertTrue(transition.safe)
+        self.assertEqual("around_sub", transition.route_kind)
+        routed_xy = [tuple(point) for point in project_points(
+            [{"longitude": coord[0], "latitude": coord[1]} for coord in transition.coordinates],
+            0.0,
+            0.0,
+        )]
+        self.assertGreater(LineString(routed_xy).distance(sub_union), 0.34)
+
     def test_sub_buffer_changes_exclusion_geometry(self):
         self._assert_shapely_available()
         _, _, _, no_buffer = self._plan_with_center_sub(sub_margin_m=0.0)
@@ -558,9 +581,206 @@ class MappingRecorderTests(unittest.TestCase):
         )
 
         self.assertEqual(["positioning", "mow"], [item["type"] for item in executable])
-        self.assertEqual(selected, executable[0]["coordinates"][0])
+        self.assertEqual("forward", executable[0]["direction"])
+        self.assertEqual(self._coord_m(12.0, 0.0), executable[0]["coordinates"][0])
+        self.assertEqual(selected, executable[0]["coordinates"][-1])
+        self.assertEqual("runtime_direct", executable[0]["route_kind"])
         self.assertEqual(selected, executable[1]["coordinates"][0])
         self.assertAlmostEqual(self._coord_m(0.0, 0.0)[0], executable[1]["coordinates"][-1][0])
+
+    def test_positioning_reverses_when_vehicle_faces_away_from_start_route(self):
+        manager = MowingPlanManager("/tmp/maps", lambda: self._pose_m(12.0, 0.0, 90.0))
+        plan = self._reverse_transition_plan()
+        selected = self._coord_m(5.0, 0.0)
+
+        executable = manager.executable_segments(
+            plan,
+            start_segment_index=1,
+            start_coordinate=selected,
+            start_pose=self._pose_m(12.0, 0.0, 90.0),
+        )
+
+        self.assertEqual("positioning", executable[0]["type"])
+        self.assertEqual("reverse", executable[0]["direction"])
+        self.assertEqual(self._coord_m(12.0, 0.0), executable[0]["coordinates"][0])
+        self.assertEqual(selected, executable[0]["coordinates"][-1])
+
+    def test_route_signature_ignores_only_live_positioning_origin(self):
+        base = [{
+            "type": "positioning",
+            "source_index": None,
+            "mode": "track",
+            "direction": "forward",
+            "route_kind": "runtime_direct",
+            "coordinates": [self._coord_m(0.0, 0.0), self._coord_m(5.0, 0.0)],
+        }]
+        moved_origin = [dict(base[0], coordinates=[
+            self._coord_m(0.1, 0.0), self._coord_m(5.0, 0.0),
+        ])]
+        changed_direction = [dict(base[0], direction="reverse")]
+
+        self.assertEqual(
+            MowingPlanManager.route_signature(base),
+            MowingPlanManager.route_signature(moved_origin),
+        )
+        self.assertNotEqual(
+            MowingPlanManager.route_signature(base),
+            MowingPlanManager.route_signature(changed_direction),
+        )
+
+    def test_selected_near_lane_end_drives_long_half_before_next_lane(self):
+        manager = MowingPlanManager("/tmp/maps", lambda: self._pose_m(9.7, -2.0, 0.0))
+        selected = self._coord_m(9.7, 0.0)
+        first = {
+            "type": "rest_lane",
+            "segment_index": 0,
+            "rest_index": 0,
+            "rest_group": 0,
+            "direction": "forward",
+            "coordinates": [self._coord_m(0.0, 0.0), self._coord_m(10.0, 0.0)],
+            "length_m": 10.0,
+        }
+        second = {
+            "type": "rest_lane",
+            "segment_index": 1,
+            "rest_index": 1,
+            "rest_group": 0,
+            "direction": "reverse",
+            "coordinates": [self._coord_m(10.0, 1.0), self._coord_m(0.0, 1.0)],
+            "length_m": 10.0,
+        }
+        plan = {
+            "success": True,
+            "name": "Brunnen",
+            "map_name": "Brunnen",
+            "sequence": [first, second],
+            "transitions": [],
+            "rest_lanes": [first, second],
+            "lanes": [],
+            "parameters": {"outer_margin_m": 0.0},
+            "map": self._map_feature(-5.0, -5.0, 15.0, 5.0),
+            "total_drive_length_m": 20.0,
+        }
+
+        executable = manager.executable_segments(
+            plan,
+            start_segment_index=0,
+            start_coordinate=selected,
+            start_pose=self._pose_m(9.7, -2.0, 0.0),
+        )
+
+        self.assertEqual(
+            ["positioning", "mow", "transition", "mow"],
+            [item["type"] for item in executable],
+        )
+        first_track = executable[1]
+        self.assertEqual(0, first_track["source_index"])
+        self.assertEqual(selected, first_track["coordinates"][0])
+        self.assertAlmostEqual(self._coord_m(0.0, 0.0)[0], first_track["coordinates"][-1][0])
+        self.assertGreater(first_track["length_m"], 9.0)
+        self.assertEqual(first_track["coordinates"][-1], executable[2]["coordinates"][0])
+        self.assertEqual(1, executable[-1]["source_index"])
+
+    def test_opposite_transition_uses_arrival_heading_and_reverses(self):
+        manager = MowingPlanManager("/tmp/maps")
+        first = {
+            "type": "rest_lane",
+            "segment_index": 0,
+            "rest_index": 0,
+            "rest_group": 0,
+            "direction": "forward",
+            "coordinates": [self._coord_m(0.0, 0.0), self._coord_m(10.0, 0.0)],
+            "length_m": 10.0,
+        }
+        second = {
+            "type": "rest_lane",
+            "segment_index": 1,
+            "rest_index": 1,
+            "rest_group": 0,
+            "direction": "reverse",
+            "coordinates": [self._coord_m(8.0, 1.0), self._coord_m(0.0, 1.0)],
+            "length_m": 8.0,
+        }
+        plan = {
+            "success": True,
+            "name": "OppositeTransfer",
+            "map_name": "OppositeTransfer",
+            "sequence": [first, second],
+            "transitions": [],
+            "rest_lanes": [first, second],
+            "lanes": [],
+            "parameters": {"outer_margin_m": 0.0},
+            "map": self._map_feature(-5.0, -5.0, 15.0, 5.0),
+            "total_drive_length_m": 18.0,
+        }
+
+        executable = manager.executable_segments(
+            plan,
+            start_pose=self._pose_m(0.0, 0.0, 90.0),
+        )
+
+        self.assertEqual(["mow", "transition", "mow"], [item["type"] for item in executable])
+        self.assertEqual("reverse", executable[1]["direction"])
+        self.assertGreater(
+            manager._route_heading_error(executable[1]["coordinates"], 90.0),
+            manager.TRANSFER_REVERSE_THRESHOLD_DEG,
+        )
+
+    def test_short_direct_rest_lane_connector_is_absorbed_by_next_lane(self):
+        manager = MowingPlanManager("/tmp/maps")
+        first = {
+            "type": "rest_lane",
+            "segment_index": 0,
+            "direction": "forward",
+            "coordinates": [self._coord_m(0.0, 0.0), self._coord_m(10.0, 0.0)],
+            "length_m": 10.0,
+        }
+        second = {
+            "type": "rest_lane",
+            "segment_index": 1,
+            "direction": "reverse",
+            "coordinates": [self._coord_m(10.0, 0.35), self._coord_m(0.0, 0.35)],
+            "length_m": 10.0,
+        }
+        transition = {
+            "type": "transition",
+            "transition_index": 0,
+            "from_segment_index": 0,
+            "to_segment_index": 1,
+            "from_type": "rest_lane",
+            "to_type": "rest_lane",
+            "coordinates": [first["coordinates"][-1], second["coordinates"][0]],
+            "length_m": 0.35,
+            "route_kind": "direct",
+            "safe": True,
+        }
+        plan = {
+            "success": True,
+            "name": "StraightLanes",
+            "map_name": "StraightLanes",
+            "sequence": [first, second],
+            "transitions": [transition],
+            "rest_lanes": [first, second],
+            "lanes": [],
+            "parameters": {"outer_margin_m": 0.0},
+            "map": self._map_feature(-5.0, -5.0, 15.0, 5.0),
+        }
+
+        executable = manager.executable_segments(
+            plan,
+            start_pose=self._pose_m(0.0, 0.0, 90.0),
+        )
+
+        self.assertEqual(["mow", "mow"], [item["type"] for item in executable])
+        self.assertEqual(["forward", "reverse"], [item["direction"] for item in executable])
+        self.assertAlmostEqual(
+            0.35,
+            manager._coord_distance_m(
+                executable[0]["coordinates"][-1],
+                executable[1]["coordinates"][0],
+            ),
+            delta=0.02,
+        )
 
     def test_selected_start_coordinate_rotates_closed_ring_without_shortening_it(self):
         manager = MowingPlanManager("/tmp/maps", lambda: self._pose_m(-2.0, 0.0, 0.0))
@@ -585,6 +805,8 @@ class MappingRecorderTests(unittest.TestCase):
             "transitions": [],
             "rest_lanes": [],
             "lanes": [],
+            "parameters": {"outer_margin_m": 0.0},
+            "map": self._map_feature(-5.0, -5.0, 15.0, 15.0),
             "total_drive_length_m": 40.0,
         }
         selected = self._coord_m(5.0, 0.0)
@@ -597,7 +819,11 @@ class MappingRecorderTests(unittest.TestCase):
         )
 
         self.assertEqual(["positioning", "mow"], [item["type"] for item in executable])
-        self.assertEqual(selected, executable[0]["coordinates"][0])
+        for expected, actual in zip(
+            self._coord_m(-2.0, 0.0), executable[0]["coordinates"][0]
+        ):
+            self.assertAlmostEqual(expected, actual, places=12)
+        self.assertEqual(selected, executable[0]["coordinates"][-1])
         self.assertEqual(selected, executable[1]["coordinates"][0])
         self.assertEqual(selected, executable[1]["coordinates"][-1])
         self.assertAlmostEqual(40.0, executable[1]["length_m"], delta=0.1)
@@ -838,7 +1064,27 @@ class MappingRecorderTests(unittest.TestCase):
             "transitions": [transition],
             "rest_lanes": [rest],
             "lanes": [contour],
+            "parameters": {"outer_margin_m": 0.0},
+            "map": cls._map_feature(-5.0, -5.0, 15.0, 5.0),
             "total_drive_length_m": 11.0,
+        }
+
+    @classmethod
+    def _map_feature(cls, min_x, min_y, max_x, max_y):
+        ring = [
+            cls._coord_m(min_x, min_y),
+            cls._coord_m(max_x, min_y),
+            cls._coord_m(max_x, max_y),
+            cls._coord_m(min_x, max_y),
+            cls._coord_m(min_x, min_y),
+        ]
+        return {
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "properties": {"type": "boundary"},
+                "geometry": {"type": "Polygon", "coordinates": [ring]},
+            }],
         }
 
     @classmethod

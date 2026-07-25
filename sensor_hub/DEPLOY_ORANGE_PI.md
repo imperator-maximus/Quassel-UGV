@@ -102,3 +102,23 @@ curl http://127.0.0.1/api/ntrip/status
 - Die produktive Port-80-Bindung erfolgt über `AmbientCapabilities=CAP_NET_BIND_SERVICE` in `sensor-hub.service`.
 - `nginx` bleibt optional installiert, ist für den Betrieb aber **nicht im Pfad**.
 - Die echte `.env` enthält Secrets und gehört **nicht** ins Git.
+
+## 8. USB-Gadget-Link (Alternative zu WLAN)
+
+Statt über WLAN kann die Telemetrie über einen USB-Gadget-Punkt-zu-Punkt-Link
+(CDC-ECM, `usb0` mit `10.66.0.1/24` auf dem Orange Pi) zum Raspberry Pi laufen.
+Dafür liegen Skript und systemd-Unit in `scripts/`:
+
+```bash
+sudo install -m 755 /opt/sensor_hub/scripts/usb_gadget_setup.sh /usr/local/bin/usb_gadget_setup.sh
+sudo install -m 644 /opt/sensor_hub/scripts/usb-gadget.service /etc/systemd/system/usb-gadget.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now usb-gadget.service
+```
+
+Voraussetzung ist ein OTG-Controller im Peripheral-Modus
+(`ls /sys/class/udc` darf nicht leer sein; ggf. Overlay `usb-otg` per
+`armbian-config` aktivieren). Host-Seite und Umstellung der `wifi_url` auf
+`http://10.66.0.1/api/telemetry` sind in
+`raspberry_pi/USB_GADGET_LINK.md` beschrieben. Es gibt keinen Auto-Fallback –
+WLAN bleibt der Default und jederzeit per Konfiguration zurückstellbar.

@@ -52,6 +52,7 @@ class ODriveUSBMowerController(ODriveMowerController):
         self._usb_metadata: dict[str, dict[str, Any]] = {}
         self._last_connect_attempt = {serial: 0.0 for serial in set(self._axis_serials.values())}
         self._idle_poll_index = 0
+        self._watchdog_cleanup_pending = False
 
     def _parse_usb_specs(self, specs) -> dict[int, dict[str, Any]]:
         parsed = {}
@@ -412,6 +413,7 @@ class ODriveUSBMowerController(ODriveMowerController):
                 self._idle_poll_index += 1
                 try:
                     self._refresh_node(node_id)
+                    self._cleanup_idle_watchdogs_if_ready()
                 except Exception as exc:
                     now = time.monotonic()
                     if now - self._last_poll_error_log >= 5.0:
@@ -419,22 +421,44 @@ class ODriveUSBMowerController(ODriveMowerController):
                         self.logger.warning("ODrive USB-Poll fehlgeschlagen: %s", exc)
             self._monitor_stop_event.wait(interval_s)
 
+    def _cleanup_idle_watchdogs_if_ready(self) -> None:
+        with self._lock:
+            pending = self._watchdog_cleanup_pending
+            all_idle = not self._active_axis_nodes_locked()
+        if not pending or not all_idle:
+            return
+        try:
+            self._set_all_watchdogs(False)
+            cleared, error = self.clear_watchdog_errors()
+            if not cleared:
+                self.logger.warning(
+                    "ODrive USB-Watchdog-Nachbereitung fehlgeschlagen: %s",
+                    error,
+                )
+                return
+            with self._lock:
+                self._watchdog_cleanup_pending = False
+        except Exception as exc:
+            self.logger.warning(
+                "ODrive USB-Watchdogs nach verzoegertem IDLE nicht bereinigt: %s",
+                exc,
+            )
+
+    def _schedule_or_run_watchdog_cleanup(self, status) -> None:
+        active_nodes = list(status.get('active_axis_nodes') or [])
+        with self._lock:
+            self._watchdog_cleanup_pending = True
+        if not active_nodes:
+            self._cleanup_idle_watchdogs_if_ready()
+
     def stop(self):
         status = super().stop()
-        if not status.get('active_axis_nodes'):
-            try:
-                self._set_all_watchdogs(False)
-            except Exception as exc:
-                self.logger.warning("ODrive USB-Watchdogs nach Stopp nicht deaktiviert: %s", exc)
+        self._schedule_or_run_watchdog_cleanup(status)
         return status
 
     def emergency_stop(self, reason: str):
         status = super().emergency_stop(reason)
-        if not status.get('active_axis_nodes'):
-            try:
-                self._set_all_watchdogs(False)
-            except Exception as exc:
-                self.logger.warning("ODrive USB-Watchdogs nach Notstopp nicht deaktiviert: %s", exc)
+        self._schedule_or_run_watchdog_cleanup(status)
         return status
 
     def get_status(self, success: bool = True, error: str | None = None):

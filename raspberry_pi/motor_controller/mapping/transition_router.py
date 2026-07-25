@@ -15,18 +15,50 @@ from .plan_types import PlanSegment, TransitionSegment
 
 
 class TransitionRouter:
+    VEHICLE_LENGTH_M = 1.15
+    VEHICLE_WIDTH_M = 0.79
+    NOGO_INTRUSION_TOLERANCE_M = 0.35
+    ROUTE_CLEARANCE_M = 0.05
+
     def __init__(self, mow_area, sub_union, line_string_cls, origin_lat: float, origin_lon: float):
         self.mow_area = mow_area
         self.sub_union = sub_union
         self.line_string_cls = line_string_cls
         self.origin_lat = origin_lat
         self.origin_lon = origin_lon
+        self.blocked_union = self.blocked_for_vehicle(sub_union)
+
+    @classmethod
+    def blocked_for_vehicle(cls, sub_union):
+        """Conservative center-path obstacle matching the runtime footprint stop.
+
+        The live monitor stops when any corner of the 1.15 x 0.79 m vehicle
+        reaches the exclusion polygon reduced by the 35 cm intrusion tolerance.
+        Buffering that stop polygon by the vehicle half diagonal makes transition
+        checks heading-independent and prevents a centerline-only false positive.
+        """
+        if sub_union is None or sub_union.is_empty:
+            return None
+        stop_zone = sub_union.buffer(-cls.NOGO_INTRUSION_TOLERANCE_M)
+        if stop_zone.is_empty:
+            return None
+        half_diagonal = math.hypot(
+            cls.VEHICLE_LENGTH_M / 2.0,
+            cls.VEHICLE_WIDTH_M / 2.0,
+        )
+        return stop_zone.buffer(half_diagonal)
+
+    def _intersects_blocked(self, geometry) -> bool:
+        return bool(
+            self.blocked_union is not None
+            and not self.blocked_union.is_empty
+            and geometry.intersects(self.blocked_union)
+        )
 
     def plan_transitions(self, sequence: List[PlanSegment]) -> List[TransitionSegment]:
         transitions: List[TransitionSegment] = []
         if len(sequence) < 2:
             return transitions
-        allowed_area = self.mow_area.buffer(0.02)
         for index in range(len(sequence) - 1):
             current = sequence[index]
             nxt = sequence[index + 1]
@@ -34,46 +66,92 @@ class TransitionRouter:
             next_coords = nxt.coordinates or []
             if not current_coords or not next_coords:
                 continue
-            start = current_coords[-1]
-            end = next_coords[0]
-            start_xy = lonlat_to_xy(start, self.origin_lat, self.origin_lon)
-            end_xy = lonlat_to_xy(end, self.origin_lat, self.origin_lon)
-            line = self.line_string_cls([start_xy, end_xy])
-            line_length = polyline_length_lonlat([start, end])
-            crosses_sub = bool(self.sub_union and line.intersects(self.sub_union))
-            within_mow_area = allowed_area.covers(line)
-            safe = within_mow_area and not crosses_sub
-            route_coords_xy = [start_xy, end_xy]
-            route_kind = "direct"
-            if not safe and self.sub_union is not None:
-                routed = self.route_around_sub(start_xy, end_xy)
-                if routed:
-                    route_coords_xy = routed
-                    routed_line = self.line_string_cls(route_coords_xy)
-                    safe = allowed_area.covers(routed_line) and not routed_line.intersects(self.sub_union)
-                    route_kind = "around_sub" if safe else "failed"
-                    line_length = polyline_length_xy(route_coords_xy)
-            transitions.append(TransitionSegment(
-                type="transition",
+            transitions.append(self.plan_between(
+                current_coords[-1],
+                next_coords[0],
                 transition_index=len(transitions),
                 from_segment_index=current.segment_index if current.segment_index is not None else index,
                 to_segment_index=nxt.segment_index if nxt.segment_index is not None else index + 1,
                 from_type=current.type,
                 to_type=nxt.type,
-                safe=safe,
-                reason="ok" if safe else ("sub_zone" if crosses_sub else "outside_mow_area"),
-                route_kind=route_kind,
-                coordinates=xy_ring_to_latlon(route_coords_xy, self.origin_lat, self.origin_lon),
-                length_m=round(line_length, 2),
             ))
         return transitions
+
+    def plan_between(
+        self,
+        start: List[float],
+        end: List[float],
+        *,
+        transition_index: int = 0,
+        from_segment_index: int = -1,
+        to_segment_index: int = -1,
+        from_type: str = "unknown",
+        to_type: str = "unknown",
+    ) -> TransitionSegment:
+        """Route one transition between the final, execution-time endpoints.
+
+        Planning-time ring start vertices are not stable: the executor rotates
+        closed contours to the nearest reachable point.  This method is shared
+        by the planner and executor so a transition is always checked against
+        the endpoints that will actually be driven.
+        """
+        allowed_area = self.mow_area.buffer(0.02)
+        start_xy = lonlat_to_xy(start, self.origin_lat, self.origin_lon)
+        end_xy = lonlat_to_xy(end, self.origin_lat, self.origin_lon)
+        line = self.line_string_cls([start_xy, end_xy])
+        line_length = polyline_length_lonlat([start, end])
+        crosses_sub = bool(
+            self.sub_union is not None
+            and not self.sub_union.is_empty
+            and line.intersects(self.sub_union)
+        )
+        crosses_vehicle_block = self._intersects_blocked(line)
+        within_mow_area = allowed_area.covers(line)
+        safe = within_mow_area and not crosses_sub and not crosses_vehicle_block
+        route_coords_xy = [start_xy, end_xy]
+        route_kind = "direct"
+        if not safe and self.sub_union is not None and not self.sub_union.is_empty:
+            routed = self.route_around_sub(start_xy, end_xy)
+            if routed:
+                route_coords_xy = routed
+                routed_line = self.line_string_cls(route_coords_xy)
+                safe = (
+                    allowed_area.covers(routed_line)
+                    and not routed_line.intersects(self.sub_union)
+                    and not self._intersects_blocked(routed_line)
+                )
+                route_kind = "around_sub" if safe else "failed"
+                line_length = polyline_length_xy(route_coords_xy)
+        return TransitionSegment(
+            type="transition",
+            transition_index=transition_index,
+            from_segment_index=from_segment_index,
+            to_segment_index=to_segment_index,
+            from_type=from_type,
+            to_type=to_type,
+            safe=safe,
+            reason=(
+                "ok" if safe
+                else "vehicle_footprint" if crosses_vehicle_block
+                else "sub_zone" if crosses_sub
+                else "outside_mow_area"
+            ),
+            route_kind=route_kind,
+            coordinates=xy_ring_to_latlon(route_coords_xy, self.origin_lat, self.origin_lon),
+            length_m=round(line_length, 2),
+        )
 
     def route_around_sub(self, start_xy, end_xy):
         best_route = None
         best_length = float("inf")
         allowed = self.mow_area.buffer(0.05)
-        for sub_poly in iter_polygons(self.sub_union):
-            route_poly = sub_poly.buffer(0.15)
+        route_obstacles = (
+            self.blocked_union
+            if self.blocked_union is not None and not self.blocked_union.is_empty
+            else self.sub_union
+        )
+        for sub_poly in iter_polygons(route_obstacles):
+            route_poly = sub_poly.buffer(self.ROUTE_CLEARANCE_M)
             if route_poly.is_empty:
                 continue
             raw_ring = list(route_poly.exterior.coords)
@@ -102,7 +180,11 @@ class TransitionRouter:
             edge_pairs.append((node, nxt))
         for i, j in edge_pairs:
             edge = self.line_string_cls([nodes[i], nodes[j]])
-            if edge.intersects(self.sub_union) or not allowed_area.covers(edge):
+            if (
+                edge.intersects(self.sub_union)
+                or self._intersects_blocked(edge)
+                or not allowed_area.covers(edge)
+            ):
                 continue
             distance = math.hypot(nodes[j][0] - nodes[i][0], nodes[j][1] - nodes[i][1])
             graph[i].append((j, distance))

@@ -24,6 +24,8 @@ class NavConfig:
     track_cross_track_limit_m: float = 1.0
     track_alignment_enter_deg: float = 25.0
     track_alignment_exit_deg: float = 10.0
+    track_stall_timeout_s: float = 10.0
+    track_stall_min_progress_m: float = 0.15
     min_inner_wheel_speed: float = 0.15
 
 
@@ -463,7 +465,7 @@ class NavigationControllerTests(unittest.TestCase):
         self.assertEqual(status['state'], 'cross_track_stop')
         self.assertIn('Pfad entfernt', status['last_error'])
 
-    def test_track_aligns_by_rolling_around_stationary_inner_wheel(self):
+    def test_forward_track_alignment_pivots_without_longitudinal_motion(self):
         motor = FakeMotor()
         controller = NavigationController(motor, NavConfig())
         controller.set_waypoints([
@@ -475,7 +477,8 @@ class NavigationControllerTests(unittest.TestCase):
             controller.on_pose_update({
                 'latitude': 52.0,
                 'longitude': 10.0,
-                'heading_deg': 0.0,
+                # Eastbound target, therefore a moderate +60 degree error.
+                'heading_deg': 30.0,
             })
             x, y, _ = motor.commands[-1]
             status = controller.get_status()
@@ -483,8 +486,8 @@ class NavigationControllerTests(unittest.TestCase):
             controller.shutdown()
 
         self.assertGreater(x, 0.0)
-        self.assertGreater(y, 0.0)
-        self.assertAlmostEqual(y, abs(x) * 0.6, delta=0.001)
+        self.assertAlmostEqual(x, 0.5, delta=0.001)
+        self.assertEqual(y, 0.0)
         self.assertTrue(status['limits']['track_aligning'])
 
     def test_track_alignment_uses_hysteresis_then_releases_forward_drive(self):
@@ -512,8 +515,162 @@ class NavigationControllerTests(unittest.TestCase):
         finally:
             controller.shutdown()
 
-        self.assertGreater(still_aligning[1], 0.0)
-        self.assertGreater(released[1], still_aligning[1])
+        self.assertEqual(still_aligning[1], 0.0)
+        self.assertGreater(released[1], 0.0)
+
+    def test_failed_brunnen_pose_pivots_in_place_instead_of_driving_an_arc(self):
+        """Regression fuer den Realstopp vom 25.07.: -52 Grad am Bahnanfang."""
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+        controller.set_waypoints([
+            {'latitude': 53.3325664, 'longitude': 11.0785893},
+            {'latitude': 53.3325583290, 'longitude': 11.0784566012},
+        ], mode='track', direction='forward')
+        controller.start()
+        try:
+            controller.on_pose_update({
+                'latitude': 53.3325664,
+                'longitude': 11.0785893,
+                'heading_deg': 302.8,
+            })
+            x, y, _ = motor.commands[-1]
+        finally:
+            controller.shutdown()
+
+        self.assertLess(x, 0.0)
+        self.assertAlmostEqual(x, -0.5, delta=0.001)
+        self.assertEqual(y, 0.0)
+
+    def test_reverse_track_alignment_rolls_backward_without_counter_rotation(self):
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.001},
+        ], mode='track', direction='reverse')
+        controller.start()
+        try:
+            # Eastbound reverse motion wants a west-facing body. The 60 degree
+            # error mirrors the failed short Brunnen transition.
+            controller.on_pose_update({
+                'latitude': 52.0,
+                'longitude': 10.0,
+                'heading_deg': 210.0,
+            })
+            x, y, _ = motor.commands[-1]
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        ratio = motor.pwm_config.turn_factor / motor.pwm_config.forward_factor
+        left_mix = y + x * ratio
+        right_mix = y - x * ratio
+        self.assertGreater(x, 0.0)
+        self.assertLess(y, 0.0)
+        self.assertAlmostEqual(y, -abs(x) * ratio, delta=0.001)
+        self.assertAlmostEqual(left_mix, 0.0, delta=0.001)
+        self.assertLess(right_mix, 0.0)
+        self.assertTrue(status['limits']['track_aligning'])
+
+    def test_track_speed_reduction_preserves_forward_wheel_directions(self):
+        """Moderate heading correction must retain usable grass-load PWM."""
+        motor = FakeMotor()
+        controller = NavigationController(
+            motor,
+            NavConfig(
+                track_lookahead_m=1.0,
+                track_alignment_enter_deg=25.0,
+                track_alignment_exit_deg=10.0,
+                min_inner_wheel_speed=0.50,
+            ),
+        )
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.0001},
+        ], mode='track', direction='forward')
+        controller.start()
+        try:
+            controller.on_pose_update({
+                'latitude': 52.0,
+                'longitude': 10.0,
+                'heading_deg': 107.0,
+            })
+            x, y, _ = motor.commands[-1]
+        finally:
+            controller.shutdown()
+
+        ratio = motor.pwm_config.turn_factor / motor.pwm_config.forward_factor
+        left_mix = y + x * ratio
+        right_mix = y - x * ratio
+        self.assertGreaterEqual(left_mix, -1e-9)
+        self.assertGreaterEqual(right_mix, -1e-9)
+        self.assertGreater(min(left_mix, right_mix) * 500.0, 50.0)
+
+    def test_live_regression_23_degree_track_error_keeps_both_tracks_out_of_deadband(self):
+        """Regression for the real Brunnen stall at source segment 22.
+
+        At about 23 degrees heading error the old post-processing multiplied
+        the complete command by 0.20, yielding PWM 1511/1547. Both software
+        states remained green although the heavy UGV could not move on grass.
+        """
+        motor = FakeMotor()
+        controller = NavigationController(
+            motor,
+            NavConfig(
+                track_lookahead_m=0.8,
+                track_alignment_enter_deg=25.0,
+                track_alignment_exit_deg=10.0,
+                min_inner_wheel_speed=0.50,
+            ),
+        )
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.0002},
+        ], mode='track', direction='forward')
+        controller.start()
+        try:
+            controller.on_pose_update({
+                'latitude': 52.0,
+                'longitude': 10.0,
+                'heading_deg': 113.0,
+            })
+            x, y, _ = motor.commands[-1]
+        finally:
+            controller.shutdown()
+
+        ratio = motor.pwm_config.turn_factor / motor.pwm_config.forward_factor
+        left_pwm_offset = (y + x * ratio) * motor.pwm_config.forward_factor
+        right_pwm_offset = (y - x * ratio) * motor.pwm_config.forward_factor
+        self.assertGreater(left_pwm_offset, 50.0)
+        self.assertGreater(right_pwm_offset, 50.0)
+
+    def test_track_stall_stops_and_reports_missing_progress(self):
+        motor = FakeMotor()
+        controller = NavigationController(
+            motor,
+            NavConfig(
+                track_stall_timeout_s=3.0,
+                track_stall_min_progress_m=0.15,
+            ),
+        )
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.0002},
+        ], mode='track', direction='forward')
+        controller.start()
+        try:
+            pose = {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 90.0}
+            controller.on_pose_update(pose)
+            controller._track_stall_reference_time -= 3.1
+            controller.on_pose_update(pose)
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertFalse(status['running'])
+        self.assertEqual('track_stall', status['state'])
+        self.assertIn('ohne Track-Fortschritt', status['last_error'])
+        self.assertEqual((0.0, 0.0, True), motor.commands[-1])
 
     def test_track_mode_completes_after_end_projection(self):
         motor = FakeMotor()
