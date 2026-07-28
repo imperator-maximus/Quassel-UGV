@@ -324,6 +324,7 @@ class NavigationController:
                     'goto_divergence_limit_m': float(getattr(self.config, 'goto_divergence_limit_m', 0.75)),
                     'goto_divergence_samples': int(getattr(self.config, 'goto_divergence_samples', 5)),
                 'track_cross_track_limit_m': float(getattr(self.config, 'track_cross_track_limit_m', 1.0)),
+                    'track_heading_block_deg': self._track_heading_block_deg(),
                     'track_alignment_enter_deg': self._track_alignment_enter_deg(),
                     'track_alignment_exit_deg': self._track_alignment_exit_deg(),
                     'track_aligning': self._track_aligning,
@@ -528,12 +529,32 @@ class NavigationController:
             bearing = (bearing + 180.0) % 360.0
         error = self.heading_error_deg(bearing, heading)
 
-        # Ein Track darf nicht mit grossem Winkelfehler und gleichzeitigem
-        # Vorwaertsschub angefahren werden. Genau das hat im Realbetrieb einen
-        # Bogen von der Bahn weg erzeugt: ein Rad stand, das andere fuhr weiter.
-        # Vorwaerts deshalb zuerst symmetrisch auf der Stelle ausrichten und
-        # erst nach Verlassen der Hysterese laengs fahren. Die bewaehrte
-        # Rueckwaertsausrichtung bleibt unveraendert.
+        # Genuinely extreme Winkelfehler (der urspruengliche Brunnen-Stall
+        # lag bei -51.7° und wuchs weiter) sind jenseits dessen, was ein
+        # Roll-Bogen sicher auffangen kann - dort deterministisch stoppen
+        # statt zu raten.
+        block_deg = self._track_heading_block_deg()
+        if abs(error) >= block_deg:
+            message = (
+                f'Winkelfehler am Bahnstart zu groß: {error:.1f}° '
+                f'(Grenze {block_deg:.1f}°) – Bahn wird nicht automatisch angefahren'
+            )
+            self.stop(reason='heading_block')
+            self._set_error(message)
+            return
+
+        # Gleichzeitiges Drehen und Vorwaertsfahren konvergiert auf diesem
+        # Fahrzeug nicht, sobald der Turn-Anteil saettigt (~15° bei
+        # turn_kp=0.02): der Vorwaertsschub laeuft schneller weg von der
+        # Bahn, als die Drehung aufholen kann (real, 25.07.: -18.7° ->
+        # -26.3° unter vollem x/y-Mix, Cross-Track 0.01 -> 0.16 m). Deshalb
+        # zuerst ohne Vorwaertsschub um ein nahezu stehendes Kettenpaar
+        # rollen, bis der Fehler unter die Austrittsschwelle faellt - erst
+        # dann normal weiterfahren. Symmetrisch fuer beide Richtungen;
+        # bewaehrt fuer reverse am selben Tag (29.7° -> 1.3° in 11s). Der
+        # Gegenlauf-Pivot als Alternative dreht das reale UGV unter Last
+        # gar nicht (Stillstand >4 Min, selbes Datum) und bleibt deshalb
+        # aussen vor.
         enter_deg = self._track_alignment_enter_deg()
         exit_deg = self._track_alignment_exit_deg()
         with self._lock:
@@ -544,37 +565,17 @@ class NavigationController:
             aligning = self._track_aligning
 
         if aligning:
-            if direction != 'reverse':
-                # Kein longitudinaler Anteil: bei turn_factor=300 ergibt
-                # x=0.50 an beiden Ketten denselben Betrag von 150 us in
-                # entgegengesetzter Richtung. So bleibt der Drehmittelpunkt
-                # am Fahrzeug statt seitlich an der stehenden Kette.
-                turn = math.copysign(self._pivot_turn_level(), error)
-                longitudinal = 0.0
-                align_mode = 'pivot'
-            else:
-                # Rueckwaerts ist der Roll-Aligner real bereits bewaehrt und
-                # wird von dieser gezielten Vorwaerts-Korrektur nicht beruehrt.
-                self._reset_track_stall_watchdog(progress_m, now)
-                limit = min(0.30, max(0.0, float(self.config.max_joystick)))
-                turn = self._clamp(
-                    error * float(self.config.turn_kp),
-                    -limit,
-                    limit,
-                )
-                longitudinal = -min(
-                    limit,
-                    abs(turn) * self._turn_to_forward_ratio,
-                )
-                align_mode = 'roll'
-
+            self._reset_track_stall_watchdog(progress_m, now)
+            limit = min(0.30, max(0.0, float(self.config.max_joystick)))
+            turn = self._clamp(error * float(self.config.turn_kp), -limit, limit)
+            rolling = min(limit, abs(turn) * self._turn_to_forward_ratio)
+            longitudinal = -rolling if direction == 'reverse' else rolling
             self._send_command(turn, longitudinal)
             if now - self._last_debug_log >= 1.0:
                 self._last_debug_log = now
                 self.logger.info(
-                    '🧭 track-align-%s(%s): seg=%d xtrack=%.2fm hdg=%.1f° err=%.1f° → x=%.3f y=%.3f',
-                    align_mode, direction, segment_index, cross_track_m,
-                    heading, error, turn, longitudinal,
+                    '🧭 track-align-roll(%s): seg=%d xtrack=%.2fm hdg=%.1f° err=%.1f° → x=%.3f y=%.3f',
+                    direction, segment_index, cross_track_m, heading, error, turn, longitudinal,
                 )
             return
 
@@ -775,20 +776,32 @@ class NavigationController:
         ratio = max(0.01, float(self._turn_to_forward_ratio))
         return self._clamp(limit / ratio, limit, 1.0)
 
-    def _track_alignment_enter_deg(self) -> float:
+    def _track_heading_block_deg(self) -> float:
         return self._clamp(
-            float(getattr(self.config, 'track_alignment_enter_deg', 25.0)),
+            float(getattr(self.config, 'track_heading_block_deg', 45.0)),
             10.0,
             60.0,
+        )
+
+    def _track_alignment_enter_deg(self) -> float:
+        return self._clamp(
+            float(getattr(self.config, 'track_alignment_enter_deg', 10.0)),
+            3.0,
+            30.0,
         )
 
     def _track_alignment_exit_deg(self) -> float:
         enter = self._track_alignment_enter_deg()
         return self._clamp(
-            float(getattr(self.config, 'track_alignment_exit_deg', 10.0)),
-            2.0,
-            max(2.0, enter - 2.0),
+            float(getattr(self.config, 'track_alignment_exit_deg', 5.0)),
+            1.0,
+            max(1.0, enter - 2.0),
         )
+
+    def _reset_track_stall_watchdog(self, progress_m: float, now: float) -> None:
+        with self._lock:
+            self._track_stall_reference_m = progress_m
+            self._track_stall_reference_time = now
 
     def _track_stall_timeout_s(self) -> float:
         return self._clamp(
@@ -803,11 +816,6 @@ class NavigationController:
             0.05,
             1.0,
         )
-
-    def _reset_track_stall_watchdog(self, progress_m: float, now: float) -> None:
-        with self._lock:
-            self._track_stall_reference_m = progress_m
-            self._track_stall_reference_time = now
 
     def _track_is_stalled(self, progress_m: float, now: float) -> bool:
         min_progress_m = self._track_stall_min_progress_m()

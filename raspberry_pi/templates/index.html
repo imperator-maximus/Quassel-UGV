@@ -929,7 +929,8 @@
             font-weight: bold;
         }
 
-        .planner-field input {
+        .planner-field input,
+        .planner-field select {
             width: 100%;
             padding: 8px 10px;
             border-radius: 8px;
@@ -937,6 +938,23 @@
             background: rgba(0, 0, 0, 0.25);
             color: #f5f5dc;
             font-family: Consolas, monospace;
+            font-size: 1em;
+            appearance: none;
+            -webkit-appearance: none;
+            background-image: linear-gradient(45deg, transparent 50%, #d4af37 50%),
+                              linear-gradient(135deg, #d4af37 50%, transparent 50%);
+            background-position: calc(100% - 16px) 55%, calc(100% - 11px) 55%;
+            background-size: 5px 5px, 5px 5px;
+            background-repeat: no-repeat;
+        }
+
+        .planner-field input {
+            background-image: none;
+        }
+
+        .planner-field select option {
+            background: #24401f;
+            color: #f5f5dc;
         }
 
         .planner-progress {
@@ -1162,10 +1180,10 @@
                         <div class="area-summary map-edit-control" id="plannerControls">
                             <div class="planner-grid">
                                 <label class="planner-field">Schnittbreite m
-                                    <input id="plannerCutWidth" type="number" min="0.1" max="2" step="0.01" value="0.45">
+                                    <input id="plannerCutWidth" type="number" min="0.1" max="2" step="0.01" value="0.85">
                                 </label>
                                 <label class="planner-field">Überlappung m
-                                    <input id="plannerOverlap" type="number" min="0" max="1" step="0.01" value="0.10">
+                                    <input id="plannerOverlap" type="number" min="0" max="1" step="0.01" value="0.50">
                                 </label>
                                 <label class="planner-field">Außenabstand m
                                     <input id="plannerOuterMargin" type="number" min="0" max="2" step="0.01" value="0.00">
@@ -1177,7 +1195,13 @@
                                     <input id="plannerMaxRingTurn" type="number" min="45" max="179" step="1" value="155">
                                 </label>
                                 <label class="planner-field">Sub-Konturen
-                                    <input id="plannerSubContourCount" type="number" min="0" max="8" step="1" value="3">
+                                    <input id="plannerSubContourCount" type="number" min="0" max="8" step="1" value="0">
+                                </label>
+                                <label class="planner-field" title="Serpentine: Schrägzüge, die ineinander übergehen - keine Seitwärtsschritte, das Fahrzeug dreht kaum. Erfordert 2×Bahnabstand ≤ Schnittbreite.">Restflächen-Muster
+                                    <select id="plannerRestPattern">
+                                        <option value="serpentine" selected>Serpentine (Schrägzüge)</option>
+                                        <option value="parallel">Parallel (Querverbinder)</option>
+                                    </select>
                                 </label>
                             </div>
                             <div class="map-row">

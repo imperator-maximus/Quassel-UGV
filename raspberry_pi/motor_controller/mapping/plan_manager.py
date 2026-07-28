@@ -21,7 +21,19 @@ class MowingPlanManager:
     # acceptance radius. Treating this tiny lateral connector as a separate
     # track makes a skid-steer oscillate between two impossible headings.
     # The following long lane naturally absorbs the small cross-track offset.
-    ABSORBED_REST_LANE_TRANSFER_M = 0.50
+    #
+    # 0.60 rather than the original 0.50: as the lanes shorten towards a
+    # sub-zone their ends stagger, so the end-to-start step grows past a flat
+    # 0.50 for some pairs while its neighbours stay below it. Measured over
+    # the real Brunnen plan the steps cluster at <=0.53 m (65 of 73) and then
+    # jump to >=0.79 m, so 0.60 sits in an empty band: it absorbs the whole
+    # lateral-hop family and still leaves the genuine repositioning moves as
+    # real transitions. Driving one of those hops as its own track demanded a
+    # 42-61 degree turn for half a metre and then the same turn back (real,
+    # 26.07., transition 55/56/58) - pure detour the following lane's pure
+    # pursuit removes for free. The absorbed offset also stays well inside
+    # track_cross_track_limit_m (1.0 m).
+    ABSORBED_REST_LANE_TRANSFER_M = 0.60
     # Kept as an alias for callers/tests that referred to the first version of
     # this rule when it only covered the initial RTK positioning leg.
     POSITIONING_REVERSE_THRESHOLD_DEG = TRANSFER_REVERSE_THRESHOLD_DEG
@@ -281,7 +293,22 @@ class MowingPlanManager:
                         current_heading_deg,
                     )
 
-            track = self._track_segment(segment, coordinates=coords)
+            track = self._track_segment(
+                segment,
+                coordinates=coords,
+                # current_heading_deg is the heading the vehicle physically
+                # ends the previous segment with (live RTK pose for the first
+                # one, then _segment_end_heading of what was actually
+                # compiled). Every lane must be evaluated against it, not
+                # just the first: on an uninterrupted run the plan's own
+                # alternating directions already match it, so this is a
+                # no-op there. After a resume or skip the traversal sense of
+                # one lane can be inverted, and only this check keeps the
+                # following lanes from demanding a 180 degree turnaround
+                # (real, 25.07.: lane 37 asked for 178.9 deg after lane 36
+                # had been resumed east-to-west).
+                heading_deg=current_heading_deg,
+            )
             executable.append(track)
             current_heading_deg = self._segment_end_heading(
                 track,
@@ -369,7 +396,20 @@ class MowingPlanManager:
             to_segment_index=int(to_segment_index if to_segment_index is not None else -1),
             from_type="start_pose",
             to_type=source_type,
+            # The vehicle is parked wherever it is parked - a shed, a path,
+            # the driveway - and driving from there to the first lane is a
+            # normal part of the job. Requiring this leg to stay inside the
+            # mapped area rejected the whole plan for a vehicle standing
+            # 12.3 m outside it (real, 28.07.). Sub zones and the vehicle
+            # clearance are still enforced below; only the outer boundary is
+            # not, because there is nothing mapped out there to check.
+            confine_to_mow_area=False,
         ).to_dict()
+        if routed.get("safe") is not True:
+            raise ValueError(
+                "Startposition kann nicht sicher angefahren werden: der Weg zur ersten "
+                "Bahn führt durch eine Sperrzone. Bitte das Fahrzeug umstellen."
+            )
         segment = self._transition_segment(routed, from_coord=from_coord, to_coord=to_coord)
         if segment is None:
             raise ValueError("Startpositionierung passt nicht zum berechneten sicheren Pfad")
@@ -457,13 +497,33 @@ class MowingPlanManager:
             "total_drive_length_m": round(float(plan.get("total_drive_length_m", plan.get("total_length_m", 0.0)) or 0.0), 2),
         }
 
-    def _track_segment(self, segment: Dict[str, Any], coordinates: Optional[List[List[float]]] = None) -> Dict[str, Any]:
+    def _track_segment(
+        self,
+        segment: Dict[str, Any],
+        coordinates: Optional[List[List[float]]] = None,
+        heading_deg: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        track_coords = coordinates or self._coords(segment)
         direction = "forward"
         if segment.get("type") == "rest_lane":
             direction = segment.get("direction", "forward")
+            if self.reverse_track_supported and heading_deg is not None:
+                # One rule for the drive direction: take whichever nose
+                # orientation needs the smaller turn from the heading the
+                # vehicle actually has here - exactly what
+                # _select_transfer_direction already does for transitions.
+                #
+                # On an uninterrupted run this simply reproduces the plan's
+                # own alternating forward/reverse pattern, because that
+                # pattern exists precisely so the nose never has to turn.
+                # After a resume or skip the traversal sense of a lane can
+                # be inverted, and only this rule keeps the vehicle from
+                # being asked for a 180 degree turnaround it cannot drive
+                # (real, 25.07.: -52° on lane 36, then 178.9° on lane 37).
+                forward_error = abs(self._route_heading_error(track_coords, heading_deg))
+                direction = "forward" if forward_error <= self.TRANSFER_REVERSE_THRESHOLD_DEG else "reverse"
         if direction == "reverse" and not self.reverse_track_supported:
             raise ValueError("Plan enthält Rückwärtssegmente, Ausführung noch nicht unterstützt")
-        track_coords = coordinates or self._coords(segment)
         return {
             "type": "mow",
             "source_type": segment.get("type"),
@@ -507,7 +567,15 @@ class MowingPlanManager:
             "length_m": float(transition.get("length_m", 0.0) or 0.0),
         }
 
-    def _oriented_track_coords(self, segment: Dict[str, Any], target: Optional[List[float]]) -> List[List[float]]:
+    def _oriented_track_coords(
+        self, segment: Dict[str, Any], target: Optional[List[float]]
+    ) -> List[List[float]]:
+        """Traverse a lane from whichever end the vehicle is closest to.
+
+        This only decides the order the points are driven in. Whether the
+        vehicle drives that order nose-first or backwards is decided
+        separately in _track_segment, from the live heading.
+        """
         coords = self._coords(segment)
         if not coords or target is None:
             return coords
@@ -844,10 +912,29 @@ class MowingPlanManager:
 
     @classmethod
     def _short_rest_lane_count(cls, plan: Dict[str, Any]) -> int:
-        return len([
+        """Rest lanes too short to be worth driving as their own leg.
+
+        A serpentine pass is not its own leg: it is one link of a run whose
+        passes meet end to end, and near a sub-zone the links get short by
+        design. Judging those individually would reject a perfectly
+        driveable plan, so there the whole run is measured instead.
+        """
+        lanes = [
             item for item in plan.get("sequence") or []
             if item.get("type") == "rest_lane"
-            and cls._segment_length_m(item) < cls.MIN_PLANNED_REST_LANE_M
+        ]
+        if (plan.get("parameters") or {}).get("rest_pattern") != "serpentine":
+            return len([
+                item for item in lanes
+                if cls._segment_length_m(item) < cls.MIN_PLANNED_REST_LANE_M
+            ])
+        run_length: Dict[Any, float] = {}
+        for item in lanes:
+            key = item.get("rest_group")
+            run_length[key] = run_length.get(key, 0.0) + cls._segment_length_m(item)
+        return len([
+            item for item in lanes
+            if run_length.get(item.get("rest_group"), 0.0) < cls.MIN_PLANNED_REST_LANE_M
         ])
 
     @staticmethod

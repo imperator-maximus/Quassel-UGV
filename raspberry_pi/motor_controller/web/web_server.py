@@ -514,6 +514,7 @@ class WebServer:
                     sub_margin_m=request.args.get('sub_margin_m', 0.25),
                     max_ring_turn_deg=request.args.get('max_ring_turn_deg', 155.0),
                     sub_contour_count=request.args.get('sub_contour_count', 3),
+                    rest_pattern=request.args.get('rest_pattern', 'parallel'),
                 )
             except ValueError as exc:
                 result = {'success': False, 'error': str(exc)}

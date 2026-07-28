@@ -217,7 +217,9 @@ export PYTHONPATH=/home/nicolay:$PYTHONPATH
 
 ## 🔒 Sicherheit
 
-- Sicherheitsschalter (GPIO 17) stoppt und verriegelt Fahrantrieb und Mähdeck
+- Optionaler Sicherheitsschalter (GPIO 17, `safety.enabled` in config.yaml) stoppt und
+  verriegelt Fahrantrieb und Mähdeck, sofern verbaut. Am UGV auf raspberrycan ist
+  kein Schalter vorhanden; dort ist `safety.enabled: false` gesetzt.
 - Command-Timeout (2s) stoppt Motoren bei fehlenden Befehlen
 - Joystick-Timeout (1s) stoppt Motoren bei Verbindungsabbruch
 - Nach 1 s ohne SensorHub-Pose pausiert der Watchdog nur Fahrantrieb und Route;
@@ -252,7 +254,7 @@ python3 scripts/configure_odrive_watchdog.py apply --serial 0x387132523135 --nod
 | 22 | Licht (Relay) |
 | 23 | Mäher (Relay) |
 | 12 | Mäher (PWM) |
-| 17 | Sicherheitsschalter |
+| 17 | Sicherheitsschalter (optional, an raspberrycan nicht verbaut) |
 
 ## 🌐 Web-Interface
 

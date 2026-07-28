@@ -403,7 +403,8 @@ function generateLanePreview() {
         outer_margin_m: plannerNumber('plannerOuterMargin'),
         sub_margin_m: plannerNumber('plannerSubMargin'),
         max_ring_turn_deg: plannerNumber('plannerMaxRingTurn'),
-        sub_contour_count: plannerNumber('plannerSubContourCount')
+        sub_contour_count: plannerNumber('plannerSubContourCount'),
+        rest_pattern: document.getElementById('plannerRestPattern')?.value || 'parallel'
     });
     setPlannerStatus('Bahnen werden berechnet...');
     fetch(`/api/mapping/maps/${encodeURIComponent(activeMapName)}/plan?${params}`)
@@ -417,6 +418,10 @@ function generateLanePreview() {
             renderLanePreview(result.data, 'preview');
             setLoadedPlanReady(false);
             refreshPlanButtons();
+            const planWarnings = result.data.warnings || [];
+            if (planWarnings.length) {
+                setPlannerStatus(`⚠️ ${planWarnings.join(' · ')}`);
+            }
         })
         .catch(error => {
             clearLanePreview(false);
@@ -1219,7 +1224,7 @@ function checkAndStartLoadedPlan(useResume, startSegmentIndex, startCoordinate, 
                 return;
             }
             const detail = [result.data.error, ...errors, ...warnings].filter(Boolean).join(' · ');
-            setPlanStatus(`Play blockiert · ${planSummaryText(result.data.summary || lanePreviewPlan)}${detail ? ' · ' + detail : ''}`);
+            setPlanStatus(`⛔ Play blockiert${detail ? ' · ' + detail : ''} · ${planSummaryText(result.data.summary || lanePreviewPlan)}`);
             return;
         }
         if (attemptToken !== planStartAttemptToken) return;
@@ -1421,6 +1426,12 @@ function planSummaryText(plan) {
 }
 
 function updateVehiclePose(sensorData, navigationStatus, planExecutionStatus) {
+    // Plan state and especially its error message must reach the user even
+    // when there is no pose, no sensor payload or no open map - a plan that
+    // stopped is exactly the moment those can be missing. Keep it ahead of
+    // every early return below (a heading_block went unnoticed on 26.07.
+    // because it was reported only after the vehicle marker was drawn).
+    updatePlanStatusDisplay(navigationStatus, planExecutionStatus);
     if (!sensorData) return;
     const pose = normalizePose(sensorData);
     latestVehiclePose = pose;
@@ -1447,6 +1458,9 @@ function updateVehiclePose(sensorData, navigationStatus, planExecutionStatus) {
     } else {
         vehicleHeadingLine.setLatLngs([latLng, headingEnd]);
     }
+}
+
+function updatePlanStatusDisplay(navigationStatus, planExecutionStatus) {
     const nav = navigationStatus || {};
     const plan = planExecutionStatus || {};
     planIsRunning = plan.running === true || plan.state === 'running';

@@ -171,11 +171,24 @@ class NavigationConfig:
     goto_divergence_limit_m: float = 0.75
     goto_divergence_samples: int = 5
     track_cross_track_limit_m: float = 1.0
-    # Track-Navigation richtet das Fahrzeug erst auf den Pfad aus. Oberhalb
-    # der Eintrittsschwelle wird auf der Stelle gedreht; gefahren wird erst
-    # wieder, wenn die kleinere Austrittsschwelle erreicht ist.
-    track_alignment_enter_deg: float = 25.0
-    track_alignment_exit_deg: float = 10.0
+    # Gleichzeitiges Drehen und Vorwaertsfahren (_calculate_command)
+    # konvergiert auf diesem Fahrzeug nicht, sobald der Turn-Anteil
+    # saettigt (~15° bei turn_kp=0.02): der Vorwaertsschub laeuft
+    # schneller von der Bahn weg, als die Drehung aufholen kann (real,
+    # 25.07.: -18.7° -> -26.3° unter vollem x/y-Mix, xtrack 0.01->0.16 m).
+    # Oberhalb von track_alignment_enter_deg wird deshalb zuerst ohne
+    # Vorwaertsschub um ein nahezu stehendes Kettenpaar gerollt (fuer
+    # reverse am selben Tag bewaehrt: 29.7° -> 1.3° in 11s), erst
+    # unterhalb von track_alignment_exit_deg normal weitergefahren. Ein
+    # Gegenlauf-Pivot als Alternative dreht das reale UGV unter Last gar
+    # nicht (Stillstand >4 Min, selbes Datum).
+    track_alignment_enter_deg: float = 10.0
+    track_alignment_exit_deg: float = 5.0
+    # Oberhalb dieser Schwelle ist selbst der Roll-Bogen nicht mehr
+    # sicher (urspruenglicher Brunnen-Stall: -51.7° wachsend bis -62.3°,
+    # Cross-Track 0.19->1.01 m) - dort deterministisch stoppen statt zu
+    # raten, statt automatisch anzufahren.
+    track_heading_block_deg: float = 45.0
     # Bei weniger als 15 cm Track-Fortschritt in 10 s neutral stoppen und
     # den Stillstand sichtbar melden, statt wirkungslose PWM weiterzusenden.
     track_stall_timeout_s: float = 10.0
@@ -404,6 +417,7 @@ class Config:
                 'track_cross_track_limit_m': self.navigation.track_cross_track_limit_m,
                 'track_alignment_enter_deg': self.navigation.track_alignment_enter_deg,
                 'track_alignment_exit_deg': self.navigation.track_alignment_exit_deg,
+                'track_heading_block_deg': self.navigation.track_heading_block_deg,
                 'track_stall_timeout_s': self.navigation.track_stall_timeout_s,
                 'track_stall_min_progress_m': self.navigation.track_stall_min_progress_m,
                 'min_inner_wheel_speed': self.navigation.min_inner_wheel_speed

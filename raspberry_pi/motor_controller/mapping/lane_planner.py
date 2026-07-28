@@ -19,10 +19,14 @@ class LanePlanner:
         sub_margin_m: float = 0.25,
         max_ring_turn_deg: float = 155.0,
         sub_contour_count: int = 3,
+        rest_pattern: str = "parallel",
     ):
         cut_width = float(cut_width_m)
         overlap = float(overlap_m)
         spacing = cut_width - overlap
+        pattern = str(rest_pattern or "parallel").strip().lower()
+        if pattern not in ("parallel", "serpentine"):
+            raise ValueError("rest_pattern muss parallel oder serpentine sein")
         if cut_width <= 0.0:
             raise ValueError("cut_width_m muss > 0 sein")
         if spacing <= 0.0:
@@ -39,6 +43,7 @@ class LanePlanner:
             sub_margin_m=max(0.0, float(sub_margin_m)),
             max_ring_turn_deg=max(45.0, min(179.0, float(max_ring_turn_deg))),
             sub_contour_count=max(0, min(8, sub_contours)),
+            rest_pattern=pattern,
         )
 
     def plan(
@@ -90,6 +95,18 @@ class LanePlanner:
             subs=sub_payloads,
             exclusion_contours=self._exclusion_contours(sub_union, origin_lat, origin_lon),
         )
+
+        if self.parameters.rest_pattern == "serpentine":
+            # Slanted passes converge at the turning end, where the local
+            # spacing doubles. Below this the pattern leaves wedge-shaped
+            # strips uncut - measured on a real 815 m2 area: 0.7 % uncut at
+            # cut 0.85 / spacing 0.35, but 14.4 % at cut 0.45 / spacing 0.35.
+            if 2.0 * self.parameters.spacing_m > self.parameters.cut_width_m:
+                plan.warnings.append(
+                    "Serpentine: Bahnabstand %.2f m ist zu groß für Schnittbreite %.2f m "
+                    "(nötig: 2×Abstand ≤ Schnittbreite). An den Wendepunkten bleiben "
+                    "Streifen stehen." % (self.parameters.spacing_m, self.parameters.cut_width_m)
+                )
 
         covered_geometries = []
         current = main_poly
@@ -221,6 +238,118 @@ class LanePlanner:
                 ))
         return sub_contours
 
+    def _scan_rows(self, scan_area, line_string_cls, spacing: float):
+        """Clip horizontal scanlines, one row per lane spacing.
+
+        Returns one list of ``(x_start, x_end, y)`` spans per row, in order.
+        A row can hold several spans where an exclusion splits the area.
+        """
+        min_x, min_y, max_x, max_y = scan_area.bounds
+        rows = []
+        y = min_y + spacing / 2.0
+        while y <= max_y and len(rows) < 1000:
+            clipped = scan_area.intersection(
+                line_string_cls([(min_x - spacing, y), (max_x + spacing, y)])
+            )
+            spans = []
+            for line in iter_lines(clipped):
+                xs = [float(coord[0]) for coord in line.coords]
+                start, end = min(xs), max(xs)
+                if end - start >= spacing * 0.6:
+                    spans.append((start, end, y))
+            spans.sort()
+            rows.append(spans)
+            y += spacing
+        return rows
+
+    def _chain_rows(self, rows, spacing: float):
+        """Group row spans into strips that lie above one another.
+
+        Consecutive rows belong to the same strip only where their spans
+        actually overlap in x, so an exclusion that splits the area also
+        splits the strip instead of joining across it.
+        """
+        chains = []
+        open_chains = []
+        for spans in rows:
+            next_open = []
+            for span in spans:
+                best = None
+                best_overlap = spacing * 0.5
+                for chain in open_chains:
+                    last = chain[-1]
+                    overlap = min(last[1], span[1]) - max(last[0], span[0])
+                    if overlap > best_overlap:
+                        best_overlap = overlap
+                        best = chain
+                if best is not None and best not in next_open:
+                    best.append(span)
+                    next_open.append(best)
+                else:
+                    chain = [span]
+                    chains.append(chain)
+                    next_open.append(chain)
+            open_chains = next_open
+        return chains
+
+    def _serpentine_passes(self, chains, allowed, line_string_cls, spacing: float):
+        """Turn each strip into slanted passes that meet end to end.
+
+        A skid-steer cannot translate sideways, so the classic pattern of
+        parallel lanes plus a short perpendicular connector is unreachable
+        for it: the connector demands a 60-90 degree turn for half a metre
+        and the same turn straight back (real, 26.07.). Slanting each pass
+        so it finishes where the next one starts removes those connectors
+        completely - the body only yaws by twice the slant angle, roughly 5
+        degrees over an 8 m pass, and simply alternates forward/reverse.
+
+        The price is that two consecutive passes converge at the turning
+        end, where the local spacing doubles. Full coverage therefore needs
+        ``2 * spacing <= cut_width``; ``plan()`` checks it and warns.
+        """
+        passes = []
+        group = 0
+        for chain in chains:
+            index = 0
+            while index < len(chain):
+                use_left_start = True
+                emitted = False
+                while index + 1 < len(chain):
+                    lower, upper = chain[index], chain[index + 1]
+                    # Anchor the slant on the x-range both rows share. Using
+                    # each row's own outer end instead lets the line poke out
+                    # of the area wherever the strip narrows, which used to
+                    # abort the run and restart it at the opposite end - one
+                    # 16-19 m jump straight across the area per abort, 64 of
+                    # them on the real map (26.07.). The cut width covers the
+                    # little that is trimmed off the ends.
+                    left = max(lower[0], upper[0])
+                    right = min(lower[1], upper[1])
+                    if right - left < spacing:
+                        break
+                    if use_left_start:
+                        start, end = (left, lower[2]), (right, upper[2])
+                    else:
+                        start, end = (right, lower[2]), (left, upper[2])
+                    if not allowed.covers(line_string_cls([start, end])):
+                        # The slant would leave the mowing area. End the run
+                        # here and start a fresh one on the next row instead
+                        # of carrying on from the wrong end - continuing would
+                        # silently break the end-to-end property this whole
+                        # pattern exists for, and every later pass in the
+                        # chain would then need a large turn.
+                        break
+                    passes.append({"coords_xy": [start, end], "group": group})
+                    use_left_start = not use_left_start
+                    emitted = True
+                    index += 1
+                if not emitted:
+                    start, end, y = chain[index]
+                    passes.append({"coords_xy": [(start, y), (end, y)], "group": group})
+                index += 1
+                group += 1
+        return passes
+
     def _generate_rest_lanes(self, rest_area, line_string_cls, origin_lat: float, origin_lon: float) -> List[PlanSegment]:
         spacing = self.parameters.spacing_m
         if rest_area.is_empty or spacing <= 0.0:
@@ -228,6 +357,40 @@ class LanePlanner:
         scan_area = rest_area.buffer(-min(0.08, spacing * 0.25))
         if scan_area.is_empty:
             scan_area = rest_area
+        if self.parameters.rest_pattern == "serpentine":
+            rows = self._scan_rows(scan_area, line_string_cls, spacing)
+            chains = self._chain_rows(rows, spacing)
+            allowed = scan_area.buffer(min(0.18, spacing * 0.55))
+            passes = self._serpentine_passes(chains, allowed, line_string_cls, spacing)
+            # MIN_REST_LANE_LENGTH_M rejects pointless stand-alone lanes. A
+            # serpentine pass is never stand-alone: it is one link of a run
+            # that has to stay unbroken, and near a sub-zone the links get
+            # short. Dropping one there removes the very connection the
+            # pattern is built on and forces a large turn on both
+            # neighbours, so the minimum is applied per run instead.
+            run_length = {}
+            for item in passes:
+                coords_xy = item["coords_xy"]
+                item["length_m"] = math.hypot(
+                    coords_xy[-1][0] - coords_xy[0][0],
+                    coords_xy[-1][1] - coords_xy[0][1],
+                )
+                run_length[item["group"]] = run_length.get(item["group"], 0.0) + item["length_m"]
+            rest_lanes: List[PlanSegment] = []
+            for item in passes:
+                coords_xy = item["coords_xy"]
+                length = item["length_m"]
+                if run_length[item["group"]] < self.MIN_REST_LANE_LENGTH_M:
+                    continue
+                rest_lanes.append(PlanSegment(
+                    type="rest_lane",
+                    rest_index=len(rest_lanes),
+                    rest_group=item["group"],
+                    direction="forward" if len(rest_lanes) % 2 == 0 else "reverse",
+                    coordinates=xy_ring_to_latlon(coords_xy, origin_lat, origin_lon),
+                    length_m=round(length, 2),
+                ))
+            return rest_lanes
         min_x, min_y, max_x, max_y = scan_area.bounds
         candidates = []
         y = min_y + spacing / 2.0

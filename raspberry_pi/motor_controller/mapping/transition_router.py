@@ -87,6 +87,7 @@ class TransitionRouter:
         to_segment_index: int = -1,
         from_type: str = "unknown",
         to_type: str = "unknown",
+        confine_to_mow_area: bool = True,
     ) -> TransitionSegment:
         """Route one transition between the final, execution-time endpoints.
 
@@ -94,6 +95,12 @@ class TransitionRouter:
         closed contours to the nearest reachable point.  This method is shared
         by the planner and executor so a transition is always checked against
         the endpoints that will actually be driven.
+
+        ``confine_to_mow_area`` may be switched off for the approach from the
+        parking spot to the first lane, which legitimately starts outside the
+        mapped area. Obstacle checks against the sub zones and the vehicle
+        clearance still apply; only the outer boundary is not enforced,
+        because nothing is mapped out there to check against.
         """
         allowed_area = self.mow_area.buffer(0.02)
         start_xy = lonlat_to_xy(start, self.origin_lat, self.origin_lon)
@@ -106,17 +113,17 @@ class TransitionRouter:
             and line.intersects(self.sub_union)
         )
         crosses_vehicle_block = self._intersects_blocked(line)
-        within_mow_area = allowed_area.covers(line)
+        within_mow_area = allowed_area.covers(line) if confine_to_mow_area else True
         safe = within_mow_area and not crosses_sub and not crosses_vehicle_block
         route_coords_xy = [start_xy, end_xy]
         route_kind = "direct"
         if not safe and self.sub_union is not None and not self.sub_union.is_empty:
-            routed = self.route_around_sub(start_xy, end_xy)
+            routed = self.route_around_sub(start_xy, end_xy, confine=confine_to_mow_area)
             if routed:
                 route_coords_xy = routed
                 routed_line = self.line_string_cls(route_coords_xy)
                 safe = (
-                    allowed_area.covers(routed_line)
+                    (allowed_area.covers(routed_line) if confine_to_mow_area else True)
                     and not routed_line.intersects(self.sub_union)
                     and not self._intersects_blocked(routed_line)
                 )
@@ -141,10 +148,10 @@ class TransitionRouter:
             length_m=round(line_length, 2),
         )
 
-    def route_around_sub(self, start_xy, end_xy):
+    def route_around_sub(self, start_xy, end_xy, confine: bool = True):
         best_route = None
         best_length = float("inf")
-        allowed = self.mow_area.buffer(0.05)
+        allowed = self.mow_area.buffer(0.05) if confine else None
         route_obstacles = (
             self.blocked_union
             if self.blocked_union is not None and not self.blocked_union.is_empty
@@ -183,7 +190,7 @@ class TransitionRouter:
             if (
                 edge.intersects(self.sub_union)
                 or self._intersects_blocked(edge)
-                or not allowed_area.covers(edge)
+                or (allowed_area is not None and not allowed_area.covers(edge))
             ):
                 continue
             distance = math.hypot(nodes[j][0] - nodes[i][0], nodes[j][1] - nodes[i][1])

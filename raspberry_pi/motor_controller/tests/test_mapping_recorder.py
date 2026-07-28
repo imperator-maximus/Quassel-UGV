@@ -1,4 +1,5 @@
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mapping import MappingRecorder
 from mapping.geometry import project_points
+from mapping.lane_planner import LanePlanner
 from mapping.nogo_monitor import NoGoZoneMonitor
 from mapping.plan_types import PlanSegment
 from mapping.plan_manager import MowingPlanManager
@@ -274,6 +276,7 @@ class MappingRecorderTests(unittest.TestCase):
             "sub_margin_m",
             "max_ring_turn_deg",
             "sub_contour_count",
+            "rest_pattern",
         }, set(result["parameters"].keys()))
         self.assertEqual(result["lane_count"], len(result["lanes"]))
         self.assertEqual(result["rest_lane_count"], len(result["rest_lanes"]))
@@ -420,6 +423,111 @@ class MappingRecorderTests(unittest.TestCase):
             if segment["type"] == "sub_contour"
         ]))
 
+    def _serpentine_lanes(self, cut_width_m=0.85, overlap_m=0.50, width=20.0, height=12.0):
+        """Run the rest-lane generator directly on a known rectangle.
+
+        Ring lanes cover a convex area completely, so a whole-planner
+        fixture yields no rest area at all; the pattern itself is what
+        needs checking here.
+        """
+        LineString, Polygon = self._assert_shapely_available()
+        planner = LanePlanner(
+            cut_width_m=cut_width_m,
+            overlap_m=overlap_m,
+            rest_pattern="serpentine",
+        )
+        area = Polygon([(0.0, 0.0), (width, 0.0), (width, height), (0.0, height)])
+        lanes = planner._generate_rest_lanes(area, LineString, 0.0, 0.0)
+        return planner, [lane.to_dict() for lane in lanes]
+
+    def test_serpentine_passes_meet_end_to_end_without_sideways_steps(self):
+        """The whole point of the pattern: no perpendicular connectors.
+
+        A four-wheel skid-steer cannot translate sideways, so parallel lanes
+        joined by a short perpendicular hop are unreachable for it - the hop
+        demands a 60-90 degree turn for half a metre and the same turn
+        straight back (real, 26.07.). Slanting each pass so it ends where the
+        next one begins removes the hops entirely.
+        """
+        _, lanes = self._serpentine_lanes()
+
+        self.assertGreater(len(lanes), 5)
+        for previous, following in zip(lanes, lanes[1:]):
+            if previous.get("rest_group") != following.get("rest_group"):
+                continue
+            gap = MowingPlanManager._coord_distance_m(
+                previous["coordinates"][-1], following["coordinates"][0]
+            )
+            self.assertLess(gap, 0.05, "consecutive passes must share their endpoint")
+
+    def test_serpentine_keeps_the_body_almost_straight_between_passes(self):
+        _, lanes = self._serpentine_lanes()
+
+        headings = []
+        for lane in lanes:
+            (lon1, lat1), (lon2, lat2) = lane["coordinates"][0], lane["coordinates"][-1]
+            path = self._bearing_deg(lat1, lon1, lat2, lon2)
+            headings.append((path + 180.0) % 360.0 if lane["direction"] == "reverse" else path)
+
+        self.assertEqual(
+            ["forward", "reverse"] * (len(lanes) // 2),
+            [lane["direction"] for lane in lanes][: 2 * (len(lanes) // 2)],
+        )
+        for previous, following in zip(headings, headings[1:]):
+            yaw = abs(((following - previous + 540.0) % 360.0) - 180.0)
+            self.assertLess(yaw, 25.0, f"body had to yaw {yaw:.1f} deg between passes")
+
+    def test_serpentine_covers_the_area_when_spacing_fits_the_deck(self):
+        """Two passes converge at the turning end, so the local spacing
+        doubles there and full coverage needs 2*spacing <= cut_width.
+        Measured on the real 815 m2 area: 0.7 % uncut at cut 0.85 /
+        spacing 0.35, but 14.4 % at cut 0.45 / spacing 0.35."""
+        LineString, Polygon = self._assert_shapely_available()
+        from shapely.ops import unary_union
+
+        def uncut_fraction(cut_width_m, overlap_m):
+            planner, lanes = self._serpentine_lanes(cut_width_m, overlap_m)
+            swaths = []
+            for lane in lanes:
+                xy = [
+                    (
+                        coord[0] * 111320.0 * math.cos(0.0),
+                        coord[1] * 111320.0,
+                    )
+                    for coord in lane["coordinates"]
+                ]
+                swaths.append(LineString(xy).buffer(cut_width_m / 2.0, cap_style=2))
+            covered = unary_union(swaths)
+            # Ignore a spacing-wide rim: the perimeter is the ring lanes' job.
+            inner = Polygon([(0.0, 0.0), (20.0, 0.0), (20.0, 12.0), (0.0, 12.0)]).buffer(
+                -planner.parameters.spacing_m * 2.0
+            )
+            return inner.difference(covered).area / inner.area
+
+        self.assertLess(uncut_fraction(0.85, 0.50), 0.02)   # spacing 0.35, 2s <= cut
+        self.assertGreater(uncut_fraction(0.45, 0.10), 0.05)  # spacing 0.35, 2s > cut
+
+    def test_serpentine_warns_when_spacing_is_too_wide_for_the_deck(self):
+        self._assert_shapely_available()
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = MappingRecorder(tmp, lambda: {})
+            self._write_square_map(tmp, recorder, "Wiese", 0.0, 0.0, 20.0, 12.0)
+            good = recorder.plan_contour_lanes(
+                "Wiese", cut_width_m=0.85, overlap_m=0.50, rest_pattern="serpentine")
+            bad = recorder.plan_contour_lanes(
+                "Wiese", cut_width_m=0.45, overlap_m=0.10, rest_pattern="serpentine")
+
+        self.assertEqual([], good["warnings"])
+        self.assertTrue(bad["warnings"])
+        self.assertIn("Bahnabstand", bad["warnings"][0])
+
+    def test_parallel_pattern_stays_the_default(self):
+        self._assert_shapely_available()
+        _, _, _, result = self._plan_with_center_sub()
+
+        self.assertEqual("parallel", result["parameters"]["rest_pattern"])
+        self.assertEqual([], result["warnings"])
+
     def test_planner_does_not_emit_short_rest_lanes(self):
         self._assert_shapely_available()
         _, _, _, result = self._plan_with_center_sub(sub_margin_m=0.25)
@@ -539,7 +647,17 @@ class MappingRecorderTests(unittest.TestCase):
 
         self.assertTrue(result["success"])
         self.assertEqual(1, result["summary"]["reverse_segment_count"])
-        self.assertEqual("reverse", result["executable_segments"][-1]["direction"])
+        # The plan is accepted rather than rejected - that is what this test
+        # guards. The compiled drive direction is a separate decision: this
+        # fixture puts the reverse rest lane collinear with and east of the
+        # eastbound contour, so the vehicle reaches it already facing along
+        # it. Driving forward needs no turn at all while honouring the
+        # stored "reverse" flag would demand a pointless 180 degree
+        # turnaround, so the heading-based choice picks forward. Real
+        # boustrophedon lanes sit beside each other and keep the stored
+        # alternation - see
+        # test_resume_at_far_end_of_lane_keeps_heading_close_to_neighbours.
+        self.assertEqual("forward", result["executable_segments"][-1]["direction"])
 
     def test_contour_rest_and_transition_translate_to_executable_segments(self):
         manager = MowingPlanManager("/tmp/maps", lambda: {"latitude": 52.0, "longitude": 10.0, "rtk_status": "RTK FIXED"})
@@ -782,6 +900,70 @@ class MappingRecorderTests(unittest.TestCase):
             delta=0.02,
         )
 
+    def test_staggered_lane_ends_still_absorb_the_lateral_hop(self):
+        """Regression for the real transition-55 block (26.07.2026, 61.3 deg).
+
+        Towards a sub-zone the lanes shorten and their ends stagger, so the
+        end-to-start step picks up a longitudinal component on top of the
+        lateral spacing and grows past a flat 0.50 m while the neighbouring
+        pairs stay below it. Driving such a half-metre hop as its own track
+        made the vehicle turn 42-61 degrees for it and immediately the same
+        amount back for the following lane - a detour the next lane's pure
+        pursuit removes for free. The step here (0.35 m across, 0.40 m along
+        = 0.53 m) mirrors the real geometry.
+        """
+        manager = MowingPlanManager("/tmp/maps")
+        first = {
+            "type": "rest_lane",
+            "segment_index": 0,
+            "direction": "forward",
+            "coordinates": [self._coord_m(0.0, 0.0), self._coord_m(10.0, 0.0)],
+            "length_m": 10.0,
+        }
+        second = {
+            "type": "rest_lane",
+            "segment_index": 1,
+            "direction": "reverse",
+            "coordinates": [self._coord_m(9.6, 0.35), self._coord_m(0.0, 0.35)],
+            "length_m": 9.6,
+        }
+        transition = {
+            "type": "transition",
+            "transition_index": 0,
+            "from_segment_index": 0,
+            "to_segment_index": 1,
+            "from_type": "rest_lane",
+            "to_type": "rest_lane",
+            "coordinates": [first["coordinates"][-1], second["coordinates"][0]],
+            "length_m": 0.53,
+            "route_kind": "direct",
+            "safe": True,
+        }
+        plan = {
+            "success": True,
+            "name": "StraightLanes",
+            "map_name": "StraightLanes",
+            "sequence": [first, second],
+            "transitions": [transition],
+            "rest_lanes": [first, second],
+            "lanes": [],
+            "parameters": {"outer_margin_m": 0.0},
+            "map": self._map_feature(-5.0, -5.0, 15.0, 5.0),
+        }
+
+        executable = manager.executable_segments(
+            plan,
+            start_pose=self._pose_m(0.0, 0.0, 90.0),
+        )
+
+        gap = manager._coord_distance_m(
+            executable[0]["coordinates"][-1],
+            executable[1]["coordinates"][0],
+        )
+        self.assertGreater(gap, 0.50, "fixture must exceed the original 0.50 m rule")
+        self.assertEqual(["mow", "mow"], [item["type"] for item in executable])
+        self.assertLess(gap, 1.0, "absorbed offset must stay inside track_cross_track_limit_m")
+
     def test_selected_start_coordinate_rotates_closed_ring_without_shortening_it(self):
         manager = MowingPlanManager("/tmp/maps", lambda: self._pose_m(-2.0, 0.0, 0.0))
         ring = [
@@ -839,7 +1021,13 @@ class MappingRecorderTests(unittest.TestCase):
         )
 
         self.assertEqual(["mow"], [item["type"] for item in executable])
-        self.assertEqual("reverse", executable[0]["direction"])
+        # The lane is stored as coords=(10,0)->(0,0), i.e. due west, with
+        # direction "reverse" as originally planned. The live arrival
+        # heading here (270 degrees = due west) matches that path exactly,
+        # so driving "forward" needs zero turn while "reverse" would need a
+        # full 180 - the heading-based choice (mirrors
+        # _select_transfer_direction for transitions) picks forward.
+        self.assertEqual("forward", executable[0]["direction"])
         self.assertAlmostEqual(self._coord_m(10.0, 0.0)[0], executable[0]["coordinates"][0][0])
         self.assertAlmostEqual(self._coord_m(0.0, 0.0)[0], executable[0]["coordinates"][-1][0])
 
@@ -850,8 +1038,175 @@ class MappingRecorderTests(unittest.TestCase):
         executable = manager.executable_segments(plan)
 
         self.assertEqual(["positioning", "mow", "mow"], [item["type"] for item in executable])
-        self.assertEqual("reverse", executable[-1]["direction"])
+        # The rest lane is stored as coords=[(10,0),(0,0)] with direction
+        # "reverse", i.e. nose east while backing from (10,0) towards (0,0)
+        # (see test_reverse_start_uses_nearest_lane_end_without_positioning_loop,
+        # which enters at (10,0) unreoriented and keeps "reverse"). Arriving
+        # here from the contour instead lands exactly on (0,0), so
+        # _oriented_track_coords flips the coordinate order to [(0,0),(10,0)]
+        # for continuity. The physical nose target (east) must stay the same
+        # regardless of which end the lane is entered from, so the direction
+        # flag has to flip to "forward" here. Keeping it "reverse" would send
+        # the nose target 180 degrees off - the real Brunnen segment-36 stall
+        # on 25.07. (-52 degree heading error) was exactly this mismatch.
+        self.assertEqual("forward", executable[-1]["direction"])
         self.assertEqual(plan["sequence"][0]["coordinates"][-1], executable[-1]["coordinates"][0])
+
+    def test_resume_at_far_end_of_lane_keeps_heading_close_to_neighbours(self):
+        """Regression for the real Brunnen segment-36 stall (25.07.2026).
+
+        Coordinates are taken verbatim from
+        raspberrycan/plans/Brunnen.plan.json, source segment 36, and the
+        pose is the exact real pose logged at the moment of the stall
+        (heading 302.8 degrees, -52 degree reported error). Resuming
+        landed the vehicle close to the lane's stored EAST endpoint
+        instead of its stored WEST start, so _oriented_track_coords
+        reverses the coordinate order for path continuity.
+
+        First fix attempt: flip the stored "forward" direction flag
+        whenever the coordinates get reversed, to preserve the plan's
+        original nose intent. That matched the neighbouring lanes'
+        assumed ~90 degree bearing in isolation, but ignored the live
+        heading entirely - on a real resume after this vehicle sat
+        stationary for over an hour (heading unchanged at ~302-305
+        degrees), it demanded a ~146 degree turn when driving "forward"
+        only needed ~34-39 degrees. The correct rule, already used for
+        transitions in _select_transfer_direction, is to pick whichever
+        nose orientation needs the smaller turn from the live arrival
+        heading - not to blindly preserve the plan's original intent.
+        """
+        manager = MowingPlanManager("/tmp/maps", lambda: None)
+        plan = {
+            "success": True,
+            "map_name": "Brunnen",
+            "sequence": [{
+                "type": "rest_lane",
+                "segment_index": 36,
+                "direction": "forward",
+                "coordinates": [
+                    [11.078456601225982, 53.332558329029965],
+                    [11.0786019219556, 53.332558329029965],
+                ],
+                "length_m": 9.66,
+            }],
+            "transitions": [],
+            "rest_lanes": [],
+            "lanes": [],
+            "parameters": {"outer_margin_m": 0.0},
+            "total_drive_length_m": 9.66,
+        }
+        start_pose = {
+            "gps": {"latitude": 53.3325664, "longitude": 11.0785893},
+            "heading": 302.8,
+            "rtk_status": "RTK FIXED",
+        }
+
+        executable = manager.executable_segments(plan, start_segment_index=36, start_pose=start_pose)
+
+        lane = executable[0]
+        (lon1, lat1), (lon2, lat2) = lane["coordinates"][0], lane["coordinates"][1]
+        path_bearing = self._bearing_deg(lat1, lon1, lat2, lon2)
+        nose_bearing = (path_bearing + 180.0) % 360.0 if lane["direction"] == "reverse" else path_bearing
+        live_heading = 302.8
+        turn_needed = abs(((nose_bearing - live_heading + 540.0) % 360.0) - 180.0)
+
+        self.assertEqual("forward", lane["direction"])
+        self.assertLess(turn_needed, 45.0, f"nose bearing {nose_bearing:.1f} needs too big a turn from {live_heading}")
+
+    def test_resumed_run_never_demands_a_turnaround_between_lanes(self):
+        """Regression for the real lane-37 block (25.07.2026, 178.9 deg).
+
+        Alternating boustrophedon lanes exist precisely so the vehicle never
+        has to turn around: it drives one lane nose-first and backs up along
+        the next, keeping the same heading throughout. A resume can invert
+        the traversal sense of the lane it restarts on (the vehicle sits at
+        that lane's far end). Every following lane must then be evaluated
+        against the heading the vehicle physically ends up with, not against
+        the plan's original assumption - otherwise lane N+1 inherits the
+        inverted sense and demands a full 180 degree turnaround, which the
+        controller rightly refuses to drive.
+
+        Coordinates are the real segments 36-40 of Brunnen.plan.json; the
+        pose is the real one logged after lane 36 completed westbound.
+        """
+        self._assert_shapely_available()
+        manager = MowingPlanManager("/tmp/maps", lambda: None)
+        lanes = [
+            (36, "forward", [11.078456601225982, 53.332558329029965], [11.0786019219556, 53.332558329029965]),
+            (37, "reverse", [11.078600625672586, 53.33256147311908], [11.078461441608367, 53.33256147311908]),
+            (38, "forward", [11.078465477741368, 53.33256461720819], [11.078599242273375, 53.33256461720819]),
+            (39, "reverse", [11.078597858874165, 53.332567761297305], [11.078469513874367, 53.332567761297305]),
+            (40, "forward", [11.078473550007367, 53.33257090538642], [11.078595934717878, 53.33257090538642]),
+        ]
+        plan = {
+            "success": True,
+            "map_name": "Brunnen",
+            "sequence": [
+                {
+                    "type": "rest_lane",
+                    "segment_index": index,
+                    "direction": direction,
+                    "coordinates": [start, end],
+                    "length_m": 9.0,
+                }
+                for index, direction, start, end in lanes
+            ],
+            "transitions": [],
+            "rest_lanes": [],
+            "lanes": [],
+            "parameters": {"outer_margin_m": 0.0},
+            "total_drive_length_m": 45.0,
+            # A boundary comfortably around the lanes, so the runtime router
+            # can connect the ~0.35 m lane-to-lane steps the same way it does
+            # in production.
+            "map": {
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {"type": "boundary"},
+                    "geometry": {"type": "Polygon", "coordinates": [[
+                        [11.07840, 53.33250],
+                        [11.07866, 53.33250],
+                        [11.07866, 53.33262],
+                        [11.07840, 53.33262],
+                        [11.07840, 53.33250],
+                    ]]},
+                }],
+            },
+        }
+        start_pose = {
+            "gps": {"latitude": 53.3325599, "longitude": 11.0784601},
+            "heading": 258.36,
+            "rtk_status": "RTK FIXED",
+        }
+
+        executable = manager.executable_segments(plan, start_segment_index=37, start_pose=start_pose)
+
+        heading = 258.36
+        for lane in [item for item in executable if item["type"] == "mow"]:
+            coords = lane["coordinates"]
+            (lon1, lat1), (lon2, lat2) = coords[0], coords[-1]
+            path_bearing = self._bearing_deg(lat1, lon1, lat2, lon2)
+            nose = (path_bearing + 180.0) % 360.0 if lane["direction"] == "reverse" else path_bearing
+            turn_needed = abs(((nose - heading + 540.0) % 360.0) - 180.0)
+            self.assertLess(
+                turn_needed,
+                45.0,
+                f"lane {lane['source_index']} needs a {turn_needed:.1f} deg turn "
+                f"from heading {heading:.1f}",
+            )
+            heading = nose
+
+    @staticmethod
+    def _bearing_deg(lat1, lon1, lat2, lon2):
+        import math
+
+        lat1_r = math.radians(lat1)
+        lat2_r = math.radians(lat2)
+        dlon = math.radians(lon2 - lon1)
+        y = math.sin(dlon) * math.cos(lat2_r)
+        x = math.cos(lat1_r) * math.sin(lat2_r) - math.sin(lat1_r) * math.cos(lat2_r) * math.cos(dlon)
+        return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
 
     def test_tiny_rest_lanes_block_legacy_plan_execution(self):
         manager = MowingPlanManager("/tmp/maps", lambda: {"latitude": 52.0, "longitude": 10.0, "rtk_status": "RTK FIXED"})
@@ -866,6 +1221,91 @@ class MappingRecorderTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(1, result["summary"]["short_rest_lane_count"])
         self.assertIn("sehr kurze Restbahn", result["errors"][0])
+
+    def test_short_serpentine_links_do_not_block_execution(self):
+        """Regression for the rejected Play on 28.07.
+
+        Serpentine passes meet end to end, so a short one is a link in a run
+        and not a leg of its own - and near a sub-zone the links get short by
+        design. Judging them individually rejected an otherwise perfectly
+        driveable plan with "Plan enthält 15 sehr kurze Restbahn(en)". Only a
+        whole run below the minimum is worth refusing.
+        """
+        manager = MowingPlanManager("/tmp/maps", lambda: {"latitude": 52.0, "longitude": 10.0, "rtk_status": "RTK FIXED"})
+        plan = self._sample_plan(reverse=False, unsafe=False)
+        plan["parameters"] = dict(plan.get("parameters") or {}, rest_pattern="serpentine")
+        links = []
+        for index in range(4):
+            link = dict(plan["rest_lanes"][0])
+            link["segment_index"] = 10 + index
+            link["rest_group"] = 0
+            link["length_m"] = 1.2
+            links.append(link)
+        stray = dict(plan["rest_lanes"][0])
+        stray["segment_index"] = 20
+        stray["rest_group"] = 9
+        stray["length_m"] = 0.7
+        plan["rest_lanes"] = links + [stray]
+        plan["sequence"] = [plan["lanes"][0]] + links + [stray]
+
+        summary = manager.summarize_plan(plan)
+
+        # The four 1.2 m links add up to 4.8 m and stay; the lone 0.7 m run
+        # is still refused.
+        self.assertEqual(1, summary["short_rest_lane_count"])
+
+    def test_vehicle_parked_outside_the_area_still_drives_to_the_first_lane(self):
+        """Regression for the silent Play on 28.07.
+
+        The vehicle stood 12.3 m outside the boundary and the whole plan was
+        rejected. Driving from wherever it is parked to the first lane is a
+        normal part of the job, so the approach leg must not be confined to
+        the mapped area - there is nothing mapped out there to check against
+        anyway, and the runtime no-go monitor deliberately runs with
+        enforce_outer_boundary=False for the same reason.
+        """
+        self._assert_shapely_available()
+        manager = MowingPlanManager("/tmp/maps", lambda: None)
+        plan = self._reverse_transition_plan()
+        outside = self._pose_m(-25.0, 0.0, 90.0)
+
+        executable = manager.executable_segments(plan, start_pose=outside)
+
+        self.assertEqual("positioning", executable[0]["type"])
+        for expected, actual in zip(self._coord_m(-25.0, 0.0), executable[0]["coordinates"][0]):
+            self.assertAlmostEqual(expected, actual, places=12)
+        self.assertGreater(executable[0]["length_m"], 20.0)
+
+    def test_approach_routes_around_a_sub_zone_instead_of_through_it(self):
+        """The outer boundary is not enforced on the approach, but real
+        obstacles still are: a sub zone between the parking spot and the
+        first lane must be driven around, never straight through."""
+        LineString, Polygon = self._assert_shapely_available()
+        manager = MowingPlanManager("/tmp/maps", lambda: None)
+        plan = self._reverse_transition_plan()
+        plan["map"] = self._map_feature(-30.0, -12.0, 20.0, 12.0)
+        blocker = [
+            self._coord_m(-16.0, -4.0),
+            self._coord_m(-10.0, -4.0),
+            self._coord_m(-10.0, 4.0),
+            self._coord_m(-16.0, 4.0),
+            self._coord_m(-16.0, -4.0),
+        ]
+        plan["exclusion_contours"] = [
+            {"type": "sub_buffer_boundary", "coordinates": blocker}
+        ]
+        behind_the_blocker = self._pose_m(-25.0, 0.0, 90.0)
+
+        executable = manager.executable_segments(plan, start_pose=behind_the_blocker)
+
+        approach = executable[0]
+        self.assertEqual("positioning", approach["type"])
+        forbidden = Polygon([(c[0], c[1]) for c in blocker])
+        self.assertFalse(
+            LineString([(c[0], c[1]) for c in approach["coordinates"]]).intersects(forbidden),
+            "the approach must not cut through the sub zone",
+        )
+        self.assertGreater(len(approach["coordinates"]), 2, "a detour needs waypoints")
 
     def test_invalid_plan_never_sets_navigation_commands(self):
         class FakeNavigation:

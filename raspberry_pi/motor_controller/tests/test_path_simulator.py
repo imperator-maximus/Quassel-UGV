@@ -38,8 +38,7 @@ class PathSimulatorTests(unittest.TestCase):
             goto_divergence_limit_m=0.75,
             goto_divergence_samples=5,
             track_cross_track_limit_m=1.0,
-            track_alignment_enter_deg=25.0,
-            track_alignment_exit_deg=10.0,
+            track_heading_block_deg=25.0,
             min_inner_wheel_speed=0.50,
         )
         self.pwm_config = SimpleNamespace(forward_factor=500.0, turn_factor=300.0)
@@ -108,7 +107,13 @@ class PathSimulatorTests(unittest.TestCase):
         self.assertEqual(["forward", "reverse"], [item["direction"] for item in result["segments"]])
         self.assertLess(self._distance_to_xy(result["final_pose"], 0.0, 0.35), 0.6)
 
-    def test_opposite_short_transition_is_reversed_and_does_not_escape_track(self):
+    def test_opposite_short_transition_is_reversed_but_blocks_on_heading(self):
+        """The router still picks the direction that needs the smaller turn
+        (reverse here). The remaining 38 degree error exceeds this test's
+        track_heading_block_deg (25) - above the roll-alignment band the
+        controller still refuses to guess and blocks instead of driving
+        through it; see test_stalled_reverse_transition_blocks_instead_of_realigning
+        for why an even larger error is unsafe even for rolling."""
         first = self._segment(0, [(0.0, 0.0), (10.0, 0.0)])
         second = self._segment(1, [(8.0, 1.0), (0.0, 1.0)], direction="reverse")
         plan = self._plan([first, second])
@@ -120,11 +125,11 @@ class PathSimulatorTests(unittest.TestCase):
             parameters=self.params,
         )
 
-        self.assertTrue(result["safe"], result.get("reason"))
+        self.assertFalse(result["safe"])
+        self.assertEqual("heading_block", result["state"])
         transition = next(item for item in result["segments"] if item["type"] == "transition")
         self.assertEqual("reverse", transition["direction"])
-        self.assertEqual("completed", transition["state"])
-        self.assertLess(transition["actual_length_m"], 4.0)
+        self.assertEqual("heading_block", transition["state"])
 
     def test_grass_model_does_not_invent_counter_rotation_motion(self):
         pose = self._pose(0.0, 0.0, 220.0)
@@ -146,15 +151,21 @@ class PathSimulatorTests(unittest.TestCase):
         self.assertEqual(0.0, angular)
         self.assertAlmostEqual(220.0, pose["heading_deg"])
 
-    def test_stalled_reverse_transition_realigns_and_completes_without_counter_rotation(self):
+    def test_stalled_reverse_transition_blocks_instead_of_realigning(self):
         """Regression for the 2026-07-25 real transition stall.
 
         The vehicle was already 0.24 m along a 1.73 m reverse transition,
-        about 0.32 m off its line and facing 222.5 degrees.  The old
+        about 0.32 m off its line and facing 222.5 degrees. The old
         controller requested x=+0.30/y=-0.04, i.e. opposing tracks, and the
-        loaded UGV stopped moving.  The production controller and conservative
-        grass model must now recover from that state without ever asking the
-        tracks to counter-rotate.
+        loaded UGV stopped moving. The resulting ~47 degree error exceeds
+        this test's track_heading_block_deg (25) - real driving the same
+        day showed even the roll-alignment mechanism (proven convergent at
+        29.7 degrees, see NavigationControllerTests) is not something to
+        trust blindly at this size, and a symmetric-pivot alternative was
+        shown to not rotate the real UGV at all (segment-36 stall, same
+        date, >4 minutes without any heading change). At this magnitude the
+        controller must stop deterministically and report the heading error
+        instead of guessing a recovery.
         """
         motor = _SimulationMotor(self.pwm_config)
         navigation = NavigationController(motor, self.nav_config)
@@ -163,42 +174,17 @@ class PathSimulatorTests(unittest.TestCase):
             {"longitude": self._coord(0.0, 0.0)[0], "latitude": self._coord(0.0, 0.0)[1]},
             {"longitude": self._coord(1.73, 0.0)[0], "latitude": self._coord(1.73, 0.0)[1]},
         ]
-        params = SimulationParameters(
-            step_s=0.05,
-            max_wheel_speed_m_s=0.8,
-            command_response_s=0.1,
-            counter_rotation_supported=False,
-            max_steps=2000,
-        )
-        linear_speed = 0.0
-        angular_speed = 0.0
-        commands = []
         try:
             navigation.set_waypoints(waypoints, mode="track", direction="reverse")
             self.assertTrue(navigation.start())
-            for _ in range(params.max_steps):
-                navigation.on_pose_update(pose)
-                status = navigation.get_status()
-                if not status.get("running"):
-                    break
-                command = dict(motor.command)
-                commands.append(command)
-                left = command["y"] + command["x"] * 0.6
-                right = command["y"] - command["x"] * 0.6
-                self.assertGreaterEqual(left * right, -1e-9, command)
-                linear_speed, angular_speed = self.simulator._integrate(
-                    pose,
-                    command,
-                    linear_speed,
-                    angular_speed,
-                    params,
-                )
+            navigation.on_pose_update(pose)
+            status = navigation.get_status()
         finally:
             navigation.shutdown()
 
-        self.assertTrue(commands)
-        self.assertEqual("completed", navigation.get_status()["state"])
-        self.assertLess(self._distance_to_xy(pose, 1.73, 0.0), 0.6)
+        self.assertFalse(status["running"])
+        self.assertEqual("heading_block", status["state"])
+        self.assertIn("Winkelfehler", status["last_error"])
 
     def test_simulation_stops_when_driven_footprint_enters_sub_zone(self):
         plan = self._plan(

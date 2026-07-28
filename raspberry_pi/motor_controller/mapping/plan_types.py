@@ -17,6 +17,7 @@ class PlanParameters:
     sub_margin_m: float
     max_ring_turn_deg: float
     sub_contour_count: int
+    rest_pattern: str = "parallel"
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -68,6 +69,7 @@ class MowingPlan:
     map_payload: Dict[str, Any] = field(default_factory=dict)
     subs: List[Dict[str, Any]] = field(default_factory=list)
     skipped_sharp_lanes: int = 0
+    warnings: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         lanes = [lane.to_dict() for lane in self.lanes]
@@ -91,6 +93,7 @@ class MowingPlan:
             "transition_count": len(transitions),
             "unsafe_transition_count": unsafe_transitions,
             "skipped_sharp_lanes": self.skipped_sharp_lanes,
+            "warnings": list(self.warnings),
             "mow_length_m": round(mow_length, 2),
             "rest_length_m": round(rest_length, 2),
             "connector_length_m": round(safe_transition_length, 2),

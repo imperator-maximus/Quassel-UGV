@@ -24,8 +24,8 @@ ramping:
 
 # Sicherheits-Konfiguration
 safety:
-  pin: 17                  # GPIO17 für Sicherheitsschalter
-  enabled: true
+  pin: 17                  # GPIO17 für Sicherheitsschalter, falls verbaut
+  enabled: false            # true nur setzen, wenn ein Schalter an diesem Pin existiert
   debounce_time: 0.2       # Sekunden
   command_timeout: 2.0     # Sekunden (CAN-Command-Timeout)
   joystick_timeout: 1.0    # Sekunden (Joystick-Timeout)
@@ -125,8 +125,15 @@ navigation:
   goto_divergence_limit_m: 0.75 # Goto stoppen, wenn die Distanz so weit wächst
   goto_divergence_samples: 5    # Anzahl aufeinanderfolgender Messungen
   track_cross_track_limit_m: 1.0 # Track stoppen, wenn Pfadabweichung größer ist
-  track_alignment_enter_deg: 25.0 # Ab hier kräftig rollend zur Bahn ausrichten
-  track_alignment_exit_deg: 10.0  # Hysterese: darunter normale Bahnverfolgung
+  track_alignment_enter_deg: 10.0 # Ab hier ohne Vorwaertsschub um ein stehendes
+                               # Kettenpaar rollen statt gleichzeitig zu drehen und
+                               # zu fahren (letzteres konvergiert real nicht, siehe
+                               # track_heading_block_deg)
+  track_alignment_exit_deg: 5.0   # Darunter normale Bahnverfolgung
+  track_heading_block_deg: 45.0 # Ab hier ist selbst der Roll-Bogen nicht mehr
+                               # sicher (urspruenglicher Brunnen-Stall: -51.7° bis
+                               # -62.3°) - dort blockieren statt automatisch
+                               # anzufahren.
   track_stall_timeout_s: 10.0     # Stop bei ausbleibendem Track-Fortschritt
   track_stall_min_progress_m: 0.15 # Mindestfortschritt innerhalb des Zeitfensters
   min_inner_wheel_speed: 0.50  # Innen-Rad-Garantie: kurveninneres Rad rollt mind.
