@@ -115,6 +115,8 @@ sensor_hub:
 navigation:
   enabled: true
   watchdog_timeout_s: 1.0      # Stop wenn keine aktuelle SensorHub-Pose >1s
+  rtk_resume_stable_s: 2.0     # So lange muss RTK FIXED halten, bevor es weitergeht
+  rtk_lost_timeout_s: 90.0     # Erst danach Plan-Abbruch; davor nur anhalten und warten
   geofence_radius_m: 50.0      # Um ersten Wegpunkt
   max_joystick: 0.30           # Max. 30% Joystick-Skala
   acceptance_radius_m: 0.25    # Wegpunkt erreicht (Skid-Steer-Limit + RTK-Rauschen)

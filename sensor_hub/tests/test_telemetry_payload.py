@@ -26,6 +26,27 @@ class TelemetryPayloadTests(unittest.TestCase):
         self.assertEqual(payload['gps']['altitude'], 19.33)
         self.assertEqual(payload['heading'], 12.35)
 
+    def test_satellite_count_travels_with_the_pose(self):
+        """Der Motor-Controller sieht sonst nur rtk_status, nicht die Satelliten."""
+        payload = build_telemetry_payload(
+            gps_status={
+                'latitude': 53.33, 'longitude': 11.08, 'altitude': 15.0,
+                'heading': 0.0, 'rtk_status': 'RTK FIXED', 'satellites': 24,
+            },
+        )
+
+        self.assertEqual(payload['gps']['satellites'], 24)
+
+    def test_missing_satellite_count_falls_back_to_zero(self):
+        payload = build_telemetry_payload(
+            gps_status={
+                'latitude': 1.0, 'longitude': 2.0, 'altitude': 3.0,
+                'rtk_status': 'NO GPS',
+            },
+        )
+
+        self.assertEqual(payload['gps']['satellites'], 0)
+
     def test_build_status_payload_preserves_telemetry_and_adds_meta(self):
         telemetry = {'timestamp': 1.23, 'gps': {'lat': 1.0, 'lon': 2.0, 'altitude': 3.0}}
         payload = build_status_payload(telemetry, {'source': 'sensor_hub_status', 'messages_sent': 7})

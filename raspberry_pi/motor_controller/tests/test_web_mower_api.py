@@ -297,5 +297,105 @@ class MowerApiSafetyTests(unittest.TestCase):
         self.assertEqual(32, self.server._resume_source_index(plan, resume))
 
 
+class FakeNavigation:
+    def __init__(self, config):
+        self.config = config
+        self.paused = False
+        self.resume_calls = 0
+        self.stop_reasons = []
+        self.resume_ok = True
+
+    def pause(self, reason='paused'):
+        self.paused = True
+        return True
+
+    def resume(self):
+        self.resume_calls += 1
+        if not self.resume_ok:
+            return False
+        self.paused = False
+        return True
+
+    def stop(self, reason=None):
+        self.stop_reasons.append(reason)
+
+
+class FakeCan:
+    """Liefert eine rtk_status-Folge; der letzte Wert bleibt danach stehen."""
+
+    def __init__(self, statuses):
+        self.statuses = list(statuses)
+        self.last = self.statuses[0] if self.statuses else 'NO GPS'
+
+    def get_sensor_data(self):
+        if self.statuses:
+            self.last = self.statuses.pop(0)
+        return {'rtk_status': self.last}
+
+
+class RtkRecoveryWaitTests(unittest.TestCase):
+    """Ein kurzer FLOAT-Einbruch am Feldrand darf den Maehplan nicht killen."""
+
+    def _server(self, statuses, *, stable_s=0.15, timeout_s=1.0):
+        config = SimpleNamespace(template_folder='.', static_folder='.', secret_key='test')
+        dummy = SimpleNamespace()
+        server = WebServer(config, dummy, dummy, dummy, dummy)
+        server.can = FakeCan(statuses)
+        server.mapping = SimpleNamespace(
+            plans=SimpleNamespace(
+                pose_rtk_ok=lambda pose: str((pose or {}).get('rtk_status', '')).upper()
+                in ('RTK FIXED', 'FIXED')
+            )
+        )
+        server.navigation = FakeNavigation(
+            SimpleNamespace(rtk_resume_stable_s=stable_s, rtk_lost_timeout_s=timeout_s)
+        )
+        return server
+
+    def test_short_dropout_freezes_and_continues_without_losing_the_plan(self):
+        server = self._server(['RTK FLOAT', 'RTK FLOAT', 'RTK FIXED'])
+
+        self.assertTrue(server._await_rtk_recovery())
+        self.assertEqual(1, server.navigation.resume_calls)
+        self.assertFalse(server.navigation.paused)
+        self.assertEqual([], server.navigation.stop_reasons)
+        self.assertEqual('running', server.get_plan_execution_status()['state'])
+
+    def test_navigation_is_frozen_not_stopped_while_waiting(self):
+        server = self._server(['RTK FLOAT', 'RTK FIXED'])
+        server._await_rtk_recovery()
+
+        # stop() wuerde Wegpunktindex und Bahnfortschritt verwerfen; nur
+        # pause()/resume() setzt exakt an derselben Stelle wieder an.
+        self.assertEqual([], server.navigation.stop_reasons)
+
+    def test_permanent_loss_still_aborts_the_plan(self):
+        server = self._server(['RTK FLOAT'], timeout_s=0.3)
+
+        self.assertFalse(server._await_rtk_recovery())
+        self.assertEqual(['rtk_lost'], server.navigation.stop_reasons)
+        status = server.get_plan_execution_status()
+        self.assertEqual('rtk_lost', status['state'])
+        self.assertFalse(status['running'])
+
+    def test_flickering_fix_does_not_resume_before_it_is_stable(self):
+        # FIXED nur fuer einen einzigen Poll - das darf die Fahrt nicht
+        # freigeben, sonst ruckelt das Fahrzeug an jeder Baumluecke an.
+        server = self._server(['RTK FIXED', 'RTK FLOAT'], stable_s=5.0, timeout_s=0.4)
+
+        self.assertFalse(server._await_rtk_recovery())
+        self.assertEqual(0, server.navigation.resume_calls)
+        self.assertEqual(['rtk_lost'], server.navigation.stop_reasons)
+
+    def test_plan_stop_request_leaves_the_wait_to_the_caller(self):
+        server = self._server(['RTK FLOAT'], timeout_s=5.0)
+        server._plan_stop_event.set()
+
+        self.assertFalse(server._await_rtk_recovery())
+        # Der aufrufende Loop stoppt die Navigation selbst - hier darf kein
+        # zweiter, widerspruechlicher Stopp-Grund gesetzt werden.
+        self.assertEqual([], server.navigation.stop_reasons)
+
+
 if __name__ == '__main__':
     unittest.main()

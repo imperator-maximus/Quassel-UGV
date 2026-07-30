@@ -1568,7 +1568,16 @@ function updateRtkStatus(sensorData) {
     const dot = document.getElementById('rtkInfoStatus');
     if (dot) dot.className = `status-dot ${rtkAvailable ? 'active' : 'inactive'}`;
     const text = document.getElementById('rtkInfoStatusText');
-    if (text) text.textContent = status.trim().toUpperCase().startsWith('RTK') ? status : `RTK ${status}`;
+    if (text) {
+        // Der Punkt ist bewusst binaer (nur RTK FIXED ist gruen). Status-Text
+        // und Satellitenzahl daneben zeigen, ob es gerade FLOAT/DGPS ist und
+        // ob ueberhaupt genug Satelliten stehen - am Feldrand die erste Frage.
+        const label = status.trim().toUpperCase().startsWith('RTK') ? status : `RTK ${status}`;
+        const satellites = Number(gps.satellites);
+        text.textContent = Number.isFinite(satellites) && satellites > 0
+            ? `${label} · ${satellites} Sat`
+            : label;
+    }
     const indicator = document.getElementById('rtkInfoIndicator');
     if (indicator) indicator.title = rtkAvailable ? 'RTK-Fix verfügbar' : 'Kein RTK-Fix verfügbar';
     refreshPlanButtons();

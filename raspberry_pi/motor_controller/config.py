@@ -157,6 +157,13 @@ class NavigationConfig:
     # WiFi-Luecke fort; der lokale Navigations-Watchdog bleibt nur als
     # nachgelagerter Fallback bestehen.
     watchdog_timeout_s: float = 3.0
+    # Baeume am Feldrand druecken den RTK-Fix fuer ein paar Sekunden auf
+    # FLOAT. Den kompletten Maehplan dafuer abzubrechen ist unverhaeltnis-
+    # maessig: der Plan haelt an und macht weiter, sobald der Fix wirklich
+    # zurueck ist. Auf einer FLOAT-Loesung zu fahren bleibt verboten - diese
+    # Werte entscheiden nur, wie lange gewartet wird, bevor aufgegeben wird.
+    rtk_resume_stable_s: float = 2.0
+    rtk_lost_timeout_s: float = 90.0
     geofence_radius_m: float = 50.0
     max_joystick: float = 0.30
     # A 25 cm target circle was too tight for a heavy skid-steer mower: in a
@@ -405,6 +412,8 @@ class Config:
             'navigation': {
                 'enabled': self.navigation.enabled,
                 'watchdog_timeout_s': self.navigation.watchdog_timeout_s,
+                'rtk_resume_stable_s': self.navigation.rtk_resume_stable_s,
+                'rtk_lost_timeout_s': self.navigation.rtk_lost_timeout_s,
                 'geofence_radius_m': self.navigation.geofence_radius_m,
                 'max_joystick': self.navigation.max_joystick,
                 'acceptance_radius_m': self.navigation.acceptance_radius_m,

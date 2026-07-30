@@ -1095,12 +1095,7 @@ class WebServer:
                     self.navigation.stop(reason='paused')
                 self._set_plan_status(running=False, state='paused')
                 return False
-            if not self._rtk_available():
-                message = 'RTK verloren - Plan-Ausführung gestoppt'
-                self._save_resume_state(reason='rtk_lost')
-                if self.navigation:
-                    self.navigation.stop(reason='rtk_lost')
-                self._set_plan_status(running=False, state='rtk_lost', last_error=message)
+            if not self._rtk_available() and not self._await_rtk_recovery():
                 return False
             if nogo_monitor is not None:
                 nogo = self._check_nogo(nogo_monitor)
@@ -1135,6 +1130,77 @@ class WebServer:
         if not self.mapping:
             return False
         return self.mapping.plans.pose_rtk_ok(self.can.get_sensor_data())
+
+    def _await_rtk_recovery(self):
+        """Haelt das Fahrzeug bei RTK-Verlust an, statt den Plan abzubrechen.
+
+        Baeume am Feldrand druecken den Fix regelmaessig fuer einige Sekunden
+        auf FLOAT. Auf einer FLOAT-Loesung weiterzufahren waere falsch (20-50
+        cm Fehler), deshalb friert die Navigation sofort ein - der Plan bleibt
+        aber am Leben und laeuft an genau derselben Stelle weiter, sobald der
+        Fix stabil zurueck ist. Erst nach ``rtk_lost_timeout_s`` wird wie
+        zuvor hart abgebrochen.
+
+        Gibt True zurueck, wenn die Fahrt fortgesetzt wurde.
+        """
+        nav_config = getattr(self.navigation, 'config', None)
+        stable_s = max(0.0, float(getattr(nav_config, 'rtk_resume_stable_s', 2.0)))
+        timeout_s = max(0.0, float(getattr(nav_config, 'rtk_lost_timeout_s', 90.0)))
+
+        if self.navigation:
+            self.navigation.pause(reason='rtk_wait')
+        self._save_resume_state(reason='rtk_wait')
+        self._set_plan_status(
+            running=True,
+            state='rtk_wait',
+            last_error=f'RTK verloren - warte bis zu {timeout_s:.0f}s auf Fix',
+        )
+        self.logger.warning(
+            '⏸️ RTK verloren - Plan pausiert, warte bis zu %.0fs auf erneuten Fix',
+            timeout_s,
+        )
+
+        deadline = time.monotonic() + timeout_s
+        stable_since = None
+        last_countdown = 0.0
+        while time.monotonic() < deadline:
+            # Stop und Pause behandelt der aufrufende Loop selbst.
+            if self._plan_stop_event.is_set() or self._plan_pause_event.is_set():
+                return False
+            now = time.monotonic()
+            if self._rtk_available():
+                if stable_since is None:
+                    stable_since = now
+                elif (now - stable_since) >= stable_s:
+                    if self.navigation and self.navigation.resume():
+                        self.logger.info('▶️ RTK zurueck - Plan wird fortgesetzt')
+                        self._set_plan_status(running=True, state='running', last_error=None)
+                        return True
+                    # Ein fehlgeschlagenes resume() heisst, dass gerade eine
+                    # andere Sicherheitsstufe die Fahrt sperrt. Weiter warten,
+                    # statt den Plan deswegen zu verlieren.
+                    stable_since = None
+            else:
+                stable_since = None
+            if now - last_countdown >= 1.0:
+                last_countdown = now
+                self._set_plan_status(
+                    running=True,
+                    state='rtk_wait',
+                    last_error=(
+                        f'RTK verloren - warte auf Fix '
+                        f'(noch {max(0.0, deadline - now):.0f}s)'
+                    ),
+                )
+            time.sleep(0.1)
+
+        message = f'RTK laenger als {timeout_s:.0f}s verloren - Plan-Ausführung gestoppt'
+        self._save_resume_state(reason='rtk_lost')
+        if self.navigation:
+            self.navigation.stop(reason='rtk_lost')
+        self._set_plan_status(running=False, state='rtk_lost', last_error=message)
+        self.logger.error('🛑 %s', message)
+        return False
 
     def _build_nogo_monitor(self, plan):
         try:

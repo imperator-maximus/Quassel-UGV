@@ -43,6 +43,13 @@ def build_telemetry_payload(
             'altitude': round_if_number(gps_status.get('altitude', 0.0), 2),
         }
         payload['rtk_status'] = gps_status.get('rtk_status', 'NO GPS')
+        # Die Satellitenzahl ist der erste Wert, auf den man schaut, wenn RTK
+        # am Feldrand abreisst. Sie muss deshalb mit der Pose mitreisen und
+        # darf nicht nur in der eigenen Oberflaeche des Sensor Hubs stehen.
+        try:
+            payload['gps']['satellites'] = int(gps_status.get('satellites', 0) or 0)
+        except (TypeError, ValueError):
+            payload['gps']['satellites'] = 0
         try:
             gps_heading_raw = float(gps_status.get('heading', 0.0))
         except (TypeError, ValueError):
