@@ -61,12 +61,14 @@ Fülle deine Credentials ein:
 ```bash
 NTRIP_HOST=openrtk-mv.de
 NTRIP_PORT=2101
-NTRIP_MOUNTPOINT=openrtk_mv_2G
+NTRIP_MOUNTPOINT=openrtk_mv
 NTRIP_USERNAME=your_username
 NTRIP_PASSWORD=your_password
 ```
 
 **Wichtig:**
+- Mountpoint `openrtk_mv` verwenden, nicht `openrtk_mv_2G` — siehe [SETUP_NTRIP.md](SETUP_NTRIP.md#rtk-mountpoints)
+- Der NTRIP-Account erlaubt nur **eine** gleichzeitige Verbindung
 - `.env` wird NICHT in Git committed (siehe `.gitignore`)
 - Jeder Entwickler hat seine eigene `.env` Datei
 - Verwende `.env.example` als Template
@@ -136,7 +138,7 @@ Erstelle eine `.env` Datei im `sensor_hub/` Verzeichnis:
 # sensor_hub/.env
 NTRIP_HOST=openrtk-mv.de
 NTRIP_PORT=2101
-NTRIP_MOUNTPOINT=openrtk_mv_2G
+NTRIP_MOUNTPOINT=openrtk_mv
 NTRIP_USERNAME=your_username
 NTRIP_PASSWORD=your_password
 ```
