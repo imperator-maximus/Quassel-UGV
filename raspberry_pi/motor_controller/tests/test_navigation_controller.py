@@ -252,20 +252,56 @@ class NavigationControllerTests(unittest.TestCase):
         controller.on_pose_update({'cmd': 'something_else'})
         self.assertIsNone(controller.get_status()['last_pose'])
 
-    def test_geofence_stops_navigation(self):
+    def test_geofence_stops_navigation_when_pose_leaves_the_corridor(self):
         motor = FakeMotor()
         config = NavConfig(geofence_radius_m=5.0)
         controller = NavigationController(motor, config)
         controller.set_waypoints([{'latitude': 52.0, 'longitude': 10.0}])
         controller.start()
         try:
-            controller.on_pose_update({'latitude': 52.001, 'longitude': 10.0, 'heading_deg': 0.0})
+            # Erste Pose spannt den Korridor auf: von hier zum Zielwegpunkt.
+            controller.on_pose_update({'latitude': 52.0, 'longitude': 10.001, 'heading_deg': 0.0})
+            self.assertTrue(controller.get_status()['running'])
+            # Rund 111 m seitlich neben dieser Linie.
+            controller.on_pose_update({'latitude': 52.001, 'longitude': 10.001, 'heading_deg': 0.0})
         finally:
             controller.shutdown()
 
         status = controller.get_status()
         self.assertFalse(status['running'])
         self.assertEqual(status['state'], 'geofence')
+
+    def test_geofence_allows_an_approach_longer_than_its_radius(self):
+        """Regression 02.08.: Anfahrt zur ersten Bahn war 72 m lang.
+
+        Der Geofence wurde zum ersten Wegpunkt gemessen und stoppte bei 50 m,
+        obwohl das Fahrzeug exakt auf der geplanten Strecke fuhr. Er begrenzt
+        die Abweichung vom Korridor, nicht die Länge der Fahrt.
+        """
+        motor = FakeMotor()
+        config = NavConfig(geofence_radius_m=50.0)
+        controller = NavigationController(motor, config)
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0018, 'longitude': 10.0},
+        ], mode='track')
+        controller.start()
+        try:
+            self.assertGreater(
+                NavigationController.distance_m(
+                    Waypoint(52.0, 10.0), Waypoint(52.0018, 10.0)
+                ),
+                config.geofence_radius_m,
+            )
+            for step in range(19):
+                controller.on_pose_update({
+                    'latitude': 52.0 + 0.0001 * step,
+                    'longitude': 10.0,
+                    'heading_deg': 0.0,
+                })
+                self.assertNotEqual('geofence', controller.get_status()['state'])
+        finally:
+            controller.shutdown()
 
     def test_watchdog_stops_without_recent_pose(self):
         motor = FakeMotor()

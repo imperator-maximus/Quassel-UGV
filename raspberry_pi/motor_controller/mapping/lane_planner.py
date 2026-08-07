@@ -3,13 +3,27 @@
 import math
 from typing import Any, Dict, List
 
-from .geometry import iter_lines, iter_polygons, lonlat_to_xy, max_turn_angle_xy, project_points, xy_ring_to_latlon
+from .geometry import (
+    iter_lines,
+    iter_polygons,
+    lonlat_to_xy,
+    max_curvature_deg_per_m,
+    max_turn_angle_xy,
+    orient_ring_xy,
+    project_points,
+    xy_ring_to_latlon,
+)
 from .plan_types import MowingPlan, PlanParameters, PlanSegment
 from .transition_router import TransitionRouter
 
 
 class LanePlanner:
-    MIN_REST_LANE_LENGTH_M = 2.0
+    # Eine Bahn muss mehr Mähstrecke bringen, als ihre Anfahrt kostet. Ein
+    # 3 m langer Stummel am Flächenende zog real einen 33 m langen Wechsel
+    # quer über die Wiese nach sich, für den es keine fahrbare Einfahrt gab -
+    # der Plan war deswegen an dieser einen Stelle gesperrt (06.08.). Mit 5 m
+    # bleiben rund 3 m Gras in einer Ecke stehen und der Plan läuft durch.
+    MIN_REST_LANE_LENGTH_M = 5.0
 
     def __init__(
         self,
@@ -20,6 +34,7 @@ class LanePlanner:
         max_ring_turn_deg: float = 155.0,
         sub_contour_count: int = 3,
         rest_pattern: str = "parallel",
+        max_lane_curvature_deg_per_m: float = 20.0,
     ):
         cut_width = float(cut_width_m)
         overlap = float(overlap_m)
@@ -44,6 +59,9 @@ class LanePlanner:
             max_ring_turn_deg=max(45.0, min(179.0, float(max_ring_turn_deg))),
             sub_contour_count=max(0, min(8, sub_contours)),
             rest_pattern=pattern,
+            max_lane_curvature_deg_per_m=max(
+                5.0, min(90.0, float(max_lane_curvature_deg_per_m))
+            ),
         )
 
     def plan(
@@ -113,7 +131,7 @@ class LanePlanner:
         while not current.is_empty and len(plan.lanes) < 500:
             accepted_in_iteration = 0
             for poly in iter_polygons(current):
-                exterior_xy = list(poly.exterior.coords)
+                exterior_xy = orient_ring_xy(list(poly.exterior.coords), clockwise=True)
                 lane_line = LineString(exterior_xy)
                 lane_coverage = lane_line.buffer(self.parameters.cut_width_m / 2.0, cap_style=2, join_style=2)
                 protected = (
@@ -132,6 +150,17 @@ class LanePlanner:
                     max_turn_angle = max_turn_angle_xy(exterior_xy)
                     if max_turn_angle > self.parameters.max_ring_turn_deg:
                         plan.skipped_sharp_lanes += 1
+                        continue
+                    # Konturringe werden nach innen zwangsläufig enger. Sobald
+                    # einer die Wendefähigkeit des Fahrzeugs übersteigt, wird
+                    # er nicht mehr als Ring gefahren - die Fläche fällt dann
+                    # an die geraden Bahnen, die diese Krümmung gar nicht erst
+                    # haben. Ohne diese Grenze enthielt die Wiese Ringe mit
+                    # bis zu 818°/m; das Fahrzeug lief dort aus der Spur
+                    # (real, 02.08.).
+                    curvature = max_curvature_deg_per_m(exterior_xy)
+                    if curvature > self.parameters.max_lane_curvature_deg_per_m:
+                        plan.skipped_curved_lanes += 1
                         continue
                     lane = PlanSegment(
                         type="contour",
@@ -181,7 +210,13 @@ class LanePlanner:
         if vehicle_blocked is not None and not vehicle_blocked.is_empty:
             rest_area = rest_area.difference(vehicle_blocked)
         if not rest_area.is_empty:
-            plan.rest_lanes = self._generate_rest_lanes(rest_area, LineString, origin_lat, origin_lon)
+            # Der zuerst aufgezeichnete Randpunkt ist der Startpunkt der
+            # Karte - dort soll auch der Plan beginnen.
+            anchor_xy = project_points(main_points[:1], origin_lat, origin_lon)[0]
+            plan.rest_lanes = self._generate_rest_lanes(
+                rest_area, LineString, origin_lat, origin_lon, anchor_xy,
+                self._lane_angle_deg(project_points(main_points, origin_lat, origin_lon)),
+            )
             for rest_lane in plan.rest_lanes:
                 rest_lane.segment_index = len(plan.sequence)
                 plan.sequence.append(rest_lane)
@@ -219,7 +254,7 @@ class LanePlanner:
                 route_poly = sub_poly.buffer(offset_m)
                 if route_poly.is_empty:
                     continue
-                ring_xy = list(route_poly.exterior.coords)
+                ring_xy = orient_ring_xy(list(route_poly.exterior.coords), clockwise=True)
                 if len(ring_xy) < 4:
                     continue
                 line = line_string_cls(ring_xy)
@@ -350,13 +385,61 @@ class LanePlanner:
                 group += 1
         return passes
 
-    def _generate_rest_lanes(self, rest_area, line_string_cls, origin_lat: float, origin_lon: float) -> List[PlanSegment]:
+    def _generate_rest_lanes(
+        self,
+        rest_area,
+        line_string_cls,
+        origin_lat: float,
+        origin_lon: float,
+        anchor_xy=None,
+        lane_angle_deg: float = 0.0,
+    ) -> List[PlanSegment]:
         spacing = self.parameters.spacing_m
         if rest_area.is_empty or spacing <= 0.0:
             return []
         scan_area = rest_area.buffer(-min(0.08, spacing * 0.25))
         if scan_area.is_empty:
             scan_area = rest_area
+        mirrored = False
+        # Die gesamte Abtastung arbeitet mit waagerechten Zeilen. Statt sie
+        # umzuschreiben, wird die Fläche in ein Bezugssystem gedreht, in dem
+        # die gewünschte Bahnrichtung waagerecht liegt - und die fertigen
+        # Bahnen am Ende zurückgedreht.
+        if abs(lane_angle_deg) > 1e-9:
+            from shapely import affinity
+
+            scan_area = affinity.rotate(scan_area, -lane_angle_deg, origin=(0.0, 0.0))
+            if anchor_xy is not None:
+                anchor_xy = self._rotate_xy(anchor_xy, -lane_angle_deg)
+                # Die Abtastung läuft immer von der unteren Kante des
+                # gedrehten Rahmens nach oben - also quer über die Fläche in
+                # einer festen Richtung. Liegt der Startpunkt auf der anderen
+                # Seite, wird der Rahmen um 180 Grad gedreht: dieselben
+                # Bahnen, aber abgearbeitet von dort, wo die Aufzeichnung
+                # begonnen hat. Ohne das begann der Plan 13,2 m neben dem
+                # Startpunkt auf der Gegenseite (real, 02.08.).
+                min_y, max_y = scan_area.bounds[1], scan_area.bounds[3]
+                if anchor_xy[1] > (min_y + max_y) / 2.0:
+                    lane_angle_deg += 180.0
+                    scan_area = affinity.rotate(scan_area, 180.0, origin=(0.0, 0.0))
+                    anchor_xy = self._rotate_xy(anchor_xy, 180.0)
+                # Und innerhalb der Bahnen beginnt jeder Lauf am linken Ende
+                # des Rahmens. Liegt der Startpunkt am rechten, wird die
+                # Fläche gespiegelt statt die einzelnen Bahnen umzudrehen -
+                # letzteres würde die Kette zerreißen, auf der das
+                # Serpentinenmuster beruht.
+                min_x, max_x = scan_area.bounds[0], scan_area.bounds[2]
+                if anchor_xy[0] > (min_x + max_x) / 2.0:
+                    mirrored = True
+                    scan_area = affinity.scale(scan_area, xfact=-1.0, yfact=1.0, origin=(0.0, 0.0))
+                    anchor_xy = (-anchor_xy[0], anchor_xy[1])
+
+        def to_latlon(coords_xy):
+            if mirrored:
+                coords_xy = [(-point[0], point[1]) for point in coords_xy]
+            if abs(lane_angle_deg) > 1e-9:
+                coords_xy = [self._rotate_xy(point, lane_angle_deg) for point in coords_xy]
+            return xy_ring_to_latlon(coords_xy, origin_lat, origin_lon)
         if self.parameters.rest_pattern == "serpentine":
             rows = self._scan_rows(scan_area, line_string_cls, spacing)
             chains = self._chain_rows(rows, spacing)
@@ -376,19 +459,20 @@ class LanePlanner:
                     coords_xy[-1][1] - coords_xy[0][1],
                 )
                 run_length[item["group"]] = run_length.get(item["group"], 0.0) + item["length_m"]
+            kept = [
+                item for item in passes
+                if run_length[item["group"]] >= self.MIN_REST_LANE_LENGTH_M
+            ]
+            kept = self._anchored_order(kept, anchor_xy)
             rest_lanes: List[PlanSegment] = []
-            for item in passes:
-                coords_xy = item["coords_xy"]
-                length = item["length_m"]
-                if run_length[item["group"]] < self.MIN_REST_LANE_LENGTH_M:
-                    continue
+            for item in kept:
                 rest_lanes.append(PlanSegment(
                     type="rest_lane",
                     rest_index=len(rest_lanes),
                     rest_group=item["group"],
                     direction="forward" if len(rest_lanes) % 2 == 0 else "reverse",
-                    coordinates=xy_ring_to_latlon(coords_xy, origin_lat, origin_lon),
-                    length_m=round(length, 2),
+                    coordinates=to_latlon(item["coords_xy"]),
+                    length_m=round(item["length_m"], 2),
                 ))
             return rest_lanes
         min_x, min_y, max_x, max_y = scan_area.bounds
@@ -409,7 +493,9 @@ class LanePlanner:
                 })
             y += spacing
 
-        ordered = self._order_rest_lane_candidates(candidates, scan_area, line_string_cls)
+        ordered = self._order_rest_lane_candidates(
+            candidates, scan_area, line_string_cls, anchor_xy
+        )
         rest_lanes: List[PlanSegment] = []
         for rest_index, item in enumerate(ordered):
             direction = "forward" if rest_index % 2 == 0 else "reverse"
@@ -418,16 +504,94 @@ class LanePlanner:
                 rest_index=rest_index,
                 rest_group=item["group"],
                 direction=direction,
-                coordinates=xy_ring_to_latlon(item["coords_xy"], origin_lat, origin_lon),
+                coordinates=to_latlon(item["coords_xy"]),
                 length_m=round(item["length_m"], 2),
             ))
         return rest_lanes
 
     @staticmethod
+    def _lane_angle_deg(points_xy) -> float:
+        """Bahnrichtung aus der längsten Kante des aufgezeichneten Randes.
+
+        Die Abtastung lief bisher fest waagerecht, also Ost-West, unabhängig
+        von der Form der Fläche. Auf einer 30 x 49 m langen Wiese standen die
+        Bahnen damit quer zur langen Achse - und quer zu der Richtung, aus
+        der das Fahrzeug überhaupt hereinfahren kann, weil links und rechts
+        Hecken stehen. Entlang der längsten Randkante werden die Bahnen
+        länger, es sind weniger, und die Einfahrt liegt in Bahnrichtung.
+        """
+        best_length = 0.0
+        best_angle = 0.0
+        for start, end in zip(points_xy, points_xy[1:]):
+            dx = end[0] - start[0]
+            dy = end[1] - start[1]
+            length = math.hypot(dx, dy)
+            if length > best_length:
+                best_length = length
+                best_angle = math.degrees(math.atan2(dy, dx))
+        return best_angle % 180.0
+
+    @staticmethod
+    def _rotate_xy(point, angle_deg: float):
+        angle = math.radians(angle_deg)
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        return (
+            point[0] * cos_a - point[1] * sin_a,
+            point[0] * sin_a + point[1] * cos_a,
+        )
+
+    @staticmethod
+    def _anchored_order(passes, anchor_xy):
+        """Serpentine am zuerst erfassten Kartenpunkt beginnen lassen.
+
+        Die Abtastung wandert monoton über die Fläche und begänne deshalb an
+        deren Rand - auf der Wiese an einer kurzen Eckbahn, während die 50 m
+        langen Bahnen genau am Startpunkt enden. Eine Kette lässt sich von
+        jeder Stelle aus in beide Richtungen abfahren: erst die eine Hälfte ab
+        dem Startpunkt, dann die andere.
+
+        Der Wechsel zwischen den Hälften verlangt einen Spurwechsel, den der
+        Regler als Knick ablehnt (real, 06.08.: 72,9° auf 5,92 m, der Mäher
+        blieb nach der ersten Hälfte stehen). Den fährt das Eindrehmanöver in
+        _turn_in_transfer. Ohne den Schnitt ist die Reihenfolge messbar
+        schlechter: 49 statt 1 gesperrtes Segment über den ganzen Plan.
+        """
+        if anchor_xy is None or len(passes) < 2:
+            return passes
+
+        def distance(point):
+            return math.hypot(point[0] - anchor_xy[0], point[1] - anchor_xy[1])
+
+        def reversed_pass(item):
+            return {**item, "coords_xy": list(reversed(item["coords_xy"]))}
+
+        best_index, at_start, best = 0, True, float("inf")
+        for index, item in enumerate(passes):
+            for is_start, point in ((True, item["coords_xy"][0]), (False, item["coords_xy"][-1])):
+                if distance(point) < best:
+                    best = distance(point)
+                    best_index, at_start = index, is_start
+
+        if at_start:
+            ordered = list(passes[best_index:])
+            ordered += [reversed_pass(item) for item in reversed(passes[:best_index])]
+        else:
+            ordered = [reversed_pass(item) for item in reversed(passes[:best_index + 1])]
+            ordered += list(passes[best_index + 1:])
+
+        # Gruppennummern bleiben aufsteigend, damit nachgelagerte Schritte die
+        # zusammenhängenden Läufe weiter erkennen.
+        renumber = {}
+        for item in ordered:
+            renumber.setdefault(item["group"], len(renumber))
+            item["group"] = renumber[item["group"]]
+        return ordered
+
+    @staticmethod
     def _latlon_ring_to_xy(ring: List[List[float]], origin_lat: float, origin_lon: float):
         return [lonlat_to_xy(coord, origin_lat, origin_lon) for coord in ring]
 
-    def _order_rest_lane_candidates(self, candidates, rest_area, line_string_cls):
+    def _order_rest_lane_candidates(self, candidates, rest_area, line_string_cls, anchor_xy=None):
         spacing = self.parameters.spacing_m
         remaining = []
         for index, item in enumerate(candidates):
@@ -455,7 +619,15 @@ class LanePlanner:
                 options = (item["coords_xy"], list(reversed(item["coords_xy"])))
                 for coords in options:
                     if current_end is None:
-                        score = coords[0][1] * 1000.0 + coords[0][0]
+                        # Die erste Bahn beginnt am zuerst erfassten
+                        # Kartenpunkt. Vorher gewann hart das kleinste y,
+                        # also der Südrand - unabhängig davon, wo die
+                        # Aufzeichnung begonnen hatte.
+                        score = (
+                            math.hypot(coords[0][0] - anchor_xy[0], coords[0][1] - anchor_xy[1])
+                            if anchor_xy is not None
+                            else coords[0][1] * 1000.0 + coords[0][0]
+                        )
                         safe = True
                     else:
                         distance = math.hypot(coords[0][0] - current_end[0], coords[0][1] - current_end[1])

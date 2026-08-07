@@ -129,6 +129,31 @@ class TransitionRouter:
                 )
                 route_kind = "around_sub" if safe else "failed"
                 line_length = polyline_length_xy(route_coords_xy)
+        if not safe and confine_to_mow_area and not within_mow_area:
+            # Die gerade Verbindung schneidet über den Rand. Auf einer nicht
+            # konvexen Fläche ist das für jeden längeren Wechsel der Normalfall
+            # - zwei Bahnenden auf gegenüberliegenden Seiten einer sechseckigen
+            # Wiese liegen 33 m auseinander, und die Sehne dazwischen läuft
+            # außen herum. Innen am Rand entlang ist derselbe Wechsel fahrbar;
+            # dieselbe Wegsuche wie um eine Sperrzone, nur mit dem Rand als
+            # Stützpunktring (real, 02.08.).
+            routed = self.route_inside_boundary(start_xy, end_xy)
+            if routed:
+                routed_line = self.line_string_cls(routed)
+                inside_safe = (
+                    allowed_area.covers(routed_line)
+                    and not (
+                        self.sub_union is not None
+                        and not self.sub_union.is_empty
+                        and routed_line.intersects(self.sub_union)
+                    )
+                    and not self._intersects_blocked(routed_line)
+                )
+                if inside_safe:
+                    route_coords_xy = routed
+                    route_kind = "inside_boundary"
+                    line_length = polyline_length_xy(route_coords_xy)
+                    safe = True
         return TransitionSegment(
             type="transition",
             transition_index=transition_index,
@@ -147,6 +172,46 @@ class TransitionRouter:
             coordinates=xy_ring_to_latlon(route_coords_xy, self.origin_lat, self.origin_lon),
             length_m=round(line_length, 2),
         )
+
+    def is_polyline_safe(self, coords, confine_to_mow_area: bool = True) -> bool:
+        """Prüft einen fertigen Streckenzug mit denselben Kriterien wie plan_between.
+
+        Wird für Pfade gebraucht, die nicht der Router selbst erzeugt hat -
+        etwa den eingelenkten Anfahrbogen. Ein solcher Pfad darf nie ohne
+        dieselbe Prüfung gefahren werden wie eine gerade Verbindung.
+        """
+        if len(coords) < 2:
+            return True
+        xy = [lonlat_to_xy(coord, self.origin_lat, self.origin_lon) for coord in coords]
+        line = self.line_string_cls(xy)
+        if self.sub_union is not None and not self.sub_union.is_empty and line.intersects(self.sub_union):
+            return False
+        if self._intersects_blocked(line):
+            return False
+        if confine_to_mow_area and not self.mow_area.buffer(0.02).covers(line):
+            return False
+        return True
+
+    def route_inside_boundary(self, start_xy, end_xy):
+        """Weg von A nach B, der die Mähfläche nicht verlässt.
+
+        Stützpunkte sind der um die Fahrzeugfreiheit eingezogene Rand; die
+        Wegsuche selbst ist dieselbe wie beim Umfahren einer Sperrzone.
+        """
+        allowed = self.mow_area.buffer(0.02)
+        inner = self.mow_area.buffer(-self.ROUTE_CLEARANCE_M)
+        nodes = [start_xy, end_xy]
+        ring_nodes = []
+        for poly in iter_polygons(inner):
+            raw_ring = list(poly.exterior.coords)
+            open_ring = raw_ring[:-1] if raw_ring and raw_ring[0] == raw_ring[-1] else raw_ring
+            if len(open_ring) < 4:
+                continue
+            step = max(1, len(open_ring) // 60)
+            ring_nodes.extend(open_ring[::step])
+        if not ring_nodes:
+            return None
+        return self.shortest_ring_route(nodes + ring_nodes, allowed)
 
     def route_around_sub(self, start_xy, end_xy, confine: bool = True):
         best_route = None
@@ -185,10 +250,13 @@ class TransitionRouter:
         for offset, node in enumerate(ring_indices):
             nxt = ring_indices[(offset + 1) % len(ring_indices)]
             edge_pairs.append((node, nxt))
+        # Ohne Sperrzonen ist sub_union None. Der Aufruf kam bisher nur aus
+        # route_around_sub und damit nie ohne, seit dem Randrouting schon.
+        has_subs = self.sub_union is not None and not self.sub_union.is_empty
         for i, j in edge_pairs:
             edge = self.line_string_cls([nodes[i], nodes[j]])
             if (
-                edge.intersects(self.sub_union)
+                (has_subs and edge.intersects(self.sub_union))
                 or self._intersects_blocked(edge)
                 or (allowed_area is not None and not allowed_area.covers(edge))
             ):

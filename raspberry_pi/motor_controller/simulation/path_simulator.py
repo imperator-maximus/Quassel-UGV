@@ -20,7 +20,17 @@ from ..navigation.navigation_controller import NavigationController, Waypoint
 @dataclass(frozen=True)
 class SimulationParameters:
     step_s: float = 0.05
-    max_wheel_speed_m_s: float = 0.80
+    # Gemessen am 02.08. an der realen Planfahrt: bei vollem Vorwärtsbefehl
+    # legte das Fahrzeug 0.33 m/s zurück (Track-Fortschritt zwischen zwei
+    # Log-Zeilen). Die vorherigen 0.80 m/s waren geschätzt und liessen jede
+    # Simulation doppelt so schnell und damit viel zu wendig erscheinen.
+    max_wheel_speed_m_s: float = 0.35
+    # Anteil der ideal berechneten Gierrate, der real ankommt. Ebenfalls am
+    # 02.08. gemessen: 2.9°/s statt der modellierten 31°/s bei vollem
+    # Lenkbefehl. Ohne diesen Faktor meldete die Simulation Strecken als
+    # fahrbar, an denen das Fahrzeug anschliessend geradeaus weiterfuhr,
+    # weil es der Kurve nicht folgen konnte.
+    yaw_efficiency: float = 0.10
     track_width_m: float = 0.64
     command_response_s: float = 0.25
     wheel_command_deadband: float = 0.08
@@ -56,6 +66,7 @@ class SimulationParameters:
             max_wheel_speed_m_s=number(
                 "max_wheel_speed_m_s", cls.max_wheel_speed_m_s, 0.10, 3.0
             ),
+            yaw_efficiency=number("yaw_efficiency", cls.yaw_efficiency, 0.01, 1.0),
             track_width_m=number("track_width_m", cls.track_width_m, 0.20, 2.0),
             command_response_s=number(
                 "command_response_s", cls.command_response_s, 0.0, 3.0
@@ -136,6 +147,16 @@ class MowingPathSimulator:
                 start_coordinate=start_coordinate,
                 start_pose=pose,
                 max_source_segments=max_source_segments,
+                # Same reasoning as the playback endpoint: the simulation
+                # drives no hardware, and every transition is re-routed here
+                # by the runtime router anyway, so a planning-time unsafe flag
+                # says nothing about the route that is actually simulated.
+                # Rejecting the whole plan up front hid exactly the result the
+                # user wants to see. Where no map geometry is available the
+                # runtime router is absent and _transfer_segment still refuses
+                # the stored unsafe transition; real execution stays blocked
+                # by check_plan().
+                allow_unsafe_plan=True,
             )
         except ValueError as exc:
             return {
@@ -489,8 +510,12 @@ class MowingPathSimulator:
         ratio = turn_factor / forward_factor
         x = float(command.get("x", 0.0))
         y = float(command.get("y", 0.0))
-        left_level = (y + x * ratio) / max_level
-        right_level = (y - x * ratio) / max_level
+        # Die Räder können nicht schneller als ihr Maximum. Ohne diese Grenze
+        # rechnete das Modell aus x=0.300/y=0.180 eine Radgeschwindigkeit von
+        # 0.96 m/s bei 0.8 m/s Maximum - und daraus eine Drehrate, die das
+        # Fahrzeug nie erreicht.
+        left_level = max(-1.0, min(1.0, (y + x * ratio) / max_level))
+        right_level = max(-1.0, min(1.0, (y - x * ratio) / max_level))
         if (
             not params.counter_rotation_supported
             and left_level * right_level < -1e-6
@@ -509,7 +534,15 @@ class MowingPathSimulator:
         left_speed = effective_level(left_level) * params.max_wheel_speed_m_s
         right_speed = effective_level(right_level) * params.max_wheel_speed_m_s
         target_linear = (left_speed + right_speed) / 2.0
-        target_angular = (left_speed - right_speed) / params.track_width_m
+        # Ein Skid-Steer dreht sich nicht so, wie es die reine Differenz der
+        # Radgeschwindigkeiten hergibt: die Räder müssen dafür seitlich über
+        # den Boden schrammen, und auf Gras unter Last bleibt davon wenig
+        # übrig. Gemessen am 02.08. bei vollem Lenkbefehl (x=0.300, y=0.180):
+        # 144.7° -> 151.2° in 2.2 s, also 2.9°/s - das ideale Differenzmodell
+        # sagt an derselben Stelle 31°/s voraus.
+        target_angular = (
+            (left_speed - right_speed) / params.track_width_m * params.yaw_efficiency
+        )
         if params.command_response_s <= 0.0:
             alpha = 1.0
         else:

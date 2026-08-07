@@ -56,6 +56,41 @@ class PathSimulatorTests(unittest.TestCase):
             max_steps=20000,
         )
 
+    def test_model_reproduces_the_measured_turn_rate(self):
+        """Das Fahrzeugmodell muss die Realfahrt vom 02.08. treffen.
+
+        Gemessen bei vollem Lenkbefehl (x=0.300, y=0.180): Kurs 144.7° ->
+        151.2° in 2.2 s, also 2.9°/s, bei rund 0.25 m/s Fahrt. Das ideale
+        Differenzmodell sagte an derselben Stelle 31°/s voraus - und liess
+        die Simulation Strecken abnicken, an denen das Fahrzeug anschliessend
+        der Kurve nicht folgen konnte.
+        """
+        simulator = MowingPathSimulator(self.manager, self.nav_config, self.pwm_config)
+        params = SimulationParameters(step_s=0.05, command_response_s=0.0)
+        pose = {"latitude": self.ORIGIN_LAT, "longitude": self.ORIGIN_LON, "heading_deg": 0.0}
+
+        linear, angular = 0.0, 0.0
+        for _ in range(20):  # 1 s
+            linear, angular = simulator._integrate(
+                pose, {"x": 0.300, "y": 0.180}, linear, angular, params
+            )
+
+        self.assertAlmostEqual(2.9, math.degrees(angular), delta=0.8)
+        self.assertAlmostEqual(0.25, linear, delta=0.08)
+
+    def test_full_throttle_matches_the_measured_ground_speed(self):
+        simulator = MowingPathSimulator(self.manager, self.nav_config, self.pwm_config)
+        params = SimulationParameters(step_s=0.05, command_response_s=0.0)
+        pose = {"latitude": self.ORIGIN_LAT, "longitude": self.ORIGIN_LON, "heading_deg": 0.0}
+
+        linear, angular = simulator._integrate(
+            pose, {"x": 0.0, "y": 0.300}, 0.0, 0.0, params
+        )
+
+        # Real gemessen: 0.33 m/s Track-Fortschritt bei y=0.300.
+        self.assertAlmostEqual(0.35, linear, delta=0.05)
+        self.assertAlmostEqual(0.0, angular, delta=1e-9)
+
     def test_forward_track_completes_with_real_navigation_controller(self):
         plan = self._plan([self._segment(0, [(0.0, 0.0), (8.0, 0.0)])])
 
@@ -536,6 +571,39 @@ class PathSimulatorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Unsafe transitions"):
             self.manager.executable_segments(plan)
+
+    def test_simulation_reroutes_legacy_unsafe_transition_instead_of_refusing(self):
+        """A planning-time unsafe flag must not block the preview.
+
+        The simulator re-routes every transfer through the runtime router, so
+        the stored flag describes a route that is not the one being driven.
+        Refusing here left the user with an error instead of the answer.
+        """
+        plan = self._plan([
+            self._segment(0, [(0.0, 0.0), (6.0, 0.0)]),
+            self._segment(1, [(6.0, 0.35), (0.0, 0.35)], direction="reverse"),
+        ])
+        plan["transitions"] = [{
+            "type": "transition",
+            "transition_index": 0,
+            "from_segment_index": 0,
+            "to_segment_index": 1,
+            "safe": False,
+            "route_kind": "failed",
+            "coordinates": [],
+            "length_m": 0.0,
+        }]
+
+        result = self.simulator.simulate(
+            plan,
+            start_coordinate=self._coord(0.0, 0.0),
+            start_heading_deg=90.0,
+            parameters=self.params,
+        )
+
+        self.assertTrue(result["success"], result.get("reason"))
+        self.assertNotEqual("route_error", result["state"])
+        self.assertEqual(["mow", "mow"], [item["type"] for item in result["segments"]])
 
     def _plan(self, sequence, zone=None):
         boundary = [(-10.0, -8.0), (10.0, -8.0), (10.0, 8.0), (-10.0, 8.0)]

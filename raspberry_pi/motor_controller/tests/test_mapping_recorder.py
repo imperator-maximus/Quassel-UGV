@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mapping import MappingRecorder
-from mapping.geometry import project_points
+from mapping.geometry import orient_ring_xy, project_points, signed_area_xy
 from mapping.lane_planner import LanePlanner
 from mapping.nogo_monitor import NoGoZoneMonitor
 from mapping.plan_types import PlanSegment
@@ -277,6 +277,7 @@ class MappingRecorderTests(unittest.TestCase):
             "max_ring_turn_deg",
             "sub_contour_count",
             "rest_pattern",
+            "max_lane_curvature_deg_per_m",
         }, set(result["parameters"].keys()))
         self.assertEqual(result["lane_count"], len(result["lanes"]))
         self.assertEqual(result["rest_lane_count"], len(result["rest_lanes"]))
@@ -386,6 +387,288 @@ class MappingRecorderTests(unittest.TestCase):
             line = LineString(line_xy)
             self.assertFalse(line.intersects(protected))
             self.assertGreaterEqual(sub_contour["length_m"], 2.0)
+
+    def test_rest_lanes_start_at_the_first_recorded_map_point(self):
+        """Der Plan beginnt dort, wo die Kartenaufzeichnung begonnen hat.
+
+        Die Abtastung läuft immer vom Südrand nach Norden; ohne Verankerung
+        begann der Plan deshalb unabhängig von der Karte unten - auf der
+        Wiese am entgegengesetzten Ende der Fläche.
+        """
+        self._assert_shapely_available()
+
+        for corner, name in (((0.0, 0.0), "Suedwest"), ((30.0, 30.0), "Nordost")):
+            with tempfile.TemporaryDirectory() as tmp:
+                recorder = MappingRecorder(tmp, lambda: {})
+                # Rand ab der jeweiligen Ecke aufgezeichnet.
+                square = [(0.0, 0.0), (30.0, 0.0), (30.0, 30.0), (0.0, 30.0)]
+                start = square.index(corner)
+                points = [
+                    self._point_m(x, y) for x, y in square[start:] + square[:start]
+                ]
+                payload = recorder._to_feature_collection("Brunnen", points)
+                (Path(tmp) / "Brunnen.geojson").write_text(json.dumps(payload), encoding="utf-8")
+
+                result = recorder.plan_contour_lanes(
+                    "Brunnen", cut_width_m=0.85, overlap_m=0.5,
+                    max_lane_curvature_deg_per_m=8.0,
+                )
+
+            self.assertTrue(result["success"], name)
+            rest = [s for s in result["sequence"] if s["type"] == "rest_lane"]
+            self.assertGreater(len(rest), 2, name)
+            manager = MowingPlanManager("/tmp/maps")
+            anchor = [points[0]["longitude"], points[0]["latitude"]]
+            start = manager._coord_distance_m(rest[0]["coordinates"][0], anchor)
+            # Keine Bahn im Plan darf naeher am Startpunkt liegen als die
+            # erste. Nur "naeher als das Planende" zu pruefen liess einen
+            # Start 13,2 m daneben durchgehen, obwohl 0,3 m moeglich waren
+            # (real, 02.08.).
+            best = min(
+                min(manager._coord_distance_m(s["coordinates"][0], anchor),
+                    manager._coord_distance_m(s["coordinates"][-1], anchor))
+                for s in rest
+            )
+            # Der Plan beginnt am naechstgelegenen *Kettenende*, nicht an der
+            # naechstgelegenen Bahn: die Kette wird nicht aufgetrennt, weil
+            # der Wechsel zwischen den Haelften real 72,9° auf 5,92 m
+            # verlangte und den Mäher nach der halben Wiese stoppte (06.08.).
+            ende = manager._coord_distance_m(rest[-1]["coordinates"][-1], anchor)
+            self.assertLess(
+                start, ende,
+                "Plan beginnt am falschen Kettenende (%.1f m statt %.1f m, %s)"
+                % (start, ende, name),
+            )
+
+    def test_every_compiled_segment_starts_within_the_controller_limit(self):
+        """Kein Segment darf mit mehr als 45° Winkelfehler beginnen.
+
+        Der Regler sperrt am Bahnanfang unabhängig von der Segmentlänge. Real
+        stoppte der Mäher deshalb nach der ersten Planhälfte: der Wechsel zur
+        zweiten war 5,92 m lang und verlangte 70,8° (06.08.). Die Regel
+        "Strecke reicht zum Drehen" hatte ihn durchgelassen.
+        """
+        self._assert_shapely_available()
+        manager = MowingPlanManager("/tmp/maps")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = MappingRecorder(tmp, lambda: {})
+            self._write_square_map(tmp, recorder, "Brunnen", 0.0, 0.0, 24.0, 40.0)
+            plan = recorder.plan_contour_lanes(
+                "Brunnen", cut_width_m=0.85, overlap_m=0.5,
+                max_lane_curvature_deg_per_m=8.0,
+            )
+
+        self.assertTrue(plan["success"])
+        executable = manager.executable_segments(
+            plan, start_segment_index=0, start_pose=self._pose_m(-6.0, 2.0, 90.0),
+        )
+        heading = 90.0
+        schlimmster = 0.0
+        for index, segment in enumerate(executable):
+            coords = segment["coordinates"]
+            if len(coords) >= 2:
+                bearing = manager._edge_bearing_deg(coords[0], coords[1])
+                if segment.get("direction") == "reverse":
+                    bearing = (bearing + 180.0) % 360.0
+                schlimmster = max(schlimmster, manager._angle_error_deg(bearing, heading))
+                self.assertLessEqual(
+                    manager._angle_error_deg(bearing, heading), 45.0,
+                    "Segment %d (%s, %.2f m) beginnt mit zu grossem Winkelfehler"
+                    % (index, segment["type"], segment.get("length_m", 0.0)),
+                )
+            heading = manager._segment_end_heading(segment, heading)
+        self.assertGreater(len(executable), 10)
+
+    def test_blocked_transfer_becomes_a_turn_in_manoeuvre(self):
+        """Ein Spurwechsel wird eingedreht statt geknickt.
+
+        Zwei parallele Bahnen mit seitlichem Versatz verlangen als direkter
+        Übergang eine Drehung quer zur Fahrt - real 72,9° auf 5,92 m, vom
+        Regler gesperrt, halbe Wiese ungemäht (06.08.). Stattdessen fährt das
+        Fahrzeug in die Zielbahn hinein, stößt an deren Anfang zurück und
+        beginnt sie dann ohne Winkelfehler.
+        """
+        manager = MowingPlanManager("/tmp/maps")
+        # Zwei lange Bahnen nach Sueden, 6 m seitlich versetzt.
+        erste = {
+            "type": "rest_lane", "segment_index": 0, "direction": "forward",
+            "coordinates": [self._coord_m(0.0, 40.0), self._coord_m(0.0, 0.0)],
+        }
+        zweite = {
+            "type": "rest_lane", "segment_index": 1, "direction": "forward",
+            "coordinates": [self._coord_m(6.0, 40.0), self._coord_m(6.0, 0.0)],
+        }
+        plan = {
+            "success": True, "name": "Brunnen", "map_name": "Brunnen",
+            "sequence": [erste, zweite], "transitions": [], "rest_lanes": [], "lanes": [],
+            "parameters": {"outer_margin_m": 0.0},
+            "map": self._map_feature(-15.0, -15.0, 25.0, 55.0),
+            "total_drive_length_m": 80.0,
+        }
+
+        executable = manager.executable_segments(
+            plan, start_segment_index=0, start_pose=self._pose_m(0.0, 41.0, 180.0),
+        )
+
+        # Das Manöver selbst: Anfahrt in die Bahn, dann rückwärts an deren
+        # Anfang - und beides fahrbar.
+        lane = executable[-1]["coordinates"]
+        manoever = manager._turn_in_transfer(
+            executable[0]["coordinates"][-1], 180.0, lane,
+            manager._runtime_transition_router(plan),
+        )
+        self.assertIsNotNone(manoever)
+        self.assertEqual(
+            ["turn_in_approach", "turn_in_backup"],
+            [item["route_kind"] for item in manoever],
+        )
+        self.assertEqual("reverse", manoever[1]["direction"])
+        # Das Rückstoßstück endet am Bahnanfang.
+        self.assertLess(
+            manager._coord_distance_m(manoever[1]["coordinates"][-1], lane[0]), 0.05
+        )
+
+        # Und die kompilierte Kette ist durchgehend fahrbar.
+        heading = 180.0
+        for segment in executable:
+            coords = segment["coordinates"]
+            if len(coords) >= 2:
+                bearing = manager._edge_bearing_deg(coords[0], coords[1])
+                if segment.get("direction") == "reverse":
+                    bearing = (bearing + 180.0) % 360.0
+                self.assertLessEqual(
+                    manager._angle_error_deg(bearing, heading), 45.0,
+                    "%s beginnt zu schraeg" % segment.get("route_kind", segment["type"]),
+                )
+            heading = manager._segment_end_heading(segment, heading)
+
+    def test_transition_across_a_concave_area_stays_inside(self):
+        """Ein langer Wechsel wird innen am Rand geführt, nicht quer darüber.
+
+        Auf einer nicht konvexen Fläche schneidet die gerade Verbindung
+        zwischen zwei weit auseinanderliegenden Bahnenden über den Rand. Real
+        blockierten dadurch zwei Übergänge (20 m und 33 m) den ganzen Plan mit
+        "Plan enthält unsichere Übergänge" - Play tat nichts (02.08.).
+        """
+        LineString, Polygon = self._assert_shapely_available()
+        # L-Form: die Verbindung der beiden Schenkelenden laeuft aussen herum.
+        ecke = Polygon(project_points([
+            self._point_m(0.0, 0.0), self._point_m(40.0, 0.0),
+            self._point_m(40.0, 12.0), self._point_m(12.0, 12.0),
+            self._point_m(12.0, 40.0), self._point_m(0.0, 40.0),
+        ], 0.0, 0.0))
+        router = TransitionRouter(ecke, None, LineString, 0.0, 0.0)
+
+        start = [self._point_m(36.0, 6.0)["longitude"], self._point_m(36.0, 6.0)["latitude"]]
+        end = [self._point_m(6.0, 36.0)["longitude"], self._point_m(6.0, 36.0)["latitude"]]
+        result = router.plan_between(start, end).to_dict()
+
+        self.assertTrue(result["safe"], result.get("reason"))
+        self.assertEqual("inside_boundary", result["route_kind"])
+        self.assertGreater(len(result["coordinates"]), 2)
+        # Der gefahrene Weg bleibt in der Flaeche.
+        self.assertTrue(router.is_polyline_safe(result["coordinates"]))
+        # Und er ist laenger als die Sehne, weil er um die Ecke fuehrt.
+        manager = MowingPlanManager("/tmp/maps")
+        self.assertGreater(result["length_m"], manager._coord_distance_m(start, end))
+
+    def test_lanes_follow_the_longest_boundary_edge(self):
+        """Bahnen laufen entlang der langen Achse, nicht fest Ost-West.
+
+        Die Abtastung war fest waagerecht. Auf einer 20 x 60 m langen Fläche
+        standen die Bahnen damit quer - kurz, viele, und die Einfahrt lag
+        quer zur Bahnrichtung. Real ist das die Wiese zwischen zwei Hecken,
+        wo nur von der Schmalseite eingefahren werden kann (02.08.).
+        """
+        self._assert_shapely_available()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = MappingRecorder(tmp, lambda: {})
+            # Lange Achse Nord-Sued.
+            self._write_square_map(tmp, recorder, "Brunnen", 0.0, 0.0, 20.0, 60.0)
+            result = recorder.plan_contour_lanes(
+                "Brunnen", cut_width_m=0.85, overlap_m=0.5,
+                max_lane_curvature_deg_per_m=8.0,
+            )
+
+        self.assertTrue(result["success"])
+        manager = MowingPlanManager("/tmp/maps")
+        rest = [s for s in result["sequence"] if s["type"] == "rest_lane"]
+        self.assertGreater(len(rest), 5)
+        laengste = max(rest, key=lambda s: s["length_m"])
+        richtung = manager._edge_bearing_deg(
+            laengste["coordinates"][0], laengste["coordinates"][-1]
+        )
+        # Nord-Sued, in beliebiger Fahrtrichtung.
+        self.assertLess(min(richtung % 180.0, 180.0 - (richtung % 180.0)), 15.0)
+        self.assertGreater(laengste["length_m"], 30.0)
+
+    def test_too_tight_rings_give_way_to_straight_lanes(self):
+        """Ringe enden dort, wo das Fahrzeug ihnen nicht mehr folgen kann.
+
+        Konturringe werden nach innen zwangsläufig enger (Krümmung ~ 1/Radius).
+        Auf der Wiese enthielt der Plan dadurch Ringe mit bis zu 818°/m -
+        das Fahrzeug schafft rollend rund 10-15°/m und lief real aus der Spur
+        (02.08.). Die Fläche weiter innen gehört den geraden Bahnen.
+        """
+        self._assert_shapely_available()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = MappingRecorder(tmp, lambda: {})
+            self._write_square_map(tmp, recorder, "Brunnen", 0.0, 0.0, 12.0, 12.0)
+
+            eng = recorder.plan_contour_lanes(
+                "Brunnen", cut_width_m=0.85, overlap_m=0.5,
+                max_lane_curvature_deg_per_m=8.0,
+            )
+            weit = recorder.plan_contour_lanes(
+                "Brunnen", cut_width_m=0.85, overlap_m=0.5,
+                max_lane_curvature_deg_per_m=60.0,
+            )
+
+        self.assertTrue(eng["success"])
+        self.assertTrue(weit["success"])
+        self.assertLess(eng["lane_count"], weit["lane_count"])
+        self.assertGreater(eng["skipped_curved_lanes"], 0)
+        # Die weggefallene Fläche verschwindet nicht, sie wird gerade gemäht.
+        self.assertGreater(eng["rest_lane_count"], weit["rest_lane_count"])
+
+    def test_all_planned_rings_share_one_traversal_sense(self):
+        """Ringe müssen alle gleich herum laufen.
+
+        Der aufgezeichnete Aussenrand behält die Reihenfolge, in der er
+        abgefahren wurde, die inneren Ringe kommen aus Buffer-Operationen -
+        beide Drehsinne landeten so in einem Plan. Das Fahrzeug erreichte das
+        Ende eines Rings dann entgegen dem Start des nächsten und sollte auf
+        0,39 m um 156° drehen (real, 02.08.), was kein Skid-Steer schafft.
+        """
+        self._assert_shapely_available()
+        _, _, _, result = self._plan_with_center_sub(sub_margin_m=0.25)
+
+        self.assertTrue(result["success"])
+        rings = [
+            segment for segment in result["sequence"]
+            if segment["type"] in ("contour", "sub_contour")
+        ]
+        self.assertGreater(len(rings), 1)
+        senses = {
+            signed_area_xy([(coord[0], coord[1]) for coord in ring["coordinates"]]) < 0.0
+            for ring in rings
+        }
+        self.assertEqual(1, len(senses), "Ringe laufen nicht alle gleich herum")
+
+    def test_orient_ring_xy_flips_only_the_opposite_sense(self):
+        counter_clockwise = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0), (0.0, 0.0)]
+        clockwise = list(reversed(counter_clockwise))
+
+        self.assertLess(signed_area_xy(orient_ring_xy(counter_clockwise, clockwise=True)), 0.0)
+        self.assertEqual(clockwise, orient_ring_xy(clockwise, clockwise=True))
+        self.assertGreater(signed_area_xy(orient_ring_xy(clockwise, clockwise=False)), 0.0)
+        # Der Ring bleibt geschlossen und behält alle Stützpunkte.
+        flipped = orient_ring_xy(counter_clockwise, clockwise=True)
+        self.assertEqual(len(counter_clockwise), len(flipped))
+        self.assertEqual(flipped[0], flipped[-1])
 
     def test_sub_contour_count_is_tunable(self):
         self._assert_shapely_available()
@@ -641,6 +924,69 @@ class MappingRecorderTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             manager.executable_segments(self._sample_plan(reverse=False, unsafe=True))
 
+    def test_runtime_rejected_transition_names_the_reason_not_the_legacy_flag(self):
+        """Ein neu berechneter Übergang trägt seinen Grund im Ergebnis.
+
+        Bis 02.08. meldete jeder verworfene Übergang "Unsafe transitions
+        blockieren die Ausführung" - dieselbe Meldung wie für ein altes
+        safe:false im gespeicherten Plan. Damit war nicht erkennbar, dass der
+        Router gerade eben live entschieden hatte und warum.
+        """
+        manager = MowingPlanManager("/tmp/maps")
+
+        with self.assertRaises(ValueError) as context:
+            manager._transition_segment({
+                "safe": False,
+                "reason": "outside_mow_area",
+                "from_segment_index": 0,
+                "to_segment_index": 1,
+                "route_kind": "direct",
+                "coordinates": [],
+            })
+
+        message = str(context.exception)
+        self.assertIn("Segment 0 → 1", message)
+        self.assertIn("verlässt die Mähfläche", message)
+        self.assertNotIn("Unsafe transitions", message)
+
+    def test_legacy_unsafe_transition_without_reason_keeps_its_message(self):
+        manager = MowingPlanManager("/tmp/maps")
+
+        with self.assertRaisesRegex(ValueError, "Unsafe transitions"):
+            manager._transition_segment({
+                "safe": False,
+                "route_kind": "direct",
+                "coordinates": [],
+            })
+
+    def test_selected_start_is_projected_onto_the_path(self):
+        """Der Slider-Punkt darf nicht als Bahnstützpunkt landen.
+
+        Bis 1 m Abweichung wird bewusst toleriert; unprojiziert eingesetzt lag
+        der Ringstart real 0,49 m ausserhalb der Mähfläche und der Übergang
+        zum nächsten Ring wurde als outside_mow_area verworfen (02.08.).
+        """
+        manager = MowingPlanManager("/tmp/maps")
+        segment = {
+            "type": "contour",
+            "coordinates": [
+                [10.0, 52.0], [10.001, 52.0], [10.001, 52.001],
+                [10.0, 52.001], [10.0, 52.0],
+            ],
+        }
+        # Rund 0,5 m nördlich neben der unteren Ringkante.
+        beside = [10.0005, 52.0000045]
+
+        coords = manager._coords_from_selected_start(segment, beside)
+
+        self.assertAlmostEqual(10.0005, coords[0][0], places=7)
+        self.assertAlmostEqual(52.0, coords[0][1], places=7)
+        self.assertEqual(coords[0], coords[-1])
+        self.assertLess(
+            manager._point_to_line_distance_m(coords[0], [10.0, 52.0], [10.001, 52.0]),
+            0.01,
+        )
+
     def test_reverse_segment_is_detected_and_allowed_when_supported(self):
         manager = MowingPlanManager("/tmp/maps", lambda: {"latitude": 52.0, "longitude": 10.0, "rtk_status": "RTK FIXED"})
         result = manager.check_plan("Brunnen", self._sample_plan(reverse=True, unsafe=False))
@@ -723,6 +1069,152 @@ class MappingRecorderTests(unittest.TestCase):
         self.assertEqual(self._coord_m(12.0, 0.0), executable[0]["coordinates"][0])
         self.assertEqual(selected, executable[0]["coordinates"][-1])
 
+    def test_approach_rolls_into_the_turn_instead_of_demanding_a_pivot(self):
+        """Quer geparkt muss die Anfahrt trotzdem fahrbar sein.
+
+        Als gerader Track lehnte der Regler sie ab, sobald das Fahrzeug mehr
+        als 45° verdreht stand (real, 02.08.: -46,8°, 0 m gefahren), und
+        rückwärts greift erst ab 100°. Dazwischen gab es keine fahrbare
+        Variante - der Gegenlauf-Pivot dreht dieses Fahrzeug nicht.
+        """
+        manager = MowingPlanManager("/tmp/maps", lambda: self._pose_m(12.0, 0.0, 90.0))
+        plan = self._reverse_transition_plan()
+        selected = self._coord_m(5.0, 0.0)
+
+        executable = manager.executable_segments(
+            plan,
+            start_segment_index=1,
+            start_coordinate=selected,
+            # 60° verdreht: zu viel für den Track-Regler, zu wenig für rückwärts.
+            start_pose=self._pose_m(12.0, 0.0, 210.0),
+        )
+
+        approach = executable[0]
+        self.assertEqual("positioning", approach["type"])
+        self.assertEqual("forward", approach["direction"])
+        coords = approach["coordinates"]
+        self.assertGreater(len(coords), 2, "Anfahrt wurde nicht eingelenkt")
+        # Kein Knick über der Schrittweite - inklusive des ersten Knicks
+        # gegenüber der Fahrzeugausrichtung.
+        heading = 210.0
+        for start, end in zip(coords, coords[1:]):
+            bearing = manager._edge_bearing_deg(start, end)
+            if bearing is None:
+                continue
+            self.assertLessEqual(
+                manager._angle_error_deg(bearing, heading),
+                manager.MAX_TURN_STEP_DEG + 0.01,
+            )
+            heading = bearing
+
+    def test_start_moves_only_when_the_lane_runs_across_the_approach(self):
+        """Verschoben wird wegen der Anfahrtsrichtung - nicht wegen einer Ecke.
+
+        Eine Ecke am Bahnanfang liegt bei einem geschlossenen Ring auf der
+        Naht zwischen Anfang und Ende und wird nie durchfahren; sie ist damit
+        sogar ein guter Anfang. Als Knick gewertet schob sie den Start real
+        3,2 m in die Bahn hinein - dort wären dieselben 67° mitten im Track
+        gelandet, wo der Regler sperrt (02.08.).
+        """
+        manager = MowingPlanManager("/tmp/maps")
+        # Stützpunkte alle 2 m wie in einem echten Konturring - sonst gibt es
+        # neben der Spitze gar keinen Punkt, auf den ausgewichen werden kann.
+        corners = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (10.0, 1.0), (0.0, 20.0), (0.0, 0.0)]
+        densified = []
+        for (x1, y1), (x2, y2) in zip(corners, corners[1:]):
+            steps = max(1, int(math.hypot(x2 - x1, y2 - y1) / 2.0))
+            for step in range(steps):
+                fraction = step / steps
+                densified.append(self._coord_m(x1 + (x2 - x1) * fraction, y1 + (y2 - y1) * fraction))
+        densified.append(self._coord_m(*corners[-1]))
+        spike = {"type": "contour", "coordinates": densified}
+        tip = self._coord_m(10.0, 1.0)
+
+        # Quer angefahren: der Ring läuft an der Spitze nach Nordwesten, die
+        # Anfahrt kommt von Osten - dort ist kein Start möglich.
+        moved = manager._coords_from_selected_start(spike, tip, approach_heading_deg=270.0)
+        self.assertGreater(manager._coord_distance_m(moved[0], tip), 0.05)
+        self.assertEqual(moved[0], moved[-1])
+
+        # Dieselbe Spitze, aber in Bahnrichtung angefahren: bleibt stehen,
+        # obwohl der Ring hier scharf knickt.
+        tangent = manager._edge_bearing_deg(tip, densified[densified.index(tip) + 1])
+        kept = manager._coords_from_selected_start(spike, tip, approach_heading_deg=tangent)
+        self.assertLess(manager._coord_distance_m(kept[0], tip), 0.05)
+
+        # Mitten auf der geraden Unterkante, in Fahrtrichtung angefahren.
+        on_edge = self._coord_m(10.0, 0.0)
+        kept = manager._coords_from_selected_start(spike, on_edge, approach_heading_deg=90.0)
+        self.assertLess(manager._coord_distance_m(kept[0], on_edge), 0.05)
+
+    def test_approach_ends_aligned_with_the_first_lane(self):
+        """Die Anfahrt muss in Bahnrichtung enden, nicht nur dort ankommen.
+
+        Regression der ersten Realfahrt (02.08.): das Einschwenken brach im
+        ersten Schritt ab, weil die Reststrecke gegen die Vorausschau geprüft
+        wurde. Das Fahrzeug erreichte den Ringanfang mit 43,9°, der Roll
+        vergrößerte den Fehler auf 49,4° und der Regler brach ab. Die
+        Simulation hatte das nicht gezeigt - dieser Test prüft die geplante
+        Ankunftsrichtung direkt.
+        """
+        manager = MowingPlanManager("/tmp/maps", lambda: self._pose_m(-12.0, 14.0, 90.0))
+        ring = [
+            self._coord_m(0.0, 0.0), self._coord_m(20.0, 0.0),
+            self._coord_m(20.0, 20.0), self._coord_m(0.0, 20.0),
+            self._coord_m(0.0, 0.0),
+        ]
+        plan = {
+            "success": True, "name": "Brunnen", "map_name": "Brunnen",
+            "sequence": [{
+                "type": "contour", "segment_index": 0, "lane_index": 0,
+                "coordinates": ring, "length_m": 80.0,
+            }],
+            "transitions": [], "rest_lanes": [], "lanes": [],
+            "parameters": {"outer_margin_m": 0.0},
+            "map": self._map_feature(-20.0, -20.0, 40.0, 40.0),
+            "total_drive_length_m": 80.0,
+        }
+
+        executable = manager.executable_segments(
+            plan,
+            start_segment_index=0,
+            start_pose=self._pose_m(-12.0, 14.0, 90.0),
+        )
+
+        approach = executable[0]["coordinates"]
+        lane = executable[1]["coordinates"]
+        arrival = manager._edge_bearing_deg(approach[-2], approach[-1])
+        lane_bearing = manager._edge_bearing_deg(lane[0], lane[1])
+        self.assertLess(
+            manager._angle_error_deg(arrival, lane_bearing),
+            manager.RING_START_HEADING_LIMIT_DEG,
+            "Anfahrt endet quer zur Bahn",
+        )
+
+    def test_ring_sense_follows_the_approach_instead_of_forcing_a_loop(self):
+        """Der Drehsinn wird beim Abfahren gewählt, nicht im Planer festgelegt.
+
+        Ein geschlossener Ring wird in beide Richtungen vollständig gemäht.
+        Fest verdrahtet zwang er das Fahrzeug in eine Schleife, nur um von der
+        anderen Seite auf den ersten Ring zu kommen (real, 02.08.).
+        """
+        manager = MowingPlanManager("/tmp/maps")
+        ring = {
+            "type": "contour",
+            "coordinates": [
+                self._coord_m(0.0, 0.0), self._coord_m(20.0, 0.0),
+                self._coord_m(20.0, 20.0), self._coord_m(0.0, 20.0),
+                self._coord_m(0.0, 0.0),
+            ],
+        }
+        target = self._coord_m(10.0, 0.0)
+
+        # Anflug nach Osten: der gespeicherte Ring läuft dort ebenfalls nach
+        # Osten, also unverändert fahren.
+        self.assertFalse(manager._prefers_reversed_rings(ring, target, 90.0))
+        # Anflug nach Westen: gespeichert liefe der Ring entgegen, also drehen.
+        self.assertTrue(manager._prefers_reversed_rings(ring, target, 270.0))
+
     def test_route_signature_ignores_only_live_positioning_origin(self):
         base = [{
             "type": "positioning",
@@ -793,7 +1285,10 @@ class MappingRecorderTests(unittest.TestCase):
         )
         first_track = executable[1]
         self.assertEqual(0, first_track["source_index"])
-        self.assertEqual(selected, first_track["coordinates"][0])
+        # Der Startpunkt wird auf die Bahn projiziert; er liegt hier bereits
+        # darauf, das Ergebnis ist bis auf Gleitkomma-Rundung identisch.
+        self.assertAlmostEqual(selected[0], first_track["coordinates"][0][0], places=12)
+        self.assertAlmostEqual(selected[1], first_track["coordinates"][0][1], places=12)
         self.assertAlmostEqual(self._coord_m(0.0, 0.0)[0], first_track["coordinates"][-1][0])
         self.assertGreater(first_track["length_m"], 9.0)
         self.assertEqual(first_track["coordinates"][-1], executable[2]["coordinates"][0])

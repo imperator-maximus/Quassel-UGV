@@ -201,6 +201,7 @@ class MappingRecorder:
         outer_margin_m: float = 0.0,
         sub_margin_m: float = 0.25,
         max_ring_turn_deg: float = 155.0,
+        max_lane_curvature_deg_per_m: float = 20.0,
         sub_contour_count: int = 3,
         rest_pattern: str = "parallel",
     ) -> Dict[str, Any]:
@@ -222,6 +223,7 @@ class MappingRecorder:
                 outer_margin_m=outer_margin_m,
                 sub_margin_m=sub_margin_m,
                 max_ring_turn_deg=max_ring_turn_deg,
+                max_lane_curvature_deg_per_m=max_lane_curvature_deg_per_m,
                 sub_contour_count=sub_contour_count,
                 rest_pattern=rest_pattern,
             )

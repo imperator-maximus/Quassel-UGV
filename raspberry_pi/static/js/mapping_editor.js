@@ -15,6 +15,7 @@ var lanePreviewLayers = [];
 var lanePreviewLaneLayers = [];
 var lanePreviewRestLayers = [];
 var lanePreviewConnectorLayers = [];
+var planBlockedMessage = null;
 var laneSimulationLayers = [];
 var laneSimulationResult = null;
 var laneSimulationRunning = false;
@@ -918,6 +919,7 @@ function updateLaneSimulationPose(simulationTimeS) {
         laneSimulationMarker = L.marker(latLng, {
             icon: vehicleIcon(heading),
             zIndexOffset: 3000,
+            interactive: false,
         }).addTo(mapEditor);
         laneSimulationLayers.push(laneSimulationMarker);
     } else {
@@ -931,6 +933,10 @@ function updateLaneSimulationPose(simulationTimeS) {
             weight: 3,
             fillColor: '#00ff9d',
             fillOpacity: 0.20,
+            // Die Fahrzeugkontur ist 1,15 x 0,79 m gross und deckt beim
+            // Abspielen ganze Kartenpunkte zu. Ohne das hier fängt sie deren
+            // Klicks ab und der Punkt lässt sich nicht mehr anfassen.
+            interactive: false,
         }).addTo(mapEditor);
         laneSimulationLayers.push(laneSimulationFootprint);
     } else {
@@ -1152,7 +1158,8 @@ function playLoadedPlan() {
     const retryDeadline = Date.now() + 35000;
     const beginPreflight = () => {
         if (attemptToken !== planStartAttemptToken) return;
-        setPlanStatus(`Planstart ab ${percentText}% wird geprüft`);
+        planBlockedMessage = null;
+    setPlanStatus(`Planstart ab ${percentText}% wird geprüft`);
         checkAndStartLoadedPlan(false, start.segmentIndex, start.coordinate, attemptToken, retryDeadline);
     };
     if (laneSimulationRunning) {
@@ -1182,6 +1189,7 @@ function resumeLoadedPlan() {
     if (!confirm('Pausierten Plan an der gespeicherten Stelle fortsetzen?')) return;
     const attemptToken = ++planStartAttemptToken;
     const retryDeadline = Date.now() + 35000;
+    planBlockedMessage = null;
     setPlanStatus('Fortsetzen wird geprüft');
     checkAndStartLoadedPlan(true, null, null, attemptToken, retryDeadline);
 }
@@ -1224,7 +1232,12 @@ function checkAndStartLoadedPlan(useResume, startSegmentIndex, startCoordinate, 
                 return;
             }
             const detail = [result.data.error, ...errors, ...warnings].filter(Boolean).join(' · ');
-            setPlanStatus(`⛔ Play blockiert${detail ? ' · ' + detail : ''} · ${planSummaryText(result.data.summary || lanePreviewPlan)}`);
+            // Festhalten, bis der Benutzer selbst etwas auslöst. Die
+            // Statusabfrage überschreibt die Zeile sonst nach zwei Sekunden
+            // mit dem Navigationszustand - die Ablehnung war real nicht zu
+            // sehen und das Fahrzeug stand scheinbar grundlos (02.08.).
+            planBlockedMessage = `⛔ Play blockiert${detail ? ' · ' + detail : ''} · ${planSummaryText(result.data.summary || lanePreviewPlan)}`;
+            setPlanStatus(planBlockedMessage);
             return;
         }
         if (attemptToken !== planStartAttemptToken) return;
@@ -1443,6 +1456,7 @@ function updateVehiclePose(sensorData, navigationStatus, planExecutionStatus) {
         vehicleMarker = L.marker(latLng, {
             icon: vehicleIcon(pose.heading_deg),
             zIndexOffset: 2000,
+            interactive: false,
         }).addTo(mapEditor);
     } else {
         vehicleMarker.setLatLng(latLng);
@@ -1482,7 +1496,12 @@ function updatePlanStatusDisplay(navigationStatus, planExecutionStatus) {
     if (planIsRunning && sourceIndex !== null && sourceIndex !== undefined && Number.isFinite(Number(sourceIndex))) {
         updateLaneProgressForSegment(Number(sourceIndex));
     }
-    if (plan.state && plan.state !== 'idle') {
+    if (planIsRunning) planBlockedMessage = null;
+    if (planBlockedMessage) {
+        // Eine abgelehnte Freigabe bleibt stehen, bis der Benutzer erneut
+        // etwas auslöst - sie ist die Antwort auf seinen Klick.
+        setPlanStatus(planBlockedMessage);
+    } else if (plan.state && plan.state !== 'idle') {
         const segment = plan.current_segment || {};
         const progress = `${plan.active_index || 0}/${plan.total || 0}`;
         const errorDetail = plan.last_error ? ` · ${plan.last_error}` : '';
@@ -1598,7 +1617,10 @@ function vehicleIcon(headingDeg) {
         className: '',
         iconSize: [34, 34],
         iconAnchor: [17, 17],
-        html: `<div style="width:34px;height:34px;position:relative;transform:rotate(${heading}deg);">
+        // Reine Anzeige: Klicks müssen zu den darunter liegenden Punkt-Markern
+        // durchfallen, sonst ist ein Kartenpunkt unter dem Fahrzeugsymbol nicht
+        // mehr bearbeitbar.
+        html: `<div style="width:34px;height:34px;position:relative;pointer-events:none;transform:rotate(${heading}deg);">
             <div style="position:absolute;left:9px;top:2px;width:0;height:0;border-left:8px solid transparent;border-right:8px solid transparent;border-bottom:24px solid #ff00ff;filter:drop-shadow(0 0 4px rgba(0,0,0,0.8));"></div>
             <div style="position:absolute;left:13px;top:15px;width:8px;height:8px;border-radius:50%;background:#ffffff;border:2px solid #111;"></div>
         </div>`,

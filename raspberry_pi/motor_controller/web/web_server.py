@@ -513,6 +513,9 @@ class WebServer:
                     outer_margin_m=request.args.get('outer_margin_m', 0.0),
                     sub_margin_m=request.args.get('sub_margin_m', 0.25),
                     max_ring_turn_deg=request.args.get('max_ring_turn_deg', 155.0),
+                    max_lane_curvature_deg_per_m=request.args.get(
+                        'max_lane_curvature_deg_per_m', 20.0
+                    ),
                     sub_contour_count=request.args.get('sub_contour_count', 3),
                     rest_pattern=request.args.get('rest_pattern', 'parallel'),
                 )

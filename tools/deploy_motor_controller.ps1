@@ -16,6 +16,8 @@ $remoteStatic = "/home/$User/static"
 $remoteCanServiceTmp = "/tmp/ugv-can-interface.service"
 $remoteMotorServiceTmp = "/tmp/ugv-motor-controller-v2.service"
 $remoteODriveWatchdogTmp = "/tmp/configure_odrive_watchdog.py"
+$remoteODriveUndervoltageTmp = "/tmp/configure_odrive_undervoltage.py"
+$remoteODriveDcLimitTmp = "/tmp/configure_odrive_dc_current_limit.py"
 
 function Invoke-Step {
     param(
@@ -60,6 +62,10 @@ Invoke-Step "Upload motor-controller package, template, and static assets" {
     scp -4 "raspberry_pi/motor-controller-v2.service" "${remote}:$remoteMotorServiceTmp"
     if ($LASTEXITCODE -ne 0) { throw "Motor service upload failed" }
     scp -4 "scripts/configure_odrive_watchdog.py" "${remote}:$remoteODriveWatchdogTmp"
+    if ($LASTEXITCODE -ne 0) { throw "ODrive watchdog script upload failed" }
+    scp -4 "scripts/configure_odrive_undervoltage.py" "${remote}:$remoteODriveUndervoltageTmp"
+    if ($LASTEXITCODE -ne 0) { throw "ODrive undervoltage script upload failed" }
+    scp -4 "scripts/configure_odrive_dc_current_limit.py" "${remote}:$remoteODriveDcLimitTmp"
 }
 
 $deployCommand = @"
@@ -95,6 +101,10 @@ cp -a $remoteStaticTmp/. $remoteStatic/
 sudo chown -R ${User}:${User} $remoteApp $remoteTemplates/index.html $remoteStatic
 install -m 755 $remoteODriveWatchdogTmp /home/$User/configure_odrive_watchdog.py
 chown ${User}:${User} /home/$User/configure_odrive_watchdog.py
+install -m 755 $remoteODriveUndervoltageTmp /home/$User/configure_odrive_undervoltage.py
+chown ${User}:${User} /home/$User/configure_odrive_undervoltage.py
+install -m 755 $remoteODriveDcLimitTmp /home/$User/configure_odrive_dc_current_limit.py
+chown ${User}:${User} /home/$User/configure_odrive_dc_current_limit.py
 sudo sed -i -E '/^can:/,/^[^[:space:]]/ s/^([[:space:]]+bitrate:).*/\1 250000/' $remoteApp/config.yaml
 sudo install -m 644 $remoteCanServiceTmp /etc/systemd/system/can-interface.service
 sudo install -m 644 $remoteMotorServiceTmp /etc/systemd/system/motor-controller-v2.service

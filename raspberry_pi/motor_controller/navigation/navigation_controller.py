@@ -72,6 +72,9 @@ class NavigationController:
         self._track_progress_m = 0.0
         self._track_stall_reference_m = 0.0
         self._track_stall_reference_time = 0.0
+        # Pose, an der die laufende Fahrt begonnen hat. Zusammen mit den
+        # Wegpunkten spannt sie den Korridor auf, gegen den der Geofence misst.
+        self._geofence_origin: Optional[Waypoint] = None
 
         # State-Feedback an Sensor-Hub/UI: feuert bei jedem Übergang.
         self._state_callback: Optional[Any] = None
@@ -195,6 +198,7 @@ class NavigationController:
                 self._track_progress_m = 0.0
                 self._track_stall_reference_m = 0.0
                 self._track_stall_reference_time = time.time()
+                self._geofence_origin = None
                 started = True
 
         if started:
@@ -378,12 +382,22 @@ class NavigationController:
             self._last_pose = {'latitude': lat, 'longitude': lon, 'heading_deg': heading}
             if not self._running or self._paused or not self._waypoints:
                 return
-            first = self._waypoints[0]
+            if self._geofence_origin is None:
+                self._geofence_origin = current
+            route = [self._geofence_origin] + list(self._waypoints)
             mode = self._mode
             direction = self._direction
             target = self._waypoints[self._active_index]
 
-        if self.distance_m(first, current) > float(self.config.geofence_radius_m):
+        # Der Geofence begrenzt die Abweichung vom geplanten Korridor, nicht
+        # die Länge der Fahrt. Gemessen wurde früher zum ersten Wegpunkt: damit
+        # war jede Strecke, die länger als der Radius ist, prinzipiell nicht
+        # fahrbar - eine 72 m lange Anfahrt zur ersten Bahn stoppte bei 50 m,
+        # obwohl das Fahrzeug exakt auf der geplanten Route war (real, 02.08.).
+        # Der Startpunkt der Fahrt gehört zum Korridor, damit auch eine
+        # einzelne Goto-Zielkoordinate eine Strecke aufspannt und nicht nur
+        # einen Punkt.
+        if self._route_distance_m(current, route) > float(self.config.geofence_radius_m):
             self.stop(reason='geofence')
             self._set_error('Geofence überschritten')
             return
@@ -687,6 +701,34 @@ class NavigationController:
                 b = path_xy[index + 1]
                 return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
         return path_xy[-1]
+
+    @classmethod
+    def _route_distance_m(cls, current: Waypoint, route: List[Waypoint]) -> float:
+        """Kürzester Abstand der Pose zum Streckenzug ``route``.
+
+        Anders als ``_pure_pursuit_target`` sucht das hier bewusst global und
+        ohne Fortschritts-Fenster: für den Geofence zählt nur, ob das Fahrzeug
+        den Korridor irgendwo verlassen hat, nicht wo auf der Strecke es sich
+        befindet.
+        """
+        if not route:
+            return 0.0
+        origin = route[0]
+        current_xy = cls._to_local_xy(current, origin)
+        path_xy = [cls._to_local_xy(point, origin) for point in route]
+        best = cls._distance_xy(current_xy, path_xy[0])
+        for index in range(len(path_xy) - 1):
+            a = path_xy[index]
+            b = path_xy[index + 1]
+            ab = (b[0] - a[0], b[1] - a[1])
+            seg_len_sq = ab[0] * ab[0] + ab[1] * ab[1]
+            if seg_len_sq <= 1e-9:
+                continue
+            ap = (current_xy[0] - a[0], current_xy[1] - a[1])
+            t = cls._clamp((ap[0] * ab[0] + ap[1] * ab[1]) / seg_len_sq, 0.0, 1.0)
+            proj = (a[0] + ab[0] * t, a[1] + ab[1] * t)
+            best = min(best, cls._distance_xy(current_xy, proj))
+        return best
 
     @staticmethod
     def _to_local_xy(point: Waypoint, origin: Waypoint) -> Tuple[float, float]:

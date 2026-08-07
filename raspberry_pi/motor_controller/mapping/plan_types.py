@@ -18,6 +18,11 @@ class PlanParameters:
     max_ring_turn_deg: float
     sub_contour_count: int
     rest_pattern: str = "parallel"
+    # Ab dieser Krümmung ist ein Ring für das Fahrzeug nicht mehr fahrbar;
+    # die Fläche weiter innen wird dann mit geraden Bahnen gemäht. Konturringe
+    # werden nach innen zwangsläufig enger (Krümmung ~ 1/Radius), auf der
+    # Wiese bis 818°/m - das Fahrzeug schafft rollend rund 10-15°/m.
+    max_lane_curvature_deg_per_m: float = 20.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -69,6 +74,7 @@ class MowingPlan:
     map_payload: Dict[str, Any] = field(default_factory=dict)
     subs: List[Dict[str, Any]] = field(default_factory=list)
     skipped_sharp_lanes: int = 0
+    skipped_curved_lanes: int = 0
     warnings: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -93,6 +99,7 @@ class MowingPlan:
             "transition_count": len(transitions),
             "unsafe_transition_count": unsafe_transitions,
             "skipped_sharp_lanes": self.skipped_sharp_lanes,
+            "skipped_curved_lanes": self.skipped_curved_lanes,
             "warnings": list(self.warnings),
             "mow_length_m": round(mow_length, 2),
             "rest_length_m": round(rest_length, 2),
