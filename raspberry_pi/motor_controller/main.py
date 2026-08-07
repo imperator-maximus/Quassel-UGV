@@ -9,6 +9,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 import yaml
 from pathlib import Path
@@ -33,7 +34,11 @@ class MotorControllerApp:
     Haupt-Anwendung für Motor Controller
     Orchestriert alle Komponenten
     """
-    
+
+    # Wartezeit auf den Maehdeck-Notstopp, bevor der Safety-Watchdog ihn
+    # aufgibt und ohne ihn weiterarbeitet.
+    MOWER_STOP_JOIN_TIMEOUT_S = 2.0
+
     def __init__(self, config: Config):
         """
         Initialisiert Motor Controller App
@@ -193,7 +198,11 @@ class MotorControllerApp:
             
             # Joystick-Handler
             self.logger.info("Initialisiere Joystick-Handler...")
-            self.joystick = JoystickHandler(self.motor, self.safety)
+            self.joystick = JoystickHandler(
+                self.motor,
+                self.safety,
+                max_speed=float(getattr(self.config.web, 'max_speed_percent', 100.0)),
+            )
 
             # Navigation
             if self.config.navigation.enabled:
@@ -279,6 +288,11 @@ class MotorControllerApp:
             self.can.set_odrive_sensorless_callback(
                 self.odrive_mower.on_sensorless_estimates
             )
+
+        # Der Gesamtstopp gilt fuer jeden Transport. Haengt er am CAN-Zweig,
+        # stoppt ein Maehdeckfehler ueber USB nur die Messer, waehrend das
+        # Fahrzeug mit laufendem Plan weiterfaehrt.
+        if self.odrive_mower:
             self.odrive_mower.set_system_stop_callback(self.safety.trigger_system_stop)
 
         # CAN Handler -> Navigation-Befehle vom Sensor-Hub
@@ -344,30 +358,17 @@ class MotorControllerApp:
         if self._sensor_required_for_motion() and not status['sensor_hub']['online']:
             transport = status['sensor_hub'].get('transport', 'can').upper()
             return False, f"SensorHub {transport}-Timeout"
+        # In IDLE the ODrives are not needed for propulsion, and mower start-up
+        # validates every axis itself. Once the blades run, a stalled transport,
+        # a stale status, an ODrive error, an axis that left closed loop and a
+        # blade that stopped turning are all system-critical. ``runtime_health``
+        # reads only stored values, so the very transport fault it looks for
+        # cannot park this watchdog as well.
+        if self.odrive_mower:
+            mower_healthy, mower_reason = self.odrive_mower.runtime_health()
+            if not mower_healthy:
+                return False, mower_reason or "Maehdeck nicht betriebsbereit"
         if odrive_transport == 'usb':
-            usb_status = self.odrive_mower.get_status()
-            mower_running = bool(usb_status.get('mower_command_running'))
-            startup_active = bool(
-                usb_status.get('mower_startup_status', {}).get('active')
-            )
-            # In IDLE the ODrives are not needed for propulsion. A delayed
-            # sequential Fibre poll must neither stop nor latch the vehicle.
-            # Mower start-up validates every axis itself; once the blades run,
-            # USB health and ODrive errors are again system-critical. The
-            # independently configured 1 s ODrive hardware watchdog remains
-            # active throughout and stops a blade if host commands cease.
-            if not mower_running or startup_active:
-                return True, None
-            offline = list(usb_status.get('odrive_missing_heartbeats', []))
-            if offline:
-                return False, f"ODrive USB-Timeout: nodes {offline}"
-            error_nodes = [
-                int(node_id)
-                for node_id, value in usb_status.get('odrive_errors', {}).items()
-                if int(value) != 0
-            ]
-            if error_nodes:
-                return False, f"ODrive Fehler: nodes {error_nodes}"
             return True, None
 
         odrives = status['odrives']
@@ -487,8 +488,37 @@ class MotorControllerApp:
         elif self.motor:
             self.motor.emergency_stop()
         if self.odrive_mower:
+            self._stop_mower_without_blocking(reason)
+
+    def _stop_mower_without_blocking(self, reason: str):
+        """Stoppt die Messer, ohne den Safety-Watchdog mitzureissen.
+
+        Der Notstopp spricht denselben Transport an, der den Ausfall ausgeloest
+        haben kann. Blockiert er, darf er nicht den Thread festhalten, der
+        anschliessend Joystick- und Kommando-Timeouts ueberwachen muss. Die
+        Messer sind in diesem Fall bereits durch den ODrive-Hardware-Watchdog
+        entwaffnet, weil die Kommandos ausbleiben.
+        """
+        stopper = threading.Thread(
+            target=self._run_mower_emergency_stop,
+            args=(reason,),
+            name='mower-emergency-stop',
+            daemon=True,
+        )
+        stopper.start()
+        stopper.join(timeout=float(self.MOWER_STOP_JOIN_TIMEOUT_S))
+        if stopper.is_alive():
+            self.logger.critical(
+                "🛑 Maehdeck-Notstopp haengt im Transport; "
+                "ODrive-Hardware-Watchdog entwaffnet die Messer"
+            )
+
+    def _run_mower_emergency_stop(self, reason: str):
+        try:
             self.odrive_mower.emergency_stop(reason)
-    
+        except Exception as exc:
+            self.logger.exception("Maehdeck-Notstopp fehlgeschlagen: %s", exc)
+
     def start(self):
         """Startet alle Komponenten"""
         self.logger.info("Starte Komponenten...")
@@ -522,17 +552,16 @@ class MotorControllerApp:
         """Haupt-Loop"""
         try:
             while self.running:
-                startup_hang = self._odrive_usb_startup_hang_reason()
-                if startup_hang:
+                hang_reason = self._odrive_usb_hang_reason()
+                if hang_reason:
                     # A native Fibre property call can block a Python thread
-                    # indefinitely. Neutralise propulsion, then terminate the
-                    # process so systemd can tear down Fibre completely. The
-                    # independent 1 s ODrive watchdog has already disarmed any
+                    # indefinitely and cannot be cancelled from inside the
+                    # process. Stop the vehicle, neutralise propulsion, then
+                    # terminate so systemd can tear down Fibre completely. The
+                    # independent ODrive watchdog has already disarmed any
                     # blade whose command stream stopped.
-                    self.logger.critical("ODrive USB-Start haengt: %s", startup_hang)
-                    if self.motor:
-                        self.motor.emergency_stop()
-                    time.sleep(0.2)
+                    self.logger.critical("ODrive USB haengt: %s", hang_reason)
+                    self._halt_for_transport_hang(hang_reason)
                     os._exit(70)
                 time.sleep(0.1)
         
@@ -541,6 +570,36 @@ class MotorControllerApp:
         
         finally:
             self.shutdown()
+
+    def _halt_for_transport_hang(self, reason: str):
+        """Bringt Fahrzeug und Plan zum Stehen, bevor der Prozess endet.
+
+        Ohne diesen Schritt bliebe der Fahrantrieb auf dem letzten PWM-Wert
+        stehen, und der Mähplan haette keinen Wiederaufsetzpunkt.
+        """
+        try:
+            self._system_safety_stop(f"ODrive USB haengt: {reason}")
+        except Exception as exc:
+            self.logger.error("Sicherheitsstopp vor Prozessende fehlgeschlagen: %s", exc)
+        try:
+            if self.motor:
+                self.motor.emergency_stop()
+        except Exception as exc:
+            self.logger.error("Fahrantrieb-Notstopp fehlgeschlagen: %s", exc)
+        time.sleep(0.2)
+
+    def _odrive_usb_hang_reason(self) -> str | None:
+        """Meldet einen haengenden USB-Aufruf im Start *und* im Betrieb."""
+        return (
+            self._odrive_usb_startup_hang_reason()
+            or self._odrive_usb_runtime_hang_reason()
+        )
+
+    def _odrive_usb_runtime_hang_reason(self) -> str | None:
+        mower = self.odrive_mower
+        if not mower or getattr(mower, 'transport', 'can') != 'usb':
+            return None
+        return mower.transport_stall_reason()
 
     def _odrive_usb_startup_hang_reason(self) -> str | None:
         mower = self.odrive_mower

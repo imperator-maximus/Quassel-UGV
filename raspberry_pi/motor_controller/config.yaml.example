@@ -88,6 +88,17 @@ odrive_mower:
   current_trip_duration_s: 0.5
   current_critical_trip_a: 29.0    # Nahe Hardlimit: praktisch sofort stoppen
   current_critical_trip_duration_s: 0.1
+  # Ein libfibre-Aufruf blockiert seinen Thread ohne Timeout. Beide Grenzen
+  # werden vom zentralen Safety-Watchdog geprueft, der den Transport selbst
+  # nie anfasst und deshalb nicht mit haengen bleiben kann.
+  command_loop_timeout_s: 3.0      # Kommando-Thread ohne Lebenszeichen -> Stopp
+  usb_call_stall_timeout_s: 5.0    # Endgueltig haengender Aufruf -> Prozessneustart
+  # Messerdrehzahl wird nicht nur beim Anlauf, sondern im ganzen Lauf geprueft.
+  runtime_rpm_monitor_enabled: true
+  runtime_sensorless_poll_interval_s: 0.5
+  runtime_sensorless_timeout_s: 3.0
+  runtime_min_rpm: 150.0           # Nur "dreht ueberhaupt", nicht Solldrehzahl
+  runtime_rpm_fault_duration_s: 1.5
 
 # Classical-CAN-2.0-Konfiguration; CAN FD wird nicht verwendet.
 # Haupt-UGV und ehemaliger UGV-Teststand: einheitlich 250 kbit/s.
@@ -135,7 +146,27 @@ navigation:
   track_heading_block_deg: 45.0 # Ab hier ist selbst der Roll-Bogen nicht mehr
                                # sicher (urspruenglicher Brunnen-Stall: -51.7° bis
                                # -62.3°) - dort blockieren statt automatisch
-                               # anzufahren.
+                               # anzufahren. Gemessen gegen die Bahnrichtung,
+                               # nicht gegen die Peilung zum Pure-Pursuit-Ziel.
+  track_heading_block_samples: 3 # So viele Posen in Folge muss der Fehler
+                               # anhalten. Beim Ausrichtbogen am Segmentanfang
+                               # schwenkt die GNSS-Antenne um den Drehpunkt und
+                               # erzeugt kurze Scheinfehler (07.08.: 16.4° ->
+                               # 48.4° in 1 s bei 11 cm Querabstand).
+  track_align_timeout_s: 10.0     # Ausrichtbogen ohne Winkelfortschritt stoppen.
+  track_align_min_progress_deg: 0.5 # Im Bogen ruht der Track-Waechter (dort ist
+                               # kein Bahnfortschritt gewollt); ohne diese
+                               # Grenze rollte eine nicht konvergierende
+                               # Ausrichtung unbegrenzt weiter - ohne Fehler.
+                               # Fein genug, um langsame Konvergenz zuzulassen.
+  track_align_escalate_s: 3.0  # Dreht der Kurs trotzdem nicht, laeuft der
+                               # Drehanteil ueber diese Dauer bis max_joystick
+                               # hoch und faellt zurueck, sobald er sich dreht.
+  track_align_min_turn: 0.22   # Losbrechgrenze des Drehanteils im Bogen.
+                               # Gemessen 07.08. auf Gras: x=0.236 dreht mit
+                               # 1.3°/s, x=0.155 mit 0.4°/s, x=0.125 gar nicht.
+                               # Proportional allein stirbt das Kommando aus,
+                               # bevor track_alignment_exit_deg erreicht ist.
   track_stall_timeout_s: 10.0     # Stop bei ausbleibendem Track-Fortschritt
   track_stall_min_progress_m: 0.15 # Mindestfortschritt innerhalb des Zeitfensters
   min_inner_wheel_speed: 0.50  # Innen-Rad-Garantie: kurveninneres Rad rollt mind.

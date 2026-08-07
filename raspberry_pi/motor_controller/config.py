@@ -116,6 +116,23 @@ class ODriveMowerConfig:
     current_trip_duration_s: float = 0.5
     current_critical_trip_a: float = 29.0
     current_critical_trip_duration_s: float = 0.1
+    # A synchronous libfibre call blocks its thread without any timeout. These
+    # limits are evaluated by the central safety watchdog, which never touches
+    # the transport and therefore cannot be parked by the same fault.
+    #
+    # A healthy native call occasionally needs more than a second, so the host
+    # stop is aligned with ``usb_status_timeout_s``: by then the local ODrive
+    # watchdog has disarmed the blades anyway. Only a call that is still
+    # unanswered well beyond that counts as permanently stuck and forces the
+    # process restart.
+    command_loop_timeout_s: float = 3.0
+    usb_call_stall_timeout_s: float = 5.0
+    # Blade rotation is verified during the whole run, not only at start-up.
+    runtime_rpm_monitor_enabled: bool = True
+    runtime_sensorless_poll_interval_s: float = 0.5
+    runtime_sensorless_timeout_s: float = 3.0
+    runtime_min_rpm: float = 150.0
+    runtime_rpm_fault_duration_s: float = 1.5
 
 
 @dataclass
@@ -196,6 +213,33 @@ class NavigationConfig:
     # Cross-Track 0.19->1.01 m) - dort deterministisch stoppen statt zu
     # raten, statt automatisch anzufahren.
     track_heading_block_deg: float = 45.0
+    # Der Fehler wird gegen die Bahnrichtung gemessen und muss ueber so viele
+    # aufeinanderfolgende Posen anhalten. Ein einzelner Ausreisser darf keine
+    # laufende Mahd stoppen: beim Ausrichtbogen am Segmentanfang schwenkt die
+    # GNSS-Antenne um den Drehpunkt, was kurzzeitig grosse Scheinfehler
+    # erzeugt (real 07.08.: 16.4° -> 48.4° in 1 s bei 11 cm Querabstand).
+    # In Posen statt Sekunden, damit dieselbe Regel im zeitraffenden
+    # Pfadsimulator gilt wie auf dem Fahrzeug (5 Hz Telemetrie -> ~0.6 s).
+    track_heading_block_samples: int = 3
+    # Der Ausrichtbogen macht bewusst kaum Bahnfortschritt, deshalb ruht dort
+    # der Track-Waechter. Damit war dieser Zweig unbegrenzt: dreht sich das
+    # Fahrzeug nicht, rollte es ewig weiter, ohne Fehler, alles gruen
+    # (real 07.08.: 7° Fehler, Kurs konstant, PWM 1405/1500). Verbessert sich
+    # der Winkelfehler so lange nicht um mindestens
+    # track_align_min_progress_deg, wird deterministisch gestoppt.
+    track_align_timeout_s: float = 10.0
+    # Fein genug, um eine langsam konvergierende Ausrichtung nicht zu stoppen.
+    track_align_min_progress_deg: float = 0.5
+    # Untere Schranke des Drehanteils, solange ausgerichtet wird. Das
+    # proportionale Kommando faellt sonst unter die Losbrechgrenze, bevor die
+    # Austrittsschwelle erreicht ist (gemessen 07.08. auf Gras: x=0.236 dreht
+    # mit 1.3 Grad/s, x=0.155 mit 0.4 Grad/s, x=0.125 gar nicht mehr).
+    track_align_min_turn: float = 0.22
+    # Dreht sich der Kurs trotzdem nicht, wird der Drehanteil ueber diese
+    # Dauer bis max_joystick hochgefahren. Die Losbrechgrenze auf Gras haengt
+    # von Bewuchs, Naesse und Last ab und ist nicht vorhersagbar; 0.22 liess
+    # das Fahrzeug am 07.08. 14 s lang unbewegt.
+    track_align_escalate_s: float = 3.0
     # Bei weniger als 15 cm Track-Fortschritt in 10 s neutral stoppen und
     # den Stillstand sichtbar melden, statt wirkungslose PWM weiterzusenden.
     track_stall_timeout_s: float = 10.0

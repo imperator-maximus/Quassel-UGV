@@ -78,6 +78,17 @@ class ODriveMowerController:
         self._startup_watchdog_clear_done = False
         self._last_poll_error_log = 0.0
         self._current_poll_index = 0
+        self._sensorless_poll_index = 0
+        self._last_sensorless_poll = 0.0
+        # Liveness of the command thread itself.  A synchronous transport call
+        # can park that thread forever, and then no check that lives inside it
+        # can ever fire again.  ``runtime_health`` is evaluated by the central
+        # safety watchdog instead and uses this timestamp.  It is only
+        # meaningful once the command thread actually owns the blades, which
+        # ``_command_loop_expected`` marks.
+        self._loop_alive_monotonic = 0.0
+        self._command_loop_expected = False
+        self._low_rpm_since = {node_id: None for node_id in self.node_ids}
 
     def _configured_node_ids(self) -> list[int]:
         node_ids = getattr(self.config, "node_ids", None) or []
@@ -442,11 +453,19 @@ class ODriveMowerController:
             with self._lock:
                 complete = len(validated) == len(self.node_ids)
                 self.startup_status.update({
-                    'active': False,
-                    'phase': None,
+                    # Der Start ist erst vorbei, wenn der Kommando-Thread laeuft.
+                    # Zwischen der letzten Achsvalidierung und dem ersten
+                    # Kommandozyklus liegen noch Transportaufrufe. Wird der
+                    # Start schon hier als beendet gemeldet, wertet der
+                    # Laufzeit-Watchdog die gesamte Anlaufdauer als fehlendes
+                    # Lebenszeichen und verriegelt genau in diesem Fenster.
+                    'active': complete,
+                    'phase': 'finalize' if complete else None,
                     'node_id': None,
                     'last_result': 'ok' if complete else 'failed',
-                    'node_started_monotonic': None,
+                    # Die Start-Haengererkennung deckt damit die Abschlussphase
+                    # ab statt auf die Gesamtstartzeit zurueckzufallen.
+                    'node_started_monotonic': time.monotonic() if complete else None,
                 })
             if len(validated) != len(self.node_ids):
                 for node_id in self.node_ids:
@@ -493,7 +512,10 @@ class ODriveMowerController:
                 }
                 self._stop_event.clear()
                 self._run_started_monotonic = time.monotonic()
+                self._loop_alive_monotonic = time.monotonic()
+                self._command_loop_expected = False
                 self._system_stop_pending = False
+                self._low_rpm_since = {node_id: None for node_id in self.node_ids}
                 for node_id in self.node_ids:
                     self.odrive_iq[node_id] = {
                         'setpoint_a': None,
@@ -539,6 +561,10 @@ class ODriveMowerController:
 
             with self._lock:
                 self._run_started_monotonic = time.monotonic()
+                # The runtime health check starts counting from here; the first
+                # command cycle is still one interval away.
+                self._loop_alive_monotonic = time.monotonic()
+                self._command_loop_expected = True
                 self.startup_status.update({
                     'active': False,
                     'phase': None,
@@ -565,6 +591,7 @@ class ODriveMowerController:
             with self._lock:
                 self.running = False
                 self.commanded_rpm = 0
+                self._command_loop_expected = False
 
             # Direkt und wiederholt IDLE setzen – freies Auslaufen, kein
             # aktives Bremsen. brake_resistance ist aktuell 0.0; ein aktives
@@ -602,6 +629,7 @@ class ODriveMowerController:
             self.running = False
             self.commanded_rpm = 0
             self.last_error = str(reason)
+            self._command_loop_expected = False
             self._system_stop_pending = True
 
         pending, errors = self._request_idle_verified(attempts=8)
@@ -628,6 +656,7 @@ class ODriveMowerController:
             self.running = False
             self.commanded_rpm = 0
             self.last_error = str(reason)
+            self._command_loop_expected = False
             self._stop_event.set()
 
         self.logger.critical("Maehdeck-Sicherheitsfehler: %s", reason)
@@ -662,6 +691,33 @@ class ODriveMowerController:
             node_id = self.node_ids[index]
         self._send_rtr(node_id, CMD_GET_IQ, dlc=8)
         return node_id
+
+    def _poll_next_sensorless(self) -> int:
+        """Holt die Sensorless-Drehzahl eines Nodes waehrend des Betriebs.
+
+        Ohne diese Abfrage bleiben die Drehzahlwerte auf dem Stand der
+        Anlaufvalidierung stehen, und ein stehendes Messer faellt nirgends auf.
+        """
+        if not self.node_ids:
+            raise RuntimeError("Keine ODrive-Nodes konfiguriert")
+        with self._lock:
+            index = self._sensorless_poll_index % len(self.node_ids)
+            self._sensorless_poll_index = (index + 1) % len(self.node_ids)
+            node_id = self.node_ids[index]
+            self._last_sensorless_poll = time.monotonic()
+        self._send_rtr(node_id, CMD_GET_SENSORLESS_ESTIMATES, dlc=8)
+        return node_id
+
+    def _sensorless_poll_due(self, now: float) -> bool:
+        if not bool(getattr(self.config, 'runtime_rpm_monitor_enabled', True)):
+            return False
+        interval_s = max(
+            0.1,
+            float(getattr(self.config, 'runtime_sensorless_poll_interval_s', 0.5)),
+        )
+        with self._lock:
+            last = self._last_sensorless_poll
+        return now - last >= interval_s
 
     def start_monitor(self) -> None:
         """Startet die Stromueberwachung; IDLE-Polling ist optional."""
@@ -815,6 +871,8 @@ class ODriveMowerController:
             try:
                 self._require_live_nodes()
                 self._set_input_rpm(rpm)
+                if self._sensorless_poll_due(time.monotonic()):
+                    self._poll_next_sensorless()
                 if bool(getattr(self.config, 'current_monitor_enabled', True)):
                     # Nicht drei RTRs unmittelbar hintereinander senden. Auf
                     # realer Hardware fielen nach rund 20 s alle GET_IQ-
@@ -829,6 +887,11 @@ class ODriveMowerController:
             except Exception as exc:
                 self._request_system_stop(f"ODrive-Maehdeck CAN-Fehler: {exc}")
                 return
+            # Only a fully completed cycle counts as a sign of life. A transport
+            # call that never returns freezes this timestamp, which is exactly
+            # what the external watchdog looks for.
+            with self._lock:
+                self._loop_alive_monotonic = time.monotonic()
 
     def on_iq(self, node_id: int, iq_setpoint: float, iq_measured: float) -> None:
         """Verarbeitet GET_IQ und erkennt mechanische Ueberlastung."""
@@ -978,6 +1041,156 @@ class ODriveMowerController:
             self._request_system_stop(trip_reason)
         self._maybe_clear_startup_watchdog_errors()
 
+    def transport_stall_reason(self) -> str | None:
+        """Meldet einen haengenden Transportaufruf; CAN kennt keinen solchen."""
+        return None
+
+    def runtime_health(self) -> tuple[bool, str | None]:
+        """Beurteilt das laufende Maehdeck von ausserhalb des Kommando-Threads.
+
+        Diese Pruefung wird vom zentralen Safety-Watchdog gerufen und darf
+        deshalb ausschliesslich auf gespeicherten Werten arbeiten – niemals auf
+        einem Transportaufruf, der genauso haengen kann wie der Kommando-Thread.
+
+        Ein ruhendes Deck gilt als gesund: im IDLE werden die ODrives fuer den
+        Fahrantrieb nicht gebraucht, und ein Transportproblem im Stillstand
+        darf das manuelle Rangieren nicht verriegeln. Sobald das Deck laeuft,
+        ist jede dieser Abweichungen ein Grund fuer den Gesamtstopp.
+        """
+        now = time.monotonic()
+        with self._lock:
+            running = self.running
+            startup_active = bool(self.startup_status.get('active'))
+            loop_expected = self._command_loop_expected
+            loop_alive = self._loop_alive_monotonic
+            run_started = self._run_started_monotonic
+            errors = dict(self.odrive_errors)
+            states = dict(self.odrive_states)
+            missing = self._missing_heartbeats_locked()
+            sensorless = {
+                node_id: dict(sample)
+                for node_id, sample in self.odrive_sensorless.items()
+            }
+            currents = {
+                node_id: dict(sample) for node_id, sample in self.odrive_iq.items()
+            }
+            if not running:
+                self._low_rpm_since = {node_id: None for node_id in self.node_ids}
+
+        # Nur der laufende Kommando-Thread wird hier beurteilt. Vor ihm ist der
+        # Startvorgang zustaendig - samt eigener Haengererkennung - und nach
+        # einem gescheiterten Start meldet dieser den wahren Grund. Ohne diese
+        # Klammer sprang die Pruefung in das Abbruchfenster eines Startfehlers
+        # und ueberschrieb "Sensorless-Anlauf Timeout node=0" durch
+        # "ODrive-Status veraltet: nodes [1, 2]": waehrend node 0 validiert
+        # wird, veralten die beiden anderen Achsen zwangslaeufig, und gemeldet
+        # wurden dann ausgerechnet die beiden intakten Motoren (real 07.08.).
+        if not running or startup_active or not loop_expected:
+            return True, None
+
+        stall = self.transport_stall_reason()
+        if stall:
+            return False, f"Maehdeck-Transport haengt: {stall}"
+
+        loop_timeout_s = max(
+            0.5,
+            float(getattr(self.config, 'command_loop_timeout_s', 3.0)),
+        )
+        loop_age = now - loop_alive if loop_alive > 0.0 else None
+        if loop_age is None or loop_age > loop_timeout_s:
+            age_text = "nie" if loop_age is None else f"{loop_age:.1f}s"
+            return False, f"Maehdeck-Kommandoschleife ohne Lebenszeichen ({age_text})"
+
+        if missing:
+            return False, f"ODrive-Status veraltet: nodes {missing}"
+
+        error_nodes = {
+            node_id: value for node_id, value in errors.items() if int(value) != 0
+        }
+        if error_nodes:
+            details = ", ".join(
+                f"node {node_id}=0x{int(value):08X}"
+                for node_id, value in sorted(error_nodes.items())
+            )
+            return False, f"ODrive-Fehler waehrend des Maehens: {details}"
+
+        expected_state = int(self.config.axis_state)
+        dropped = [
+            node_id
+            for node_id, state in sorted(states.items())
+            if int(state) != expected_state
+        ]
+        if dropped:
+            return False, (
+                f"ODrive-Achse nicht mehr im Zustand {expected_state}: nodes {dropped}"
+            )
+
+        return self._check_blade_rotation(now, run_started, sensorless, currents)
+
+    def _check_blade_rotation(
+        self,
+        now: float,
+        run_started: float,
+        sensorless: Dict[int, Dict[str, Any]],
+        currents: Dict[int, Dict[str, Any]] | None = None,
+    ) -> tuple[bool, str | None]:
+        """Erkennt ein stehendes Messer trotz fehlerfreier ODrive-Meldung."""
+        if not bool(getattr(self.config, 'runtime_rpm_monitor_enabled', True)):
+            return True, None
+        grace_s = float(getattr(self.config, 'current_startup_grace_s', 2.0))
+        if now - run_started <= grace_s:
+            return True, None
+
+        min_rpm = float(getattr(self.config, 'runtime_min_rpm', 150.0))
+        sample_timeout_s = max(
+            1.0,
+            float(getattr(self.config, 'runtime_sensorless_timeout_s', 3.0)),
+        )
+        fault_duration_s = max(
+            0.2,
+            float(getattr(self.config, 'runtime_rpm_fault_duration_s', 1.5)),
+        )
+
+        stalled_node = None
+        stalled_rpm = 0.0
+        with self._lock:
+            for node_id in self.node_ids:
+                sample = sensorless.get(node_id) or {}
+                rpm = sample.get('rpm')
+                last_seen = float(sample.get('last_seen') or 0.0)
+                fresh = last_seen > run_started and now - last_seen <= sample_timeout_s
+                # A stale sample says nothing about the blade. Transport
+                # liveness is already covered by the checks above, so an
+                # unanswered rpm request must not trip a second time here.
+                if not fresh or rpm is None or abs(float(rpm)) >= min_rpm:
+                    self._low_rpm_since[node_id] = None
+                    continue
+                if self._low_rpm_since[node_id] is None:
+                    self._low_rpm_since[node_id] = now
+                elif now - self._low_rpm_since[node_id] >= fault_duration_s:
+                    stalled_node = node_id
+                    stalled_rpm = abs(float(rpm))
+                    break
+
+        if stalled_node is not None:
+            # Der Strom trennt die beiden moeglichen Ursachen sofort: ein
+            # blockiertes Messer zieht am Limit (real 07.08.: 24.3 A bei
+            # Sollstrom 30 A und 31 rpm), ein abgerissener Antrieb oder ein
+            # unzuverlaessiger Sensorless-Schaetzwert dagegen fast nichts.
+            sample = (currents or {}).get(stalled_node) or {}
+            measured = sample.get('measured_a')
+            setpoint = sample.get('setpoint_a')
+            detail = ''
+            if measured is not None:
+                detail = f", Strom {abs(float(measured)):.1f} A"
+                if setpoint is not None:
+                    detail += f" (Soll {abs(float(setpoint)):.1f} A)"
+            return False, (
+                f"Maehmesser dreht nicht: node={stalled_node} "
+                f"{stalled_rpm:.0f} rpm < {min_rpm:.0f} rpm{detail}"
+            )
+        return True, None
+
     def get_status(self, success: bool = True, error: str | None = None) -> Dict[str, Any]:
         with self._lock:
             running = self.running
@@ -1032,6 +1245,12 @@ class ODriveMowerController:
             status_error = error or self.last_error
             if missing_heartbeats and not status_error:
                 status_error = f"ODrive heartbeat timeout: nodes {missing_heartbeats}"
+            command_loop_age_s = (
+                None
+                if not running or self._loop_alive_monotonic <= 0.0
+                else round(time.monotonic() - self._loop_alive_monotonic, 2)
+            )
+        transport_stall = self.transport_stall_reason()
         return {
             "success": success,
             "enabled": self.enabled,
@@ -1059,6 +1278,8 @@ class ODriveMowerController:
             "odrive_heartbeat_ages": heartbeat_ages,
             "odrive_currents": currents,
             "odrive_sensorless": sensorless,
+            "command_loop_age_s": command_loop_age_s,
+            "transport_stall": transport_stall,
             "startup_status": startup_status,
             "sequential_start_enabled": bool(
                 getattr(self.config, 'sequential_start_enabled', True)

@@ -72,6 +72,13 @@ class NavigationController:
         self._track_progress_m = 0.0
         self._track_stall_reference_m = 0.0
         self._track_stall_reference_time = 0.0
+        # Aufeinanderfolgende Posen mit zu grossem Winkelfehler zur Bahn.
+        # Null heisst, dass der zuletzt ausgewertete Kurs in der Grenze lag.
+        self._heading_block_count = 0
+        # Bester Winkelfehler des laufenden Ausrichtbogens und wann er zuletzt
+        # verbessert wurde. Begrenzt eine Ausrichtung, die nicht konvergiert.
+        self._align_reference_error = None
+        self._align_reference_time = 0.0
         # Pose, an der die laufende Fahrt begonnen hat. Zusammen mit den
         # Wegpunkten spannt sie den Korridor auf, gegen den der Geofence misst.
         self._geofence_origin: Optional[Waypoint] = None
@@ -147,6 +154,9 @@ class NavigationController:
             self._track_progress_m = 0.0
             self._track_stall_reference_m = 0.0
             self._track_stall_reference_time = 0.0
+            self._heading_block_count = 0
+            self._align_reference_error = None
+            self._align_reference_time = 0.0
 
         self._neutral_with_ramping()
         self._emit_state()
@@ -169,6 +179,9 @@ class NavigationController:
             self._track_progress_m = 0.0
             self._track_stall_reference_m = 0.0
             self._track_stall_reference_time = 0.0
+            self._heading_block_count = 0
+            self._align_reference_error = None
+            self._align_reference_time = 0.0
         self._emit_state()
 
     def start(self) -> bool:
@@ -198,6 +211,9 @@ class NavigationController:
                 self._track_progress_m = 0.0
                 self._track_stall_reference_m = 0.0
                 self._track_stall_reference_time = time.time()
+                self._heading_block_count = 0
+                self._align_reference_error = None
+                self._align_reference_time = 0.0
                 self._geofence_origin = None
                 started = True
 
@@ -329,6 +345,8 @@ class NavigationController:
                     'goto_divergence_samples': int(getattr(self.config, 'goto_divergence_samples', 5)),
                 'track_cross_track_limit_m': float(getattr(self.config, 'track_cross_track_limit_m', 1.0)),
                     'track_heading_block_deg': self._track_heading_block_deg(),
+                    'track_heading_block_samples': self._track_heading_block_samples(),
+                    'track_align_timeout_s': self._track_align_timeout_s(),
                     'track_alignment_enter_deg': self._track_alignment_enter_deg(),
                     'track_alignment_exit_deg': self._track_alignment_exit_deg(),
                     'track_aligning': self._track_aligning,
@@ -546,16 +564,28 @@ class NavigationController:
         # Genuinely extreme Winkelfehler (der urspruengliche Brunnen-Stall
         # lag bei -51.7° und wuchs weiter) sind jenseits dessen, was ein
         # Roll-Bogen sicher auffangen kann - dort deterministisch stoppen
-        # statt zu raten.
+        # statt zu raten. Gemessen wird gegen die Bahnrichtung und nicht
+        # gegen die Zielpeilung, und der Fehler muss anhalten: ein einzelnes
+        # Sample stoppt eine laufende Mahd nicht mehr.
         block_deg = self._track_heading_block_deg()
-        if abs(error) >= block_deg:
-            message = (
-                f'Winkelfehler am Bahnstart zu groß: {error:.1f}° '
-                f'(Grenze {block_deg:.1f}°) – Bahn wird nicht automatisch angefahren'
-            )
-            self.stop(reason='heading_block')
-            self._set_error(message)
-            return
+        path_error = self.heading_error_deg(
+            self._path_direction_deg(waypoints, segment_index, direction),
+            heading,
+        )
+        needed_samples = self._track_heading_block_samples()
+        if abs(path_error) >= block_deg:
+            self._heading_block_count += 1
+            if self._heading_block_count >= needed_samples:
+                message = (
+                    f'Winkelfehler zur Bahn zu groß: {path_error:.1f}° '
+                    f'(Grenze {block_deg:.1f}°, {self._heading_block_count} Posen) '
+                    f'– Bahn wird nicht automatisch angefahren'
+                )
+                self.stop(reason='heading_block')
+                self._set_error(message)
+                return
+        else:
+            self._heading_block_count = 0
 
         # Gleichzeitiges Drehen und Vorwaertsfahren konvergiert auf diesem
         # Fahrzeug nicht, sobald der Turn-Anteil saettigt (~15° bei
@@ -569,27 +599,102 @@ class NavigationController:
         # Gegenlauf-Pivot als Alternative dreht das reale UGV unter Last
         # gar nicht (Stillstand >4 Min, selbes Datum) und bleibt deshalb
         # aussen vor.
+        #
+        # Ein- und Austritt entscheidet der Kursfehler zur Bahn, nicht der
+        # Regelfehler der Bahnverfolgung. Letzterer ist Kursfehler *plus*
+        # Querversatz-Anteil - bei 0.15 m Versatz und 0.8 m Lookahead allein
+        # atan(0.15/0.8) = 10.6 Grad. Genau dieser Anteil laesst sich nur
+        # durch Vorwaertsfahren abbauen, und der Ausrichtbogen nimmt den
+        # Vorwaertsschub weg. Die Austrittsschwelle war damit unerreichbar,
+        # sobald ein Querversatz vorlag: das Fahrzeug stand bei perfektem
+        # Kurs mitten in der Bahn fest (real 07.08., 7 Grad gemeldet,
+        # Kurs 152.6 Grad konstant). Der Kursfehler zur Bahn kennt diesen
+        # Anteil nicht - er wird durch Drehen kleiner, also durch genau das,
+        # was der Bogen tut.
+        # Beide Groessen zusammen entscheiden, und jede beantwortet genau eine
+        # Frage.
+        #
+        # ``error`` (Bahnverfolgung, Kurs *plus* Querversatz-Anteil) sagt, ob
+        # der Regler ueberhaupt ein Problem hat. Nur bei grossem Wert
+        # konvergiert Drehen-und-Fahren nicht mehr - das ist der Grund, warum
+        # es den Bogen gibt.
+        #
+        # ``path_error`` (Kurs gegen die Bahnrichtung) sagt, ob Drehen daran
+        # etwas aendern kann und wann es fertig ist. Steht die Nase parallel
+        # zur Bahn, ist der Rest reiner Querversatz - den baut nur
+        # Vorwaertsfahren ab, niemals der Bogen.
+        #
+        # Jede Groesse allein fuehrt in eine Sackgasse: nur ``error`` laesst
+        # den Bogen auf eine Schwelle warten, die er selbst unerreichbar macht
+        # (real 07.08. 16:30, 7 Grad gemeldet bei 15 cm Versatz); nur
+        # ``path_error`` startet ihn, obwohl der Regler laengst sauber faehrt
+        # (real 07.08. 16:54, bahn 8.3 Grad bei folge 1.0 Grad).
         enter_deg = self._track_alignment_enter_deg()
         exit_deg = self._track_alignment_exit_deg()
         with self._lock:
             if self._track_aligning:
-                self._track_aligning = abs(error) > exit_deg
-            elif abs(error) >= enter_deg:
+                self._track_aligning = (
+                    abs(path_error) > exit_deg and abs(error) > exit_deg
+                )
+            elif abs(error) >= enter_deg and abs(path_error) > exit_deg:
                 self._track_aligning = True
             aligning = self._track_aligning
+            if not aligning:
+                self._align_reference_error = None
+                self._align_reference_time = 0.0
 
         if aligning:
+            # Der Track-Fortschrittswaechter muss hier ruhen: ein Ausrichtbogen
+            # macht bewusst kaum Bahnfortschritt. Dadurch war dieser Zweig
+            # aber voellig unbegrenzt - dreht das Fahrzeug nicht, rollte es
+            # ewig weiter, ohne Fortschritt, ohne Fehler, in der Oberflaeche
+            # alles gruen (real 07.08.: 7 Grad Fehler, Kurs 152.6 Grad
+            # konstant, PWM 1405/1500 - zu wenig, um das beladene Kettenfahrzeug
+            # auf Gras zu drehen). Deshalb bekommt die Ausrichtung einen
+            # eigenen Waechter auf den Winkelfehler.
             self._reset_track_stall_watchdog(progress_m, now)
+            if self._align_is_stalled(path_error, now):
+                timeout_s = self._track_align_timeout_s()
+                message = (
+                    f'Ausrichtung ohne Fortschritt: Kursfehler zur Bahn '
+                    f'{path_error:.1f}° seit {timeout_s:.1f} s unveraendert '
+                    f'– Fahrzeug dreht nicht'
+                )
+                self.stop(reason='align_stall')
+                self._set_error(message)
+                return
+            # Das proportionale Kommando stirbt aus, bevor die
+            # Austrittsschwelle erreicht ist. Gemessen am 07.08. auf Gras:
+            # x=0.236 -> 1.3 Grad/s, x=0.155 -> 0.4 Grad/s, x=0.125 -> 0.
+            # Die Ausrichtung kam so von 11.8 auf 6.1 Grad und blieb dort
+            # stehen, waehrend sie 5 Grad erreichen musste. Solange
+            # ausgerichtet wird, darf der Drehanteil deshalb nicht unter die
+            # Losbrechgrenze fallen - lieber die letzten Grad zuegig drehen
+            # als endlos mit wirkungslosem Kommando auf der Narbe zu stehen.
             limit = min(0.30, max(0.0, float(self.config.max_joystick)))
-            turn = self._clamp(error * float(self.config.turn_kp), -limit, limit)
+            floor = min(limit, self._track_align_min_turn())
+            magnitude = min(
+                limit,
+                max(floor, abs(path_error) * float(self.config.turn_kp)),
+            )
+            # Die Losbrechgrenze auf Gras ist nicht vorhersagbar - x=0.220
+            # liess das Fahrzeug 14 s lang unbewegt (07.08. 16:54). Statt sie
+            # zu raten, wird das Kommando hochgefahren, solange sich der Kurs
+            # nicht bewegt, und faellt zurueck, sobald er es tut. So findet
+            # das Fahrzeug den noetigen Wert selbst und die Narbe sieht nur
+            # so viel Drehmoment, wie tatsaechlich gebraucht wird.
+            magnitude = min(limit, magnitude + (limit - magnitude) * self._align_escalation(now))
+            turn = math.copysign(magnitude, path_error) if path_error else 0.0
             rolling = min(limit, abs(turn) * self._turn_to_forward_ratio)
             longitudinal = -rolling if direction == 'reverse' else rolling
             self._send_command(turn, longitudinal)
             if now - self._last_debug_log >= 1.0:
                 self._last_debug_log = now
                 self.logger.info(
-                    '🧭 track-align-roll(%s): seg=%d xtrack=%.2fm hdg=%.1f° err=%.1f° → x=%.3f y=%.3f',
-                    direction, segment_index, cross_track_m, heading, error, turn, longitudinal,
+                    '🧭 track-align-roll(%s): seg=%d xtrack=%.2fm hdg=%.1f° '
+                    'bahn=%.1f° folge=%.1f° → x=%.3f y=%.3f',
+                    direction, segment_index, cross_track_m, heading,
+                    path_error, error, turn, longitudinal,
                 )
             return
 
@@ -695,17 +800,18 @@ class NavigationController:
     ) -> Optional[float]:
         """Winkelfehler, den ``_handle_track_pose`` an diesem Bahnanfang saehe.
 
-        Bewusst nicht die Peilung der ersten Kante: der Regler misst gegen das
-        Pure-Pursuit-Ziel im Lookahead, und genau dieser Wert entscheidet an
-        ``track_heading_block_deg``. Eine Vorabpruefung, die stattdessen die
-        Kantenpeilung nimmt, weicht auf einer langen ersten Kante ab und meldet
-        Sperren, die real keine sind. Deshalb hier dieselbe Rechnung mit
-        derselben Funktion - Bezugspunkt, Lookahead und Vorzeichen inklusive.
+        Dieselbe Bezugsgroesse wie im Regler: die Richtung des Bahnstuecks,
+        auf dem das Fahrzeug steht, mit derselben 180-Grad-Drehung fuer
+        rueckwaerts. Frueher wurde hier wie dort gegen die Peilung zum
+        Pure-Pursuit-Ziel gemessen; die ist einen Lookahead entfernt und
+        deshalb dicht am Aufsetzpunkt extrem empfindlich gegen wenige
+        Zentimeter Querversatz. Vorabpruefung und Regler muessen dieselbe
+        Groesse verwenden, sonst lehnt die eine Seite Bahnen ab, die die
+        andere problemlos faehrt.
 
         Aufsetzpunkt ist ``coordinates[0]``: dort steht das Fahrzeug, wenn die
-        Bahn beginnt, und ``progress_hint_m`` ist dann 0 wie nach jedem
-        ``set_waypoints``. Der uebergebene Kurs ist die einzige Groesse, die
-        ein Aufrufer vor der Fahrt schaetzen muss.
+        Bahn beginnt. Der uebergebene Kurs ist die einzige Groesse, die ein
+        Aufrufer vor der Fahrt schaetzen muss.
         """
         if len(coordinates) < 2:
             return None
@@ -718,15 +824,17 @@ class NavigationController:
         except (TypeError, ValueError, IndexError):
             return None
         current = waypoints[0]
-        target = cls._pure_pursuit_target(current, waypoints, float(lookahead_m))[0]
-        # Faellt das Ziel auf den Aufsetzpunkt, ist die Peilung nur Rauschen
-        # (entartete Bahn, alle Stuetzpunkte auf einem Fleck). Dann lieber
-        # nichts melden als eine erfundene Sperre.
-        if cls.distance_m(current, target) <= 0.05:
+        segment_index = cls._pure_pursuit_target(
+            current, waypoints, float(lookahead_m)
+        )[3]
+        # Ohne Ausdehnung ist jede Peilung nur Rauschen (entartete Bahn, alle
+        # Stuetzpunkte auf einem Fleck). Dann lieber nichts melden als eine
+        # erfundene Sperre.
+        last = max(0, len(waypoints) - 2)
+        index = min(max(0, int(segment_index)), last)
+        if cls.distance_m(waypoints[index], waypoints[index + 1]) <= 0.05:
             return None
-        bearing = cls.bearing_deg(current, target)
-        if direction == 'reverse':
-            bearing = (bearing + 180.0) % 360.0
+        bearing = cls._path_direction_deg(waypoints, index, direction)
         return cls.heading_error_deg(bearing, heading)
 
     @classmethod
@@ -869,6 +977,36 @@ class NavigationController:
             60.0,
         )
 
+    def _track_heading_block_samples(self) -> int:
+        return max(
+            1,
+            int(getattr(self.config, 'track_heading_block_samples', 3)),
+        )
+
+    @classmethod
+    def _path_direction_deg(
+        cls,
+        waypoints: List[Waypoint],
+        segment_index: int,
+        direction: str,
+    ) -> float:
+        """Sollkurs der Nase auf dem Bahnstueck, auf dem das Fahrzeug steht.
+
+        Bewusst nicht die Peilung zum Pure-Pursuit-Ziel: das Ziel liegt nur
+        einen Lookahead entfernt, und am Segmentanfang steht das Fahrzeug
+        praktisch darauf. Dort verschiebt schon ein Ausrichtbogen - bei dem
+        die GNSS-Antenne um den Drehpunkt schwenkt - die Peilung um Dutzende
+        Grad, ohne dass sich die Ausrichtung zur Bahn nennenswert aendert
+        (real 07.08.: 16.4 Grad auf 48.4 Grad in einer Sekunde bei 11 cm
+        Querabstand und unveraendertem Kurs). Die Bahnrichtung ist stabil.
+        """
+        last = max(0, len(waypoints) - 2)
+        index = min(max(0, int(segment_index)), last)
+        bearing = cls.bearing_deg(waypoints[index], waypoints[index + 1])
+        if direction == 'reverse':
+            bearing = (bearing + 180.0) % 360.0
+        return bearing
+
     def _track_alignment_enter_deg(self) -> float:
         return self._clamp(
             float(getattr(self.config, 'track_alignment_enter_deg', 10.0)),
@@ -888,6 +1026,61 @@ class NavigationController:
         with self._lock:
             self._track_stall_reference_m = progress_m
             self._track_stall_reference_time = now
+
+    def _track_align_timeout_s(self) -> float:
+        return max(
+            1.0,
+            float(getattr(self.config, 'track_align_timeout_s', 10.0)),
+        )
+
+    def _track_align_min_progress_deg(self) -> float:
+        # Bewusst fein: der Waechter soll eine Ausrichtung erkennen, die gar
+        # nicht mehr dreht, und keine, die langsam konvergiert. Mit 2 Grad
+        # stoppte er am 07.08. eine Ausrichtung, die in 10 s um 1.7 Grad
+        # vorangekommen und noch 1 Grad von der Austrittsschwelle entfernt war.
+        return max(
+            0.1,
+            float(getattr(self.config, 'track_align_min_progress_deg', 0.5)),
+        )
+
+    def _align_escalation(self, now: float) -> float:
+        """0 bis 1, je laenger die Ausrichtung ohne Kursfortschritt laeuft."""
+        escalate_s = max(
+            0.5,
+            float(getattr(self.config, 'track_align_escalate_s', 3.0)),
+        )
+        with self._lock:
+            reference_time = self._align_reference_time
+        if reference_time <= 0.0:
+            return 0.0
+        return self._clamp((now - reference_time) / escalate_s, 0.0, 1.0)
+
+    def _track_align_min_turn(self) -> float:
+        return self._clamp(
+            float(getattr(self.config, 'track_align_min_turn', 0.22)),
+            0.0,
+            0.30,
+        )
+
+    def _align_is_stalled(self, error: float, now: float) -> bool:
+        """True, wenn der Ausrichtbogen den Winkelfehler nicht mehr verkleinert.
+
+        Bezug ist der jeweils beste erreichte Fehler. Verbessert er sich um
+        mindestens ``track_align_min_progress_deg``, laeuft die Frist neu -
+        eine langsame, aber fortschreitende Drehung wird also nicht gestoppt.
+        """
+        magnitude = abs(float(error))
+        min_progress = self._track_align_min_progress_deg()
+        with self._lock:
+            if (
+                self._align_reference_time <= 0.0
+                or self._align_reference_error is None
+                or magnitude <= self._align_reference_error - min_progress
+            ):
+                self._align_reference_error = magnitude
+                self._align_reference_time = now
+                return False
+            return now - self._align_reference_time >= self._track_align_timeout_s()
 
     def _track_stall_timeout_s(self) -> float:
         return self._clamp(

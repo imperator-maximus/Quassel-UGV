@@ -233,5 +233,117 @@ class HeadingBlockCheckTests(unittest.TestCase):
         self.assertEqual([], result['warnings'])
 
 
+class ResumeCheckTargetsTheResumePointTests(unittest.TestCase):
+    """Der Vorabcheck muss die Route pruefen, die auch gefahren wird.
+
+    07.08.: Fahrzeug stand bei Bahn 65, "Fortsetzen" wurde zweimal abgelehnt
+    mit "Anfahrt zu Bahn 0 +49.8 Grad" - der Check lief ueber den ganzen Plan
+    ab Bahn 0, die Ausfuehrung waere ab Bahn 65 gefahren.
+    """
+
+    def setUp(self):
+        config = SimpleNamespace(
+            template_folder='.', static_folder='.', secret_key='test',
+        )
+        dummy = SimpleNamespace()
+        self.server = WebServer(config, dummy, dummy, dummy, dummy)
+        self.plan = {'sequence': [
+            {'segment_index': 0, 'type': 'rest_lane'},
+            {'segment_index': 65, 'type': 'rest_lane'},
+            {'segment_index': 70, 'type': 'rest_lane'},
+        ]}
+        self.server.mapping = SimpleNamespace(
+            load_plan=lambda name: {'success': True, 'plan': self.plan}
+        )
+
+    def test_resume_point_is_resolved_from_the_saved_state(self):
+        self.server._load_resume_state = lambda name: {
+            'source_segment_index': 65,
+            'current_segment': {'type': 'mow'},
+        }
+
+        self.assertEqual(self.server._resume_start_segment_index('Wiese'), 65)
+
+    def test_without_resume_state_nothing_is_forced(self):
+        self.server._load_resume_state = lambda name: None
+
+        self.assertIsNone(self.server._resume_start_segment_index('Wiese'))
+
+    def test_transition_resume_advances_to_the_next_source_segment(self):
+        """Denselben Uebergang erneut zu maehen waere eine wiederholte Bahn."""
+        self.server._load_resume_state = lambda name: {
+            'source_segment_index': 65,
+            'current_segment': {'type': 'transition'},
+        }
+
+        self.assertEqual(self.server._resume_start_segment_index('Wiese'), 70)
+
+    def test_frontend_tells_the_check_that_it_is_resuming(self):
+        script = (
+            Path(__file__).resolve().parents[2] / 'static' / 'js' / 'mapping_editor.js'
+        ).read_text(encoding='utf-8')
+        check_call = script[script.index('plan/check'):][:700]
+
+        self.assertIn('resume: useResume === true', check_call)
+
+
+class PlanAlertVisibilityTests(unittest.TestCase):
+    """Ein gestoppter Plan muss ohne Suchen sichtbar sein.
+
+    Am 07.08. stand das Fahrzeug mit ``heading_block`` mitten auf der Flaeche
+    und meldete scheinbar nichts: die Statuszeile dafuer liegt in einem
+    zugeklappten <details> auf der Kartenseite, waehrend der Benutzer auf der
+    Steuerungsseite war. Auch die Ablehnung von "Fortsetzen" landete dort.
+    """
+
+    def setUp(self):
+        root = Path(__file__).resolve().parents[2]
+        self.template = (root / 'templates' / 'index.html').read_text(encoding='utf-8')
+        self.script = (
+            root / 'static' / 'js' / 'mapping_editor.js'
+        ).read_text(encoding='utf-8')
+
+    def test_alert_element_exists_outside_every_screen(self):
+        self.assertIn('id="planAlert"', self.template)
+        banner_at = self.template.index('id="planAlert"')
+        first_screen_at = self.template.index('class="screen active"')
+        self.assertLess(
+            banner_at,
+            first_screen_at,
+            'Banner steht in einem Screen und ist dann nur dort sichtbar',
+        )
+
+    def test_alert_is_not_hidden_inside_the_collapsed_plan_details(self):
+        # Bewusst die Markup-Stelle, nicht die CSS-Regel weiter oben.
+        details_at = self.template.index('<details class="plan-info-disclosure">')
+        self.assertLess(
+            self.template.index('id="planAlert"'),
+            details_at,
+            'Banner darf nicht im zugeklappten Bereich liegen',
+        )
+
+    def test_status_update_feeds_the_alert(self):
+        self.assertIn('setPlanAlert(planAlertText(plan, planState))', self.script)
+        self.assertIn('function planAlertText(', self.script)
+
+    def test_blocking_states_reach_the_alert(self):
+        """Zustaende ohne Fehlertext-Ausnahme muessen das Banner ausloesen."""
+        start = self.script.index('function planAlertText(')
+        body = self.script[start:start + 800]
+        # Nur diese Zustaende gelten als unauffaellig; alles andere - darunter
+        # heading_block, nogo_stop, error und mower_fault - meldet sich.
+        self.assertIn("['', 'idle', 'running', 'completed'].includes(planState)", body)
+        self.assertIn('plan.last_error', body)
+
+    def test_rejected_resume_shows_immediately(self):
+        self.assertIn('setPlanAlert(planBlockedMessage)', self.script)
+
+    def test_alert_can_be_dismissed_and_returns_for_a_new_message(self):
+        self.assertIn('function dismissPlanAlert(', self.script)
+        self.assertIn('planAlertDismissed = el.textContent', self.script)
+        self.assertIn('dismissPlanAlert,', self.script)
+        self.assertIn('dismissPlanAlert()', self.template)
+
+
 if __name__ == '__main__':
     unittest.main()

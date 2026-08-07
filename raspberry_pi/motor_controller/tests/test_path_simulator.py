@@ -212,7 +212,9 @@ class PathSimulatorTests(unittest.TestCase):
         try:
             navigation.set_waypoints(waypoints, mode="track", direction="reverse")
             self.assertTrue(navigation.start())
-            navigation.on_pose_update(pose)
+            # Mehrere Posen: die Sperre verlangt einen anhaltenden Fehler.
+            for _ in range(3):
+                navigation.on_pose_update(pose)
             status = navigation.get_status()
         finally:
             navigation.shutdown()

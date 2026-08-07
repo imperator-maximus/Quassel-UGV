@@ -187,6 +187,9 @@ class WebServer:
                 'mapping_status': self.mapping.get_status() if self.mapping else {'state': 'disabled'},
                 'safety_status': self.safety.get_status() if self.safety else {},
                 'light_state': self.light_state,
+                # Der Schieberegler liest diesen Wert beim Laden. Bisher gab es
+                # ihn nur im WebSocket-Status, nicht ueber HTTP.
+                'max_speed_percent': self.joystick.get_status().get('max_speed', 100),
                 **self._mower_api_status()
             })
         
@@ -564,10 +567,18 @@ class WebServer:
             data = request.get_json(silent=True) or {}
             plan = data.get('plan') if isinstance(data, dict) else None
             start_pose = self.can.get_sensor_data()
+            start_segment_index = data.get('start_segment_index')
+            if start_segment_index is None and data.get('resume'):
+                # Fortsetzen faehrt ab dem Wiederaufsetzpunkt, nicht ab Bahn 0.
+                # Ohne diese Aufloesung prueft der Vorabcheck eine voellig
+                # andere Route als die spaeter gefahrene und lehnt mitten auf
+                # der Flaeche mit "Anfahrt zu Bahn 0" ab (07.08.: Fahrzeug bei
+                # Bahn 65, Ablehnung +49.8 Grad zur Bahn 0).
+                start_segment_index = self._resume_start_segment_index(map_name, plan)
             result = self.mapping.check_plan(
                 map_name,
                 plan=plan,
-                start_segment_index=data.get('start_segment_index'),
+                start_segment_index=start_segment_index,
                 start_coordinate=data.get('start_coordinate'),
                 start_pose=start_pose,
             )
@@ -578,7 +589,7 @@ class WebServer:
                     "Plan-Check bereit: map=%s start_segment_index=%r start_coordinate=%r "
                     "route=%s segments=%s",
                     map_name,
-                    data.get('start_segment_index'),
+                    start_segment_index,
                     data.get('start_coordinate'),
                     result.get('route_signature'),
                     self._route_log_summary(result.get('executable_segments') or []),
@@ -588,7 +599,7 @@ class WebServer:
                     "Plan-Check abgelehnt: map=%s start_segment_index=%r "
                     "start_coordinate=%r browser_plan=%s errors=%s warnings=%s error=%s",
                     map_name,
-                    data.get('start_segment_index'),
+                    start_segment_index,
                     data.get('start_coordinate'),
                     plan is not None,
                     result.get('errors'),
@@ -1107,6 +1118,23 @@ class WebServer:
         })
         return following_indices[0] if following_indices else None
 
+    def _resume_start_segment_index(self, map_name, plan=None):
+        """Loest den Wiederaufsetzpunkt genauso auf wie die Ausfuehrung.
+
+        Der Vorabcheck muss dieselbe Route beurteilen, die anschliessend
+        gefahren wird. Sonst lehnt er eine Fortsetzung wegen einer Stelle ab,
+        die gar nicht mehr angefahren wird.
+        """
+        resume = self._load_resume_state(map_name)
+        if not resume:
+            return None
+        if plan is None:
+            loaded = self.mapping.load_plan(map_name) if self.mapping else {}
+            if not loaded.get('success'):
+                return None
+            plan = loaded.get('plan')
+        return self._resume_source_index(plan or {}, resume)
+
     def resume_paused_plan_execution(self):
         """Setzt einen intern pausierten Plan nach Ende des alten Threads fort."""
         with self._plan_lock:
@@ -1134,6 +1162,37 @@ class WebServer:
         if self.navigation:
             self.navigation.stop(reason=reason)
 
+    def stop_mower(self, reason='plan_finished'):
+        """Schaltet das Maehdeck ab, wenn die Planfahrt endgueltig endet.
+
+        Bewusst nicht beim Pausieren: eine kurze Telemetriepause oder ein
+        RTK-Aussetzer setzt die Fahrt an derselben Stelle fort, und ein
+        Deckneustart kostet mehrere Sekunden sequenzieller Achsvalidierung.
+        Ist der Plan dagegen fertig oder abgebrochen, steht das Fahrzeug
+        unbegrenzt - dann duerfen die Messer nicht weiterlaufen.
+        """
+        try:
+            if self.odrive_mower and getattr(self.odrive_mower, 'enabled', False):
+                status = self.odrive_mower.stop()
+                if not status.get('success', True):
+                    self.logger.error(
+                        'Maehdeck nach %s nicht gestoppt: %s',
+                        reason,
+                        status.get('error'),
+                    )
+                    return
+            elif self.mower_config and self.mower_config.enabled:
+                self.mower_state = False
+                if self.gpio:
+                    self.gpio.output(self.mower_config.relay_pin, False)
+                if self.pwm_controller:
+                    self.pwm_controller.stop_mower()
+            else:
+                return
+            self.logger.info('🌾 Mähdeck ausgeschaltet: %s', reason)
+        except Exception as exc:
+            self.logger.exception('Maehdeck-Abschaltung nach %s fehlgeschlagen: %s', reason, exc)
+
     def stop_plan_execution(self, clear_resume=False):
         self._plan_stop_event.set()
         self._plan_pause_event.clear()
@@ -1142,6 +1201,7 @@ class WebServer:
                 self._plan_status['state'] = 'stopping'
         if self.navigation:
             self.navigation.stop(reason='plan_stopped')
+        self.stop_mower(reason='plan_stopped')
         if clear_resume and self._active_plan_map_name:
             self._delete_resume_state(self._active_plan_map_name)
 
@@ -1196,6 +1256,7 @@ class WebServer:
                     return
             if self._active_plan_map_name:
                 self._delete_resume_state(self._active_plan_map_name)
+            self.stop_mower(reason='plan_completed')
             self._set_plan_status(running=False, state='completed', active_index=len(executable_segments), current_segment=None)
         except Exception as exc:
             self.logger.error('Plan-Ausführung fehlgeschlagen: %s', exc)
@@ -1212,6 +1273,17 @@ class WebServer:
                 self._set_plan_status(running=False, state='paused')
                 return False
             if not self._rtk_available() and not self._await_rtk_recovery():
+                return False
+            mower_fault = self._mower_fault_reason()
+            if mower_fault:
+                self._save_resume_state(reason='mower_fault')
+                if self.navigation:
+                    self.navigation.stop(reason='mower_fault')
+                self._set_plan_status(
+                    running=False,
+                    state='mower_fault',
+                    last_error=mower_fault,
+                )
                 return False
             if nogo_monitor is not None:
                 nogo = self._check_nogo(nogo_monitor)
@@ -1246,6 +1318,27 @@ class WebServer:
         if not self.mapping:
             return False
         return self.mapping.plans.pose_rtk_ok(self.can.get_sensor_data())
+
+    def _mower_fault_reason(self):
+        """Bricht die Planfahrt ab, wenn das laufende Deck nicht gesund ist.
+
+        Der zentrale Safety-Watchdog stoppt denselben Fehler ebenfalls. Diese
+        zweite, unabhaengige Pruefung sorgt dafuer, dass der Plan auch dann
+        anhaelt und einen Wiederaufsetzpunkt schreibt, wenn der Watchdog
+        deaktiviert ist. Ein absichtlich ausgeschaltetes Deck gilt als gesund,
+        damit reine Transferfahrten nicht abbrechen.
+        """
+        mower = self.odrive_mower
+        if not mower or not getattr(mower, 'enabled', False):
+            return None
+        try:
+            healthy, reason = mower.runtime_health()
+        except Exception as exc:
+            self.logger.error('Maehdeck-Healthcheck fehlgeschlagen: %s', exc)
+            return f'Maehdeck-Healthcheck fehlgeschlagen: {exc}'
+        if healthy:
+            return None
+        return reason or 'Maehdeck nicht betriebsbereit'
 
     def _await_rtk_recovery(self):
         """Haelt das Fahrzeug bei RTK-Verlust an, statt den Plan abzubrechen.
@@ -1516,16 +1609,31 @@ class WebServer:
             # The internal controller marks itself busy before sequential
             # validation. The UI may say EIN only after every axis has passed
             # validation and the periodic command thread owns the blades.
-            verified_running = bool(
+            commanded = bool(
                 status.get('command_running', status['running'])
                 and not mower_starting
             )
+            # A frozen status is not a running mower. Reporting EIN from values
+            # that stopped updating is exactly how a dead deck kept looking
+            # healthy while the vehicle carried on mowing nothing.
+            stale = bool(status.get('odrive_missing_heartbeats'))
+            stalled = bool(status.get('transport_stall'))
+            mower_fault = bool(commanded and (stale or stalled))
+            verified_running = bool(commanded and not mower_fault)
             return {
                 'success': status['success'],
                 'mower_mode': f"odrive_{status.get('transport', 'can')}",
                 'mower_enabled': status['enabled'],
                 'mower_state': verified_running,
                 'mower_command_running': verified_running,
+                # The toggle inverts this value; it must follow the host command
+                # and not the display state, otherwise a fault would turn the
+                # AUS button into an EIN button.
+                'mower_commanded': commanded,
+                'mower_fault': mower_fault,
+                'mower_stale': stale,
+                'mower_transport_stall': status.get('transport_stall'),
+                'mower_command_loop_age_s': status.get('command_loop_age_s'),
                 'mower_starting': mower_starting,
                 'mower_active_axis_nodes': status.get('active_axis_nodes', []),
                 'mower_speed': status['rpm'],
@@ -1564,6 +1672,11 @@ class WebServer:
             'mower_enabled': self.mower_config.enabled if self.mower_config else False,
             'mower_state': self.mower_state,
             'mower_command_running': self.mower_state,
+            'mower_commanded': self.mower_state,
+            'mower_fault': False,
+            'mower_stale': False,
+            'mower_transport_stall': None,
+            'mower_command_loop_age_s': None,
             'mower_starting': False,
             'mower_active_axis_nodes': [],
             'mower_speed': speed,

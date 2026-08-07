@@ -16,6 +16,7 @@ var lanePreviewLaneLayers = [];
 var lanePreviewRestLayers = [];
 var lanePreviewConnectorLayers = [];
 var planBlockedMessage = null;
+var planAlertDismissed = null;
 // Winkelsperren, die der Plan-Check gemeldet hat. Muss wie planBlockedMessage
 // festgehalten werden: die Statusabfrage baut die Zeile alle zwei Sekunden neu
 // auf und hat die Warnung sonst überschrieben, bevor sie zu lesen war.
@@ -1226,6 +1227,10 @@ function checkAndStartLoadedPlan(useResume, startSegmentIndex, startCoordinate, 
         body: JSON.stringify({
             start_segment_index: startSegmentIndex,
             start_coordinate: startCoordinate,
+            // Ohne dieses Flag prueft der Server beim Fortsetzen die Route ab
+            // Bahn 0 statt ab dem Wiederaufsetzpunkt und lehnt sie wegen einer
+            // Stelle ab, die gar nicht gefahren wird.
+            resume: useResume === true,
         })
     })
     .then(response => response.json().then(data => ({ok: response.ok, data})))
@@ -1244,6 +1249,10 @@ function checkAndStartLoadedPlan(useResume, startSegmentIndex, startCoordinate, 
             // sehen und das Fahrzeug stand scheinbar grundlos (02.08.).
             planBlockedMessage = `⛔ Play blockiert${detail ? ' · ' + detail : ''} · ${planSummaryText(result.data.summary || lanePreviewPlan)}`;
             setPlanStatus(planBlockedMessage);
+            // Sofort und nicht erst mit der naechsten Statusabfrage: das hier
+            // ist die direkte Antwort auf den Klick des Benutzers.
+            planAlertDismissed = null;
+            setPlanAlert(planBlockedMessage);
             return;
         }
         if (attemptToken !== planStartAttemptToken) return;
@@ -1431,6 +1440,47 @@ function setPlanStatus(message) {
     if (el) el.textContent = message;
 }
 
+// Die Statuszeile oben liegt in einem zugeklappten <details> auf der
+// Kartenseite. Ein Plan, der stehenbleibt, war dort dreimal unsichtbar
+// (26.07., 02.08., 07.08.: heading_block mitten auf der Flaeche, "Fortsetzen"
+// scheiterte an derselben Sperre und meldete es an dieselbe Stelle). Diese
+// Meldungen gehoeren deshalb zusaetzlich in ein Banner ueber allen Screens.
+function setPlanAlert(message) {
+    const el = document.getElementById('planAlert');
+    if (!el) return;
+    if (!message) {
+        planAlertDismissed = null;
+        el.hidden = true;
+        el.textContent = '';
+        return;
+    }
+    if (message === planAlertDismissed) {
+        el.hidden = true;
+        return;
+    }
+    if (el.textContent !== message) el.textContent = message;
+    el.hidden = false;
+}
+
+function dismissPlanAlert() {
+    const el = document.getElementById('planAlert');
+    if (!el || el.hidden) return;
+    // Nur diese eine Meldung ausblenden - eine neue erscheint wieder.
+    planAlertDismissed = el.textContent;
+    el.hidden = true;
+}
+
+function planAlertText(plan, planState) {
+    if (planBlockedMessage) return planBlockedMessage;
+    if (planIsRunning) return null;
+    if (['', 'idle', 'running', 'completed'].includes(planState)) return null;
+    const detail = plan.last_error ? ` · ${plan.last_error}` : '';
+    // Ein vom Benutzer ausgeloester Halt ohne Fehlertext ist keine Stoerung.
+    if (!detail && ['paused', 'stopped', 'stopping'].includes(planState)) return null;
+    const progress = `${plan.active_index || 0}/${plan.total || 0}`;
+    return `⛔ Plan gestoppt: ${planState} · Segment ${progress}${detail}`;
+}
+
 function updateActivePlanLabel() {
     const el = document.getElementById('activePlanLabel');
     if (!el) return;
@@ -1511,6 +1561,7 @@ function updatePlanStatusDisplay(navigationStatus, planExecutionStatus) {
         updateLaneProgressForSegment(Number(sourceIndex));
     }
     if (planIsRunning) planBlockedMessage = null;
+    setPlanAlert(planAlertText(plan, planState));
     if (planBlockedMessage) {
         // Eine abgelehnte Freigabe bleibt stehen, bis der Benutzer erneut
         // etwas auslöst - sie ist die Antwort auf seinen Klick.
@@ -1933,4 +1984,5 @@ window.MappingEditor = {
     stopPlanExecution,
     returnToMapEditMode,
     updateVehiclePose,
+    dismissPlanAlert,
 };

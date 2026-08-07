@@ -1,4 +1,7 @@
+import logging
+import threading
 import unittest
+from dataclasses import dataclass, field
 from pathlib import Path
 import sys
 import time
@@ -6,6 +9,8 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from motor_controller.hardware.odrive_mower import ODriveMowerController
+from motor_controller.hardware.safety_monitor import SafetyMonitor
 from motor_controller.main import MotorControllerApp
 
 
@@ -28,22 +33,49 @@ class FakeCan:
         }
 
 
-class FakeUSBMower:
+@dataclass
+class FakeUSBConfig:
+    enabled: bool = True
+    node_id: int = 0
+    node_ids: list[int] = field(default_factory=lambda: [0, 1, 2])
+    axis_state: int = 5
+    min_rpm: int = 500
+    max_rpm: int = 5000
+    default_rpm: int = 500
+    ramp_rate_rpm_s: int = 300
+    command_interval_s: float = 0.1
+    heartbeat_timeout_s: float = 1.0
+    usb_status_timeout_s: float = 3.0
+    usb_startup_hang_timeout_s: float = 8.0
+    current_startup_grace_s: float = 2.0
+    command_loop_timeout_s: float = 2.0
+    runtime_rpm_monitor_enabled: bool = False
+
+
+class FakeUSBMower(ODriveMowerController):
+    """Echter Controller mit USB-Transportkennung.
+
+    Bewusst kein handgeschriebenes Status-Dictionary: genau eine solche
+    Attrappe hat die falsch benannten Schluessel im USB-Zweig des zentralen
+    Watchdogs gruen aussehen lassen, waehrend der Watchdog produktiv blind war.
+    """
+
     transport = 'usb'
-    node_ids = [0, 1, 2]
-    config = SimpleNamespace(heartbeat_timeout_s=1.0)
 
     def __init__(self, *, running=False, missing=None, errors=None, startup=False):
+        super().__init__(FakeUSBConfig(), can_handler=None)
+        now = time.monotonic()
         self.running = running
-        self._status = {
-            'mower_command_running': running,
-            'mower_startup_status': {'active': startup},
-            'odrive_missing_heartbeats': list(missing or []),
-            'odrive_errors': dict(errors or {}),
-        }
-
-    def get_status(self):
-        return dict(self._status)
+        self._run_started_monotonic = now - 10.0
+        self._loop_alive_monotonic = now
+        self._command_loop_expected = running
+        self.startup_status['active'] = startup
+        stale = now - 60.0
+        missing_nodes = set(missing or [])
+        for node_id in self.node_ids:
+            self.odrive_last_seen[node_id] = stale if node_id in missing_nodes else now
+            self.odrive_states[node_id] = 5 if running else 1
+            self.odrive_errors[node_id] = int((errors or {}).get(node_id, 0))
 
 
 class SensorSafetyScopeTests(unittest.TestCase):
@@ -56,10 +88,7 @@ class SensorSafetyScopeTests(unittest.TestCase):
                 resume_stable_s=2.0,
             )
         )
-        app.odrive_mower = SimpleNamespace(
-            node_ids=[0, 1, 2],
-            config=SimpleNamespace(heartbeat_timeout_s=1.0),
-        )
+        app.odrive_mower = FakeUSBMower()
         app.can = FakeCan(sensor_online=sensor_online)
         app.web = None
         app.navigation = SimpleNamespace(
@@ -121,7 +150,42 @@ class SensorSafetyScopeTests(unittest.TestCase):
         healthy, reason = app._can_health_check()
 
         self.assertFalse(healthy)
-        self.assertEqual(reason, "ODrive USB-Timeout: nodes [1, 2]")
+        self.assertEqual(reason, "ODrive-Status veraltet: nodes [1, 2]")
+
+    def test_running_usb_odrive_error_stops_vehicle(self):
+        app = self._app(sensor_online=True)
+        app.odrive_mower = FakeUSBMower(running=True, errors={2: 0x800})
+
+        healthy, reason = app._can_health_check()
+
+        self.assertFalse(healthy)
+        self.assertIn('node 2=0x00000800', reason)
+
+    def test_frozen_mower_command_thread_stops_vehicle(self):
+        """Der reale Ausfall: Fibre haengt, der Kommando-Thread steht still."""
+        app = self._app(sensor_online=True)
+        mower = FakeUSBMower(running=True)
+        mower._loop_alive_monotonic = time.monotonic() - 30.0
+        app.odrive_mower = mower
+
+        healthy, reason = app._can_health_check()
+
+        self.assertFalse(healthy)
+        self.assertIn('Kommandoschleife', reason)
+
+    def test_hanging_usb_call_stops_vehicle_and_ends_process(self):
+        app = self._app(sensor_online=True)
+        mower = FakeUSBMower(running=True)
+        mower.transport_stall_reason = lambda: 'USB-Aufruf ohne Antwort seit 4.0s'
+        app.odrive_mower = mower
+
+        healthy, reason = app._can_health_check()
+
+        self.assertFalse(healthy)
+        self.assertIn('USB-Aufruf ohne Antwort', reason)
+        # Ein haengender Fibre-Aufruf ist prozessintern nicht abbrechbar; der
+        # Hauptloop muss ihn deshalb zusaetzlich als Neustartgrund erkennen.
+        self.assertIn('USB-Aufruf ohne Antwort', app._odrive_usb_hang_reason())
 
     def test_usb_startup_owns_its_axis_validation(self):
         app = self._app(sensor_online=True)
@@ -136,22 +200,157 @@ class SensorSafetyScopeTests(unittest.TestCase):
     def test_stuck_usb_start_is_detected_independently_of_fibre_thread(self):
         app = self._app(sensor_online=True)
         mower = FakeUSBMower(running=True, startup=True)
-        mower.config = SimpleNamespace(
-            heartbeat_timeout_s=1.0,
-            usb_startup_hang_timeout_s=8.0,
-        )
-        mower._status['startup_status'] = {
+        mower.startup_status.update({
             'active': True,
             'phase': 'node',
             'node_id': 1,
             'node_started_monotonic': time.monotonic() - 9.0,
-        }
+        })
         app.odrive_mower = mower
 
         reason = app._odrive_usb_startup_hang_reason()
 
         self.assertIn('node=1', reason)
         self.assertIn('Limit 8.0s', reason)
+
+
+class CANFakeUSBMower(FakeUSBMower):
+    transport = 'can'
+
+
+class SystemStopWiringTests(unittest.TestCase):
+    """Ein Maehdeckfehler muss das ganze Fahrzeug stoppen, nicht nur die Messer."""
+
+    def _app(self, mower):
+        app = MotorControllerApp.__new__(MotorControllerApp)
+        app.logger = logging.getLogger('test-system-stop')
+        app.odrive_mower = mower
+        app.navigation = None
+        app.motor = SimpleNamespace(emergency_stop=lambda: None)
+        app.safety = SimpleNamespace(
+            set_emergency_stop_callback=lambda cb: None,
+            set_system_stop_callback=lambda cb: None,
+            set_can_health_check=lambda cb: None,
+            set_motion_hold_check=lambda cb: None,
+            set_motion_hold_callback=lambda cb: None,
+            set_motion_resume_callback=lambda cb: None,
+            trigger_system_stop=lambda reason: None,
+        )
+        app.can = SimpleNamespace(
+            set_sensor_data_callback=lambda cb: None,
+            set_odrive_heartbeat_callback=lambda cb: None,
+            set_odrive_iq_callback=lambda cb: None,
+            set_odrive_sensorless_callback=lambda cb: None,
+            set_navigation_command_callback=lambda cb: None,
+        )
+        return app
+
+    def test_usb_mower_reaches_the_central_system_stop(self):
+        mower = FakeUSBMower()
+        app = self._app(mower)
+
+        app._setup_callbacks()
+
+        self.assertIs(mower._system_stop_callback, app.safety.trigger_system_stop)
+
+    def test_can_mower_still_reaches_the_central_system_stop(self):
+        mower = CANFakeUSBMower()
+        app = self._app(mower)
+
+        app._setup_callbacks()
+
+        self.assertIs(mower._system_stop_callback, app.safety.trigger_system_stop)
+
+    def test_vehicle_stops_even_when_the_mower_stop_hangs(self):
+        calls = []
+        blocked = threading.Event()
+        self.addCleanup(blocked.set)
+
+        app = self._app(SimpleNamespace(emergency_stop=lambda reason: blocked.wait(30)))
+        app.MOWER_STOP_JOIN_TIMEOUT_S = 0.2
+        app.web = SimpleNamespace(
+            pause_plan_execution=lambda reason: calls.append(('plan', reason))
+        )
+        app.navigation = SimpleNamespace(stop=lambda reason: calls.append(('nav', reason)))
+        app.joystick = SimpleNamespace(disable=lambda: calls.append(('joystick',)))
+
+        started = time.monotonic()
+        app._system_safety_stop('Maehdeck haengt')
+        elapsed = time.monotonic() - started
+
+        self.assertIn(('plan', 'safety_stop'), calls)
+        self.assertIn(('nav', 'safety_stop'), calls)
+        self.assertIn(('joystick',), calls)
+        # Der Safety-Watchdog ruft diesen Pfad; blockiert er hier, ueberwacht
+        # danach niemand mehr Joystick- und Kommando-Timeouts.
+        self.assertLess(elapsed, 5.0)
+
+
+@dataclass
+class WatchdogSafetyConfig:
+    pin: int = 17
+    enabled: bool = False
+    debounce_time: float = 0.2
+    command_timeout: float = 1000.0
+    joystick_timeout: float = 1000.0
+    can_watchdog_enabled: bool = True
+    can_watchdog_startup_grace_s: float = 0.0
+    can_watchdog_interval_s: float = 0.02
+
+
+class DeadMowerStopsVehicleTests(unittest.TestCase):
+    """Der Vorfall vom 07.08.2026 als durchgehender Regressionstest.
+
+    Deck laeuft, der Fibre-Aufruf haengt, der Kommando-Thread steht still - und
+    das Fahrzeug fuhr trotzdem 20 Minuten weiter, weil der zentrale Watchdog den
+    USB-Zweig nie ausgewertet und der Gesamtstopp fuer USB nie gegriffen hat.
+    """
+
+    def test_frozen_mower_stops_plan_navigation_and_drive(self):
+        stopped = []
+        app = MotorControllerApp.__new__(MotorControllerApp)
+        app.logger = logging.getLogger('test-dead-mower')
+        app.config = SimpleNamespace(
+            sensor_hub=SimpleNamespace(
+                telemetry_timeout_s=10.0,
+                pause_timeout_s=1.0,
+                resume_stable_s=2.0,
+            )
+        )
+        mower = FakeUSBMower(running=True)
+        mower._loop_alive_monotonic = time.monotonic() - 30.0
+        app.odrive_mower = mower
+        app.can = FakeCan(sensor_online=True)
+        app.web = SimpleNamespace(
+            pause_plan_execution=lambda reason: stopped.append(('plan', reason)),
+            get_plan_execution_status=lambda: {'running': True},
+        )
+        app.navigation = SimpleNamespace(
+            get_status=lambda: {'running': True},
+            stop=lambda reason: stopped.append(('nav', reason)),
+        )
+        app.joystick = SimpleNamespace(disable=lambda: stopped.append(('joystick',)))
+        app.motor = SimpleNamespace(emergency_stop=lambda: stopped.append(('motor',)))
+        app._sensor_pause_resume_mode = None
+        app._sensor_recovery_started_monotonic = None
+
+        safety = SafetyMonitor(WatchdogSafetyConfig(), gpio_controller=None)
+        app.safety = safety
+        safety.set_emergency_stop_callback(app.motor.emergency_stop)
+        safety.set_system_stop_callback(app._system_safety_stop)
+        safety.set_can_health_check(app._can_health_check)
+        self.addCleanup(safety.cleanup)
+
+        safety.start_watchdog()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and ('joystick',) not in stopped:
+            time.sleep(0.02)
+
+        self.assertFalse(safety.is_motion_allowed(), 'Bewegung blieb freigegeben')
+        self.assertIn('Kommandoschleife', safety.get_status()['system_stop_reason'])
+        self.assertIn(('plan', 'safety_stop'), stopped)
+        self.assertIn(('nav', 'safety_stop'), stopped)
+        self.assertIn(('joystick',), stopped)
 
 
 if __name__ == '__main__':

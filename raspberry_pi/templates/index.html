@@ -189,6 +189,59 @@
             box-shadow: 0 0 12px rgba(255, 176, 0, 0.65);
         }
 
+        /* Ein gestoppter Plan muss auf jedem Bildschirm auffallen. Die
+           Statuszeile dafuer sitzt in einem zugeklappten <details> auf der
+           Kartenseite - dort hat sie mehrfach niemand gesehen. */
+        .plan-alert {
+            position: fixed;
+            top: 8px;
+            left: 8px;
+            right: 8px;
+            z-index: 3000;
+            padding: 12px 16px;
+            border-radius: 10px;
+            border: 2px solid #e01b24;
+            background: linear-gradient(135deg, #8b0000, #e01b24);
+            color: #fff;
+            font-size: 15px;
+            font-weight: 600;
+            line-height: 1.35;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.55);
+            cursor: pointer;
+            overflow-wrap: anywhere;
+        }
+
+        .plan-alert::after {
+            content: ' (tippen zum Ausblenden)';
+            font-weight: 400;
+            opacity: 0.75;
+            font-size: 12px;
+        }
+
+        .plan-alert[hidden] {
+            display: none;
+        }
+
+        .status-dot.fault {
+            background: #e01b24;
+            border-color: #e01b24;
+            box-shadow: 0 0 15px rgba(224, 27, 36, 0.8);
+            animation: fault-pulse 1s ease-in-out infinite;
+        }
+
+        @keyframes fault-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.35; }
+        }
+
+        .mower-toggle-btn.fault,
+        .mower-power-btn.fault {
+            background: linear-gradient(135deg, #e01b24, #8b0000);
+            border-color: #e01b24;
+            color: #fff;
+            animation: fault-pulse 1s ease-in-out infinite;
+        }
+
         .main-content {
             flex: 1;
             display: flex;
@@ -1036,7 +1089,10 @@
 </head>
 <body>
     <div class="connection-status" id="connectionStatus">Verbinde...</div>
-    
+    <!-- Bewusst ausserhalb der Screens: ein gestoppter Plan muss auch auf der
+         Steuerungsseite sichtbar sein, nicht nur auf der Kartenseite. -->
+    <div class="plan-alert" id="planAlert" role="alert" hidden onclick="window.MappingEditor && window.MappingEditor.dismissPlanAlert()"></div>
+
     <div class="header">
         <h1>👑 Quassel UGV 👑</h1>
         <div class="header-controls">
@@ -1532,7 +1588,9 @@
             document.getElementById('lightStatus').className =
                 'status-dot ' + (data.light_state ? 'active' : 'inactive');
             document.getElementById('mowerStatus').className =
-                'status-dot ' + (data.mower_state ? 'active' : (data.mower_starting ? 'warning' : 'inactive'));
+                'status-dot ' + (data.mower_fault ? 'fault'
+                    : (data.mower_state ? 'active'
+                        : (data.mower_starting ? 'warning' : 'inactive')));
 
             // PWM-Werte aktualisieren
             if (data.current_pwm) {
@@ -1567,7 +1625,11 @@
 
             // Mäher-Button aktualisieren
             if (data.mower_enabled !== undefined) {
-                updateMowerButton(data.mower_state || false, data.mower_starting || false);
+                updateMowerButton(
+                    data.mower_state || false,
+                    data.mower_starting || false,
+                    data.mower_fault || false
+                );
             }
 
             // Mäher-Modal aktualisieren falls geöffnet
@@ -1676,10 +1738,15 @@
         }
 
         // Mäher Button aktualisieren
-        function updateMowerButton(mowerState, mowerStarting = false) {
+        function updateMowerButton(mowerState, mowerStarting = false, mowerFault = false) {
             const btn = document.getElementById('mowerToggleBtn');
 
-            if (mowerStarting) {
+            if (mowerFault) {
+                // Weder EIN noch AUS: der Host kommandiert das Deck, bekommt
+                // aber keine gueltige Rueckmeldung mehr.
+                btn.className = 'mower-toggle-btn fault';
+                btn.innerHTML = '⚠️ Mäher STÖRUNG';
+            } else if (mowerStarting) {
                 btn.className = 'mower-toggle-btn';
                 btn.innerHTML = '⏳ Mäher STARTET…';
             } else if (mowerState) {
@@ -1810,7 +1877,12 @@
         function updateMowerModal(data) {
             const mowerState = data.mower_state || false;
             const mowerStarting = data.mower_starting || false;
-            currentMowerState = mowerState;
+            const mowerFault = data.mower_fault || false;
+            // Der Toggle invertiert den Host-Befehl, nicht die Anzeige. Sonst
+            // wuerde ein Stoerungsfall aus "AUS" ein "EIN" machen.
+            currentMowerState = data.mower_commanded !== undefined
+                ? !!data.mower_commanded
+                : mowerState;
             const mowerMode = data.mower_mode || 'gpio_pwm';
             const isOdrive = mowerMode.startsWith('odrive_');
             const minRpm = data.mower_min_rpm || 0;
@@ -1820,16 +1892,25 @@
 
             // Status-Dot im Modal
             document.getElementById('mowerModalStatus').className =
-                'status-dot ' + (mowerState ? 'active' : (mowerStarting ? 'warning' : 'inactive'));
+                'status-dot ' + (mowerFault ? 'fault'
+                    : (mowerState ? 'active' : (mowerStarting ? 'warning' : 'inactive')));
 
             // Status-Text
-            document.getElementById('mowerStatusText').textContent = mowerStarting ? 'Startet…' : (mowerState ? 'Ein' : 'Aus');
+            const mowerFaultText = data.mower_transport_stall
+                || data.mower_error
+                || 'keine gültige Rückmeldung';
+            document.getElementById('mowerStatusText').textContent = mowerFault
+                ? 'STÖRUNG: ' + mowerFaultText
+                : (mowerStarting ? 'Startet…' : (mowerState ? 'Ein' : 'Aus'));
 
             // Power-Button
             const powerBtn = document.getElementById('mowerPowerBtn');
             const powerText = document.getElementById('mowerPowerText');
 
-            if (mowerStarting) {
+            if (mowerFault) {
+                powerBtn.className = 'mower-power-btn fault';
+                powerText.textContent = '🛑 Mäher AUS (Störung)';
+            } else if (mowerStarting) {
                 powerBtn.className = 'mower-power-btn';
                 powerText.textContent = '⏳ Mäher STARTET…';
             } else if (mowerState) {

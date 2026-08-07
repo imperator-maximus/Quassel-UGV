@@ -18,24 +18,28 @@ class JoystickHandler:
     - Thread-Safe Zugriff
     """
     
-    def __init__(self, motor_control, safety_monitor):
+    def __init__(self, motor_control, safety_monitor, max_speed: float = 100.0):
         """
         Initialisiert Joystick-Handler
-        
+
         Args:
             motor_control: MotorControl-Instanz
             safety_monitor: SafetyMonitor-Instanz
+            max_speed: Startwert der Geschwindigkeitsbegrenzung in Prozent.
+                Kommt aus ``web.max_speed_percent``, damit der Schieberegler
+                in der Oberflaeche und das Fahrzeug von Anfang an denselben
+                Wert meinen.
         """
         self.logger = logging.getLogger(__name__)
         self.motor = motor_control
         self.safety = safety_monitor
-        
+
         # Joystick-Status
         self.enabled = False
         self.x = 0.0
         self.y = 0.0
         self.last_update = 0
-        self.max_speed = 100.0  # Prozent
+        self.max_speed = max(0.0, min(100.0, float(max_speed)))  # Prozent
 
         # Thread-Safety
         self._lock = threading.Lock()
@@ -58,14 +62,23 @@ class JoystickHandler:
             self.y = max(-1.0, min(1.0, y))
             self.last_update = time.time()
             self.enabled = True
-        
+            # Die Begrenzung wirkt erst hier, auf dem Kommando an den Antrieb.
+            # Gespeichert bleibt die rohe Knueppelstellung, damit die Anzeige
+            # weiterhin zeigt, wohin der Benutzer gezogen hat.
+            factor = self.max_speed / 100.0
+            command_x = self.x * factor
+            command_y = self.y * factor
+
         # Safety Monitor aktualisieren
         self.safety.update_joystick_time()
-        
+
         # Motor-Steuerung aktualisieren (ohne Ramping für direkte Kontrolle)
-        self.motor.set_joystick(self.x, self.y, use_ramping=False)
-        
-        self.logger.debug(f"Joystick: x={self.x:.2f}, y={self.y:.2f}")
+        self.motor.set_joystick(command_x, command_y, use_ramping=False)
+
+        self.logger.debug(
+            f"Joystick: x={self.x:.2f}, y={self.y:.2f} "
+            f"-> {command_x:.2f}/{command_y:.2f} bei {self.max_speed:.0f}%"
+        )
         return True
     
     def disable(self):

@@ -40,6 +40,13 @@ das Stocken eines einzelnen Streams die Navigation pausiert.
   Mähdeck.
 - Alle drei Mähachsen besitzen einen lokalen ODrive-Watchdog und werden über
   USB auf Zustand, Strom, Drehzahl und Fehler überwacht.
+- Diese Überwachung läuft im zentralen Safety-Watchdog, nicht im Mähdeck-Thread.
+  Ein libfibre-Aufruf blockiert seinen Thread ohne Timeout; eine Prüfung, die
+  im selben Thread lebt, fällt mit ihm aus. Läuft das Deck, führen hängender
+  Transport, veralteter Status, ODrive-Fehler, verlassener Closed-Loop und ein
+  stehendes Messer zum Gesamtstopp. Ein hängender USB-Aufruf beendet danach den
+  Prozess (Exit 70), weil er prozessintern nicht abbrechbar ist; systemd startet
+  neu, die Messer sind zu diesem Zeitpunkt bereits vom ODrive-Watchdog entwaffnet.
 
 ## Vorgabe für weitere Entwicklung
 

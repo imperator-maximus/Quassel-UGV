@@ -1,3 +1,4 @@
+import math
 import time
 import unittest
 from dataclasses import dataclass
@@ -512,12 +513,16 @@ class NavigationControllerTests(unittest.TestCase):
         ], mode='track')
         controller.start()
         try:
-            controller.on_pose_update({
-                'latitude': 52.0,
-                'longitude': 10.0,
-                # Eastbound target, therefore a large +60 degree error.
-                'heading_deg': 30.0,
-            })
+            # Die Sperre verlangt mehrere aufeinanderfolgende Posen; das reale
+            # Fahrzeug liefert sie mit 5 Hz. Ein einzelner Ausreisser darf eine
+            # laufende Mahd nicht mehr stoppen.
+            for _ in range(3):
+                controller.on_pose_update({
+                    'latitude': 52.0,
+                    'longitude': 10.0,
+                    # Eastbound target, therefore a large +60 degree error.
+                    'heading_deg': 30.0,
+                })
             status = controller.get_status()
         finally:
             controller.shutdown()
@@ -540,7 +545,8 @@ class NavigationControllerTests(unittest.TestCase):
         ], mode='track')
         controller.start()
         try:
-            controller.on_pose_update({'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 66.0})
+            for _ in range(3):
+                controller.on_pose_update({'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 66.0})
             below_threshold = controller.get_status()
         finally:
             controller.shutdown()
@@ -553,7 +559,8 @@ class NavigationControllerTests(unittest.TestCase):
         ], mode='track')
         controller2.start()
         try:
-            controller2.on_pose_update({'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 64.0})
+            for _ in range(3):
+                controller2.on_pose_update({'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 64.0})
             above_threshold = controller2.get_status()
         finally:
             controller2.shutdown()
@@ -581,11 +588,12 @@ class NavigationControllerTests(unittest.TestCase):
         ], mode='track', direction='forward')
         controller.start()
         try:
-            controller.on_pose_update({
-                'latitude': 53.3325664,
-                'longitude': 11.0785893,
-                'heading_deg': 302.8,
-            })
+            for _ in range(3):
+                controller.on_pose_update({
+                    'latitude': 53.3325664,
+                    'longitude': 11.0785893,
+                    'heading_deg': 302.8,
+                })
             status = controller.get_status()
         finally:
             controller.shutdown()
@@ -608,11 +616,12 @@ class NavigationControllerTests(unittest.TestCase):
         try:
             # Eastbound reverse motion wants a west-facing body. The 60 degree
             # error mirrors the failed short Brunnen transition.
-            controller.on_pose_update({
-                'latitude': 52.0,
-                'longitude': 10.0,
-                'heading_deg': 210.0,
-            })
+            for _ in range(3):
+                controller.on_pose_update({
+                    'latitude': 52.0,
+                    'longitude': 10.0,
+                    'heading_deg': 210.0,
+                })
             status = controller.get_status()
         finally:
             controller.shutdown()
@@ -620,6 +629,388 @@ class NavigationControllerTests(unittest.TestCase):
         self.assertFalse(status['running'])
         self.assertEqual(status['state'], 'heading_block')
         self.assertIn('Winkelfehler', status['last_error'])
+
+    def test_lateral_offset_at_the_lane_start_is_no_heading_error(self):
+        """Regression fuer den Realstopp vom 07.08. mitten auf der Wiese.
+
+        Das Fahrzeug stand parallel zur Bahn (Fehler zur Bahnrichtung 6.7
+        Grad), aber am Segmentanfang praktisch auf dem Pure-Pursuit-Ziel. Der
+        Ausrichtbogen schwenkte die GNSS-Antenne um wenige Zentimeter, und die
+        Peilung zu diesem nahen Ziel sprang in einer Sekunde von 16.4 auf 48.4
+        Grad - die Sperre stoppte den Plan bei 11 cm Querabstand.
+
+        Hier derselbe Effekt in Reinform: exakt bahnparalleler Kurs, 0.8 m
+        Querversatz, Ziel im Lookahead von 0.8 m. Gegen die Zielpeilung sind
+        das 45 Grad, gegen die Bahnrichtung null.
+        """
+        east_per_deg = 111320.0 * math.cos(math.radians(52.0))
+        offset_deg = 0.8 / east_per_deg
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0009, 'longitude': 10.0},
+        ], mode='track')
+        controller.start()
+        try:
+            for _ in range(5):
+                controller.on_pose_update({
+                    'latitude': 52.0,
+                    'longitude': 10.0 + offset_deg,
+                    'heading_deg': 0.0,
+                })
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertNotEqual('heading_block', status['state'])
+        self.assertTrue(status['running'])
+
+    def test_single_outlier_pose_does_not_stop_the_plan(self):
+        """Erst ein anhaltender Fehler stoppt - ein Ausreisser nicht."""
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.001},
+        ], mode='track')
+        controller.start()
+        try:
+            controller.on_pose_update(
+                {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 30.0}
+            )
+            after_outlier = controller.get_status()
+            # Kurs wieder in der Grenze: der Zaehler muss zurueckgesetzt sein.
+            for _ in range(2):
+                controller.on_pose_update(
+                    {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 88.0}
+                )
+            controller.on_pose_update(
+                {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 30.0}
+            )
+            after_recovery = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertTrue(after_outlier['running'])
+        self.assertNotEqual('heading_block', after_outlier['state'])
+        self.assertTrue(after_recovery['running'])
+        self.assertNotEqual('heading_block', after_recovery['state'])
+
+    def test_persistent_error_still_blocks_after_the_required_poses(self):
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.001},
+        ], mode='track')
+        controller.start()
+        try:
+            states = []
+            for _ in range(3):
+                controller.on_pose_update(
+                    {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 30.0}
+                )
+                states.append(controller.get_status()['state'])
+        finally:
+            controller.shutdown()
+
+        self.assertNotEqual('heading_block', states[0])
+        self.assertNotEqual('heading_block', states[1])
+        self.assertEqual('heading_block', states[2])
+
+    def _lane_north(self):
+        return [
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0009, 'longitude': 10.0},
+        ]
+
+    def _east_offset_deg(self, meters):
+        return meters / (111320.0 * math.cos(math.radians(52.0)))
+
+    def test_alignment_needs_a_tracking_problem_not_only_a_lane_angle(self):
+        """Realfall 07.08. 16:54: bahn 8.3 Grad, folge 1.0 Grad - kein Problem.
+
+        Das Fahrzeug stand 10 cm seitlich versetzt und dabei 8 Grad gedreht -
+        genau die Kombination, in der Pure Pursuit sauber auf die Linie
+        faehrt. Der Bogen darf hier nicht anspringen; er nimmt sonst den
+        Vorwaertsschub weg und das Fahrzeug steht ohne erkennbaren Grund.
+        """
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+        controller.set_waypoints(self._lane_north(), mode='track')
+        controller.start()
+        try:
+            for _ in range(4):
+                controller.on_pose_update({
+                    'latitude': 52.0,
+                    'longitude': 10.0 + self._east_offset_deg(0.10),
+                    'heading_deg': 352.0,
+                })
+            status = controller.get_status()
+            x, y, _ = motor.commands[-1]
+        finally:
+            controller.shutdown()
+
+        self.assertFalse(status['limits']['track_aligning'])
+        self.assertTrue(status['running'])
+        self.assertNotEqual('align_stall', status['state'])
+        self.assertGreater(y, 0.0, 'Vorwaertsschub muss erhalten bleiben')
+
+    def test_alignment_stops_once_the_nose_is_parallel(self):
+        """Realfall 07.08. 16:30: folge -7 Grad, bahn 3.6 Grad.
+
+        Der Rest ist reiner Querversatz - den baut nur Vorwaertsfahren ab.
+        Der Bogen muss beenden, auch wenn der Verfolgungsfehler noch steht.
+        """
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+        controller.set_waypoints(self._lane_north(), mode='track')
+        controller.start()
+        try:
+            controller._track_aligning = True
+            controller.on_pose_update({
+                'latitude': 52.0,
+                'longitude': 10.0 + self._east_offset_deg(0.15),
+                'heading_deg': 357.0,
+            })
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertFalse(status['limits']['track_aligning'])
+        self.assertTrue(status['running'])
+
+    def test_alignment_command_escalates_while_the_vehicle_does_not_turn(self):
+        """Realfall 07.08. 16:54: x=0.220 bewegte das Fahrzeug 14 s nicht.
+
+        Die Losbrechgrenze auf Gras ist nicht vorhersagbar. Bleibt der Kurs
+        stehen, muss das Kommando bis zur Grenze hochlaufen, statt auf einem
+        geratenen Wert zu verharren.
+        """
+        motor = FakeMotor()
+        controller = self._aligning_controller(motor)
+        try:
+            controller.on_pose_update(
+                {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 78.0}
+            )
+            first = abs(motor.commands[-1][0])
+            controller._align_reference_time -= 4.0
+            controller.on_pose_update(
+                {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 78.0}
+            )
+            escalated = abs(motor.commands[-1][0])
+        finally:
+            controller.shutdown()
+
+        self.assertGreater(escalated, first)
+        self.assertAlmostEqual(escalated, 0.30, delta=0.001)
+
+    def test_escalation_falls_back_when_the_vehicle_turns_again(self):
+        motor = FakeMotor()
+        controller = self._aligning_controller(motor)
+        try:
+            controller.on_pose_update(
+                {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 78.0}
+            )
+            controller._align_reference_time -= 4.0
+            controller.on_pose_update(
+                {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 78.0}
+            )
+            escalated = abs(motor.commands[-1][0])
+            # Kurs verbessert sich: die Eskalation muss zurueckfallen.
+            controller.on_pose_update(
+                {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 81.0}
+            )
+            relaxed = abs(motor.commands[-1][0])
+        finally:
+            controller.shutdown()
+
+        self.assertLess(relaxed, escalated)
+
+    def test_cross_track_offset_alone_does_not_start_an_alignment(self):
+        """Ursache des Realstopps vom 07.08. mitten in der Bahn.
+
+        Der Regelfehler der Bahnverfolgung ist Kursfehler plus
+        Querversatz-Anteil: bei 0.15 m Versatz und 0.8 m Lookahead allein
+        atan(0.15/0.8) = 10.6 Grad, also ueber der Eintrittsschwelle. Der
+        Ausrichtbogen nimmt dann den Vorwaertsschub weg - und genau der waere
+        noetig, um den Versatz abzubauen. Die Austrittsschwelle von 5 Grad
+        blieb damit unerreichbar, obwohl das Fahrzeug exakt bahnparallel
+        stand. Es muss stattdessen einfach normal weiterfahren.
+        """
+        north_per_deg = 111320.0
+        offset_deg = 0.15 / (north_per_deg * math.cos(math.radians(52.0)))
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0009, 'longitude': 10.0},
+        ], mode='track')
+        controller.start()
+        try:
+            for _ in range(5):
+                controller.on_pose_update({
+                    'latitude': 52.0,
+                    'longitude': 10.0 + offset_deg,
+                    'heading_deg': 0.0,
+                })
+            status = controller.get_status()
+            x, y, _ = motor.commands[-1]
+        finally:
+            controller.shutdown()
+
+        self.assertFalse(status['limits']['track_aligning'])
+        self.assertTrue(status['running'])
+        self.assertNotEqual('align_stall', status['state'])
+        # Vorwaertsschub bleibt: nur er baut den Querversatz ab.
+        self.assertGreater(y, 0.0)
+
+    def test_heading_error_toward_the_line_is_no_tracking_problem(self):
+        """20 Grad Bahnwinkel koennen ein 9 Grad Verfolgungsfehler sein.
+
+        Nase 20 Grad nach links bei 15 cm Versatz nach rechts heisst: das
+        Fahrzeug faehrt auf die Linie zu. Pure Pursuit braucht dafuer nur
+        9.4 Grad Korrektur - der Bogen waere hier ein Rueckschritt.
+        """
+        offset_deg = self._east_offset_deg(0.15)
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+        controller.set_waypoints(self._lane_north(), mode='track')
+        controller.start()
+        try:
+            controller.on_pose_update({
+                'latitude': 52.0,
+                'longitude': 10.0 + offset_deg,
+                'heading_deg': 340.0,
+            })
+            status = controller.get_status()
+            _, y, _ = motor.commands[-1]
+        finally:
+            controller.shutdown()
+
+        self.assertFalse(status['limits']['track_aligning'])
+        self.assertGreater(y, 0.0)
+
+    def _aligning_controller(self, motor, config=None):
+        """Bahn nach Osten; 12 Grad Kursfehler starten den Roll-Bogen."""
+        controller = NavigationController(motor, config or NavConfig())
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.001},
+        ], mode='track')
+        controller.start()
+        return controller
+
+    def test_alignment_that_never_turns_the_vehicle_is_stopped(self):
+        """Regression fuer den Realstopp vom 07.08. ohne jede Fehlermeldung.
+
+        Das Fahrzeug rollte im Ausrichtbogen bei 7 Grad Fehler, PWM 1405/1500 -
+        zu wenig, um das beladene Kettenfahrzeug auf Gras zu drehen. Der
+        Track-Fortschrittswaechter ruht in diesem Zweig bewusst, also lief er
+        unbegrenzt: kein Fortschritt, kein Fehler, in der Oberflaeche alles
+        gruen.
+        """
+        motor = FakeMotor()
+        controller = self._aligning_controller(motor)
+        try:
+            controller.on_pose_update(
+                {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 78.0}
+            )
+            self.assertTrue(controller.get_status()['limits']['track_aligning'])
+            # Die Zeit vorspulen, ohne dass sich der Kurs bewegt.
+            controller._align_reference_time -= 11.0
+            controller.on_pose_update(
+                {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 78.0}
+            )
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertFalse(status['running'])
+        self.assertEqual('align_stall', status['state'])
+        self.assertIn('dreht nicht', status['last_error'])
+        self.assertEqual((0.0, 0.0, True), motor.commands[-1])
+
+    def test_slowly_converging_alignment_is_not_stopped(self):
+        """Regression: der Waechter hat am 07.08. eine Drehung abgeschossen,
+        die in 10 s um 1.7 Grad vorangekommen war - 1 Grad vor dem Ziel.
+        Schrittweiten unter der alten 2-Grad-Granularitaet muessen zaehlen."""
+        motor = FakeMotor()
+        controller = self._aligning_controller(motor)
+        try:
+            for heading in (78.0, 78.8, 79.6, 80.4, 81.2):
+                controller._align_reference_time -= 11.0
+                controller.on_pose_update({
+                    'latitude': 52.0,
+                    'longitude': 10.0,
+                    'heading_deg': heading,
+                })
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertTrue(status['running'])
+        self.assertNotEqual('align_stall', status['state'])
+
+    def test_alignment_command_stays_above_the_breakaway_floor(self):
+        """Unter der Losbrechgrenze dreht das Fahrzeug auf Gras nicht mehr.
+
+        Am 07.08. lief die Ausrichtung mit x=0.125 bei 6 Grad Restfehler ins
+        Leere: Kurs 10 s lang unveraendert, Austrittsschwelle 5 Grad nie
+        erreicht. Proportional waeren 6 * 0.02 = 0.12.
+        """
+        motor = FakeMotor()
+        controller = self._aligning_controller(motor)
+        try:
+            controller.on_pose_update(
+                {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 78.0}
+            )
+            self.assertTrue(controller.get_status()['limits']['track_aligning'])
+            # 84 Grad = 6 Grad Restfehler, genau der reale Fall.
+            controller.on_pose_update(
+                {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 84.0}
+            )
+            x, y, _ = motor.commands[-1]
+        finally:
+            controller.shutdown()
+
+        self.assertGreaterEqual(abs(x), 0.22)
+        self.assertGreater(abs(y), 0.0, 'Rollanteil folgt dem Drehanteil')
+
+    def test_large_alignment_error_still_uses_the_proportional_command(self):
+        """Die Schranke hebt nur an, sie ersetzt die Regelung nicht."""
+        motor = FakeMotor()
+        controller = self._aligning_controller(motor)
+        try:
+            controller.on_pose_update(
+                {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 70.0}
+            )
+            x, _, _ = motor.commands[-1]
+        finally:
+            controller.shutdown()
+
+        # 20 Grad * 0.02 = 0.40, begrenzt auf max_joystick 0.30.
+        self.assertAlmostEqual(abs(x), 0.30, delta=0.001)
+
+    def test_alignment_watchdog_resets_when_alignment_ends(self):
+        motor = FakeMotor()
+        controller = self._aligning_controller(motor)
+        try:
+            controller.on_pose_update(
+                {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 78.0}
+            )
+            self.assertIsNotNone(controller._align_reference_error)
+            # Kurs innerhalb der Austrittsschwelle: Ausrichtung beendet.
+            controller.on_pose_update(
+                {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 88.0}
+            )
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertFalse(status['limits']['track_aligning'])
+        self.assertIsNone(controller._align_reference_error)
 
     def test_track_speed_reduction_preserves_forward_wheel_directions(self):
         """Moderate heading correction must retain usable grass-load PWM."""
@@ -842,11 +1233,12 @@ class TrackStartHeadingErrorTests(unittest.TestCase):
         )
         controller.start()
         try:
-            controller.on_pose_update({
-                'latitude': self.LANE[0][1],
-                'longitude': self.LANE[0][0],
-                'heading_deg': heading_deg,
-            })
+            for _ in range(3):
+                controller.on_pose_update({
+                    'latitude': self.LANE[0][1],
+                    'longitude': self.LANE[0][0],
+                    'heading_deg': heading_deg,
+                })
             return controller.get_status()
         finally:
             controller.shutdown()

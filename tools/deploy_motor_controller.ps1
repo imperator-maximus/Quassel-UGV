@@ -135,6 +135,10 @@ curl -fsS -o /dev/null -w 'status=%{http_code}\n' http://localhost/api/status
 echo backup=`$backup
 "@
 
+# Das Here-String uebernimmt die Zeilenenden dieser Datei. Liegt sie mit CRLF
+# im Arbeitsverzeichnis (Windows-Editor oder core.autocrlf), scheitert bash auf
+# dem Pi schon an "set: -\r: Ungueltige Option".
+$deployCommand = $deployCommand -replace "`r`n", "`n"
 $remoteScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($deployCommand))
 Invoke-Step "Install, verify, and restart on remote" {
     ssh -4 $remote "echo $remoteScript | base64 -d | bash"

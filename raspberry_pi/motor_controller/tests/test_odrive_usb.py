@@ -1,3 +1,4 @@
+import time
 import unittest
 from pathlib import Path
 import sys
@@ -97,6 +98,8 @@ def config_for(serial="386132523135"):
         current_critical_trip_a=29.0,
         current_critical_trip_duration_s=0.1,
         sequential_start_enabled=True,
+        usb_call_stall_timeout_s=2.0,
+        command_loop_timeout_s=2.0,
     )
 
 
@@ -119,6 +122,44 @@ class ODriveUSBTests(unittest.TestCase):
         self.assertEqual(status["odrive_currents"][0]["measured_a"], 1.5)
         self.assertEqual(status["odrive_sensorless"][0]["rpm"], 600.0)
         self.assertTrue(status["usb_boards"][self.serial]["online"])
+
+    def test_completed_calls_leave_no_stall_marker(self):
+        self.controller._refresh_node(0)
+
+        self.assertIsNone(self.controller.transport_stall_reason())
+        self.assertEqual(self.controller._inflight, {})
+
+    def test_hanging_fibre_call_is_reported_with_board_and_node(self):
+        """libfibre blockiert ohne Timeout; das muss von aussen sichtbar sein."""
+        started = time.monotonic()
+        call_id = self.controller._begin_call(self.serial, 0)
+        self.controller._inflight[call_id] = (started - 5.0, self.serial, 0)
+
+        reason = self.controller.transport_stall_reason()
+
+        self.assertIsNotNone(reason)
+        self.assertIn(self.serial, reason)
+        self.assertIn('node 0', reason)
+        self.assertIn('Limit 2.0s', reason)
+
+        self.controller._end_call(call_id)
+        self.assertIsNone(self.controller.transport_stall_reason())
+
+    def test_short_call_is_not_reported_as_stall(self):
+        call_id = self.controller._begin_call(self.serial, 0)
+        try:
+            self.assertIsNone(self.controller.transport_stall_reason())
+        finally:
+            self.controller._end_call(call_id)
+
+    def test_failed_call_clears_its_stall_marker(self):
+        def explode(_axis, _board):
+            raise RuntimeError('USB weg')
+
+        with self.assertRaises(RuntimeError):
+            self.controller._run_axis_operation(0, explode)
+
+        self.assertEqual(self.controller._inflight, {})
 
     def test_velocity_write_explicitly_feeds_axis_watchdog(self):
         self.controller._set_node_input_rpm(0, 600)

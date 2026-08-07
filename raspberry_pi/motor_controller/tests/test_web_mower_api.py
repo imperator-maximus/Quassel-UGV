@@ -19,6 +19,8 @@ class FakeODriveMower:
         self.start_calls = []
         self.stop_calls = 0
         self.start_error = None
+        self.missing_heartbeats = []
+        self.transport_stall = None
 
     def start(self, rpm=None):
         self.start_calls.append(rpm)
@@ -49,7 +51,15 @@ class FakeODriveMower:
             'node_ids': [0, 1, 2],
             'axis_state': 5 if self.running else 1,
             'startup_status': {'active': self.starting},
+            'odrive_missing_heartbeats': list(self.missing_heartbeats),
+            'transport_stall': self.transport_stall,
+            'command_loop_age_s': None,
         }
+
+    def runtime_health(self):
+        if self.running and (self.missing_heartbeats or self.transport_stall):
+            return False, self.transport_stall or 'ODrive-Status veraltet'
+        return True, None
 
 
 class MowerApiSafetyTests(unittest.TestCase):
@@ -60,7 +70,10 @@ class MowerApiSafetyTests(unittest.TestCase):
             secret_key='test',
         )
         dummy = SimpleNamespace()
-        self.server = WebServer(config, dummy, dummy, dummy, dummy)
+        # Der CAN-Stub muss Telemetrie liefern koennen: die Planausfuehrung
+        # fragt darueber No-Go-Zonen und RTK ab.
+        can = SimpleNamespace(get_sensor_data=lambda: {})
+        self.server = WebServer(config, dummy, dummy, can, dummy)
         self.mower = FakeODriveMower()
         self.server.set_hardware_refs(None, None, None, self.mower)
         self.client = self.server.app.test_client()
@@ -129,6 +142,114 @@ class MowerApiSafetyTests(unittest.TestCase):
         self.assertFalse(payload['mower_state'])
         self.assertFalse(payload['mower_command_running'])
         self.assertTrue(payload['mower_starting'])
+
+    def test_frozen_status_is_reported_as_fault_not_as_mower_on(self):
+        """Der Kern des Vorfalls: eingefrorene Werte sahen aus wie 'Maeher ein'."""
+        self.mower.running = True
+        self.mower.missing_heartbeats = [0, 1, 2]
+
+        payload = self.server._mower_api_status()
+
+        self.assertFalse(payload['mower_state'])
+        self.assertTrue(payload['mower_fault'])
+        self.assertTrue(payload['mower_stale'])
+        # Der Toggle invertiert diesen Wert - er muss dem Host-Befehl folgen,
+        # sonst wird aus dem AUS-Knopf im Stoerungsfall ein EIN-Knopf.
+        self.assertTrue(payload['mower_commanded'])
+
+    def test_hanging_transport_is_reported_as_fault(self):
+        self.mower.running = True
+        self.mower.transport_stall = 'USB-Aufruf ohne Antwort seit 4.0s'
+
+        payload = self.server._mower_api_status()
+
+        self.assertTrue(payload['mower_fault'])
+        self.assertFalse(payload['mower_state'])
+        self.assertEqual(
+            payload['mower_transport_stall'], 'USB-Aufruf ohne Antwort seit 4.0s'
+        )
+
+    def test_healthy_run_is_reported_as_mower_on(self):
+        self.mower.running = True
+
+        payload = self.server._mower_api_status()
+
+        self.assertTrue(payload['mower_state'])
+        self.assertFalse(payload['mower_fault'])
+
+    def test_idle_mower_is_no_fault(self):
+        self.mower.missing_heartbeats = [0, 1, 2]
+
+        payload = self.server._mower_api_status()
+
+        self.assertFalse(payload['mower_fault'])
+        self.assertFalse(payload['mower_state'])
+
+    def test_plan_execution_aborts_on_mower_fault(self):
+        self.mower.running = True
+        self.mower.transport_stall = 'USB-Aufruf ohne Antwort seit 4.0s'
+
+        reason = self.server._mower_fault_reason()
+
+        self.assertEqual(reason, 'USB-Aufruf ohne Antwort seit 4.0s')
+
+    def test_plan_execution_continues_with_healthy_or_idle_mower(self):
+        self.assertIsNone(self.server._mower_fault_reason())
+
+        self.mower.running = True
+        self.assertIsNone(self.server._mower_fault_reason())
+
+    def test_completed_plan_switches_the_mower_off(self):
+        """Nach der letzten Bahn steht das Fahrzeug - die Messer duerfen nicht
+        weiterlaufen (real 07.08.: Plan 20/20 fertig, drei Messer mit 3400 rpm
+        auf stehendem Fahrzeug)."""
+        self.mower.running = True
+
+        self.server._run_plan_segments([], None)
+
+        self.assertFalse(self.mower.running)
+        self.assertEqual(1, self.mower.stop_calls)
+        self.assertEqual(
+            'completed', self.server.get_plan_execution_status()['state']
+        )
+
+    def test_stopping_the_plan_switches_the_mower_off(self):
+        self.mower.running = True
+
+        self.server.stop_plan_execution()
+
+        self.assertFalse(self.mower.running)
+        self.assertEqual(1, self.mower.stop_calls)
+
+    def test_pausing_the_plan_keeps_the_mower_running(self):
+        """Eine Pause setzt an derselben Stelle fort; ein Deckneustart kostet
+        mehrere Sekunden Achsvalidierung und bleibt deshalb aus."""
+        self.mower.running = True
+
+        self.server.pause_plan_execution(reason='paused')
+
+        self.assertTrue(self.mower.running)
+        self.assertEqual(0, self.mower.stop_calls)
+
+    def test_mower_stop_failure_is_logged_and_does_not_raise(self):
+        def failing_stop():
+            self.mower.stop_calls += 1
+            return self.mower.get_status(success=False, error='IDLE nicht bestaetigt')
+
+        self.mower.running = True
+        self.mower.stop = failing_stop
+
+        self.server.stop_mower(reason='test')
+
+        self.assertEqual(1, self.mower.stop_calls)
+
+    def test_template_reports_mower_fault_instead_of_stale_on_state(self):
+        template = Path(__file__).resolve().parents[2] / 'templates' / 'index.html'
+        text = template.read_text(encoding='utf-8')
+
+        self.assertIn('mower_fault', text)
+        self.assertIn('Mäher STÖRUNG', text)
+        self.assertIn('mower_commanded', text)
 
     def test_template_treats_all_odrive_transports_as_rpm_mode(self):
         template = Path(__file__).resolve().parents[2] / 'templates' / 'index.html'

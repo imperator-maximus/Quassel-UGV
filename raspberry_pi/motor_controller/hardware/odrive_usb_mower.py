@@ -53,6 +53,14 @@ class ODriveUSBMowerController(ODriveMowerController):
         self._last_connect_attempt = {serial: 0.0 for serial in set(self._axis_serials.values())}
         self._idle_poll_index = 0
         self._watchdog_cleanup_pending = False
+        # libfibre dispatches every property access to its own worker thread and
+        # then blocks the caller in ``concurrent.futures.Future.result()`` with
+        # no timeout. A board that stops answering therefore parks the calling
+        # thread permanently. These in-flight markers make that visible from
+        # the outside, including which board is responsible.
+        self._inflight: dict[int, tuple[float, str, int]] = {}
+        self._inflight_lock = threading.Lock()
+        self._inflight_seq = 0
 
     def _parse_usb_specs(self, specs) -> dict[int, dict[str, Any]]:
         parsed = {}
@@ -159,12 +167,45 @@ class ODriveUSBMowerController(ODriveMowerController):
 
     def _run_axis_operation(self, node_id: int, operation) -> Any:
         serial, axis, board_lock = self._axis_and_lock(node_id)
+        call_id = self._begin_call(serial, int(node_id))
         try:
             with board_lock:
                 return operation(axis, self._boards[serial])
         except Exception as exc:
             self._mark_disconnected(serial, exc)
             raise RuntimeError(f"ODrive USB {serial}/node {node_id}: {exc}") from exc
+        finally:
+            self._end_call(call_id)
+
+    def _begin_call(self, serial: str, node_id: int) -> int:
+        with self._inflight_lock:
+            self._inflight_seq += 1
+            call_id = self._inflight_seq
+            self._inflight[call_id] = (time.monotonic(), serial, node_id)
+        return call_id
+
+    def _end_call(self, call_id: int) -> None:
+        with self._inflight_lock:
+            self._inflight.pop(call_id, None)
+
+    def transport_stall_reason(self) -> str | None:
+        """Nennt den aeltesten haengenden Fibre-Aufruf samt Board und Node."""
+        timeout_s = max(
+            0.5,
+            float(getattr(self.config, 'usb_call_stall_timeout_s', 2.0)),
+        )
+        now = time.monotonic()
+        with self._inflight_lock:
+            if not self._inflight:
+                return None
+            started, serial, node_id = min(self._inflight.values())
+        elapsed = now - started
+        if elapsed <= timeout_s:
+            return None
+        return (
+            f"USB-Aufruf ohne Antwort seit {elapsed:.1f}s "
+            f"(Board {serial}, node {node_id}, Limit {timeout_s:.1f}s)"
+        )
 
     @staticmethod
     def _clear_axis_errors(axis, board) -> None:
