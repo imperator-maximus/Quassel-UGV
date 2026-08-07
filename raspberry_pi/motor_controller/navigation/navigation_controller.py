@@ -686,6 +686,50 @@ class NavigationController:
         return target, progress, max(0.0, total - progress), segment_index, raw_t, cross_track
 
     @classmethod
+    def track_start_heading_error_deg(
+        cls,
+        coordinates: List[List[float]],
+        heading_deg: float,
+        direction: str = 'forward',
+        lookahead_m: float = 0.8,
+    ) -> Optional[float]:
+        """Winkelfehler, den ``_handle_track_pose`` an diesem Bahnanfang saehe.
+
+        Bewusst nicht die Peilung der ersten Kante: der Regler misst gegen das
+        Pure-Pursuit-Ziel im Lookahead, und genau dieser Wert entscheidet an
+        ``track_heading_block_deg``. Eine Vorabpruefung, die stattdessen die
+        Kantenpeilung nimmt, weicht auf einer langen ersten Kante ab und meldet
+        Sperren, die real keine sind. Deshalb hier dieselbe Rechnung mit
+        derselben Funktion - Bezugspunkt, Lookahead und Vorzeichen inklusive.
+
+        Aufsetzpunkt ist ``coordinates[0]``: dort steht das Fahrzeug, wenn die
+        Bahn beginnt, und ``progress_hint_m`` ist dann 0 wie nach jedem
+        ``set_waypoints``. Der uebergebene Kurs ist die einzige Groesse, die
+        ein Aufrufer vor der Fahrt schaetzen muss.
+        """
+        if len(coordinates) < 2:
+            return None
+        try:
+            waypoints = [
+                Waypoint(latitude=float(coord[1]), longitude=float(coord[0]))
+                for coord in coordinates
+            ]
+            heading = float(heading_deg)
+        except (TypeError, ValueError, IndexError):
+            return None
+        current = waypoints[0]
+        target = cls._pure_pursuit_target(current, waypoints, float(lookahead_m))[0]
+        # Faellt das Ziel auf den Aufsetzpunkt, ist die Peilung nur Rauschen
+        # (entartete Bahn, alle Stuetzpunkte auf einem Fleck). Dann lieber
+        # nichts melden als eine erfundene Sperre.
+        if cls.distance_m(current, target) <= 0.05:
+            return None
+        bearing = cls.bearing_deg(current, target)
+        if direction == 'reverse':
+            bearing = (bearing + 180.0) % 360.0
+        return cls.heading_error_deg(bearing, heading)
+
+    @classmethod
     def _point_at_progress(cls, path_xy: List[Tuple[float, float]], lengths: List[float], progress: float) -> Tuple[float, float]:
         if progress <= 0.0:
             return path_xy[0]

@@ -16,6 +16,10 @@ var lanePreviewLaneLayers = [];
 var lanePreviewRestLayers = [];
 var lanePreviewConnectorLayers = [];
 var planBlockedMessage = null;
+// Winkelsperren, die der Plan-Check gemeldet hat. Muss wie planBlockedMessage
+// festgehalten werden: die Statusabfrage baut die Zeile alle zwei Sekunden neu
+// auf und hat die Warnung sonst überschrieben, bevor sie zu lesen war.
+var planHeadingWarning = null;
 var laneSimulationLayers = [];
 var laneSimulationResult = null;
 var laneSimulationRunning = false;
@@ -1159,6 +1163,7 @@ function playLoadedPlan() {
     const beginPreflight = () => {
         if (attemptToken !== planStartAttemptToken) return;
         planBlockedMessage = null;
+        planHeadingWarning = null;
     setPlanStatus(`Planstart ab ${percentText}% wird geprüft`);
         checkAndStartLoadedPlan(false, start.segmentIndex, start.coordinate, attemptToken, retryDeadline);
     };
@@ -1190,6 +1195,7 @@ function resumeLoadedPlan() {
     const attemptToken = ++planStartAttemptToken;
     const retryDeadline = Date.now() + 35000;
     planBlockedMessage = null;
+    planHeadingWarning = null;
     setPlanStatus('Fortsetzen wird geprüft');
     checkAndStartLoadedPlan(true, null, null, attemptToken, retryDeadline);
 }
@@ -1257,7 +1263,14 @@ function checkAndStartLoadedPlan(useResume, startSegmentIndex, startCoordinate, 
                     planIsRunning = true;
                     updateMapModeButton();
                     updateMapsSectionTitle();
-                    setPlanStatus('Plan gestartet');
+                    // Warnungen der Freigabe gingen hier bisher verloren - der
+                    // Zweig schrieb nur 'Plan gestartet'. Genau das war bei den
+                    // Winkelsperren die interessante Information: der Plan
+                    // startet, bleibt aber an bekannten Stellen stehen.
+                    planHeadingWarning = warnings.length ? `⚠️ ${warnings.join(' · ')}` : null;
+                    setPlanStatus(planHeadingWarning
+                        ? `Plan gestartet · ${planHeadingWarning}`
+                        : 'Plan gestartet');
                     return;
                 }
                 if (isTransientRtkStartFailure(executeResult.data) && Date.now() < retryDeadline) {
@@ -1291,6 +1304,7 @@ function pausePlanExecution() {
 
 function stopPlanExecution() {
     planStartAttemptToken += 1;
+    planHeadingWarning = null;
     fetch('/api/navigation/stop', {method: 'POST'})
         .then(response => response.json().then(data => ({ok: response.ok, data})))
         .then(result => {
@@ -1505,7 +1519,8 @@ function updatePlanStatusDisplay(navigationStatus, planExecutionStatus) {
         const segment = plan.current_segment || {};
         const progress = `${plan.active_index || 0}/${plan.total || 0}`;
         const errorDetail = plan.last_error ? ` · ${plan.last_error}` : '';
-        setPlanStatus(`Plan ${plan.state} · ${progress} · ${segment.mode || ''} ${segment.direction || ''}${errorDetail}`.trim());
+        const headingDetail = planHeadingWarning ? ` · ${planHeadingWarning}` : '';
+        setPlanStatus(`Plan ${plan.state} · ${progress} · ${segment.mode || ''} ${segment.direction || ''}${errorDetail}${headingDetail}`.trim());
     } else if (nav.state && nav.state !== 'idle') {
         setPlanStatus(`Navigation ${nav.state} · ${nav.mode || ''} ${nav.direction || ''}`.trim());
     }

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..mapping.nogo_monitor import NoGoZoneMonitor
+from ..navigation.navigation_controller import NavigationController
 from ..simulation.path_simulator import MowingPathSimulator, SimulationParameters
 
 try:
@@ -562,13 +563,15 @@ class WebServer:
                 return jsonify({'error': 'Mapping deaktiviert'}), 503
             data = request.get_json(silent=True) or {}
             plan = data.get('plan') if isinstance(data, dict) else None
+            start_pose = self.can.get_sensor_data()
             result = self.mapping.check_plan(
                 map_name,
                 plan=plan,
                 start_segment_index=data.get('start_segment_index'),
                 start_coordinate=data.get('start_coordinate'),
-                start_pose=self.can.get_sensor_data(),
+                start_pose=start_pose,
             )
+            self._apply_heading_block_check(result, start_pose)
             self._bind_expected_route(result, data)
             if result.get('success'):
                 self.logger.info(
@@ -822,12 +825,14 @@ class WebServer:
             if resume:
                 resume_started = self.resume_plan_execution(map_name)
                 return jsonify(resume_started), 200 if resume_started.get('success') else 409
+            start_pose = self.can.get_sensor_data()
             result = self.mapping.check_plan(
                 map_name,
                 start_segment_index=data.get('start_segment_index'),
                 start_coordinate=data.get('start_coordinate'),
-                start_pose=self.can.get_sensor_data(),
+                start_pose=start_pose,
             )
+            self._apply_heading_block_check(result, start_pose)
             self._bind_expected_route(result, data)
             if not result.get('success'):
                 return jsonify({'success': False, 'error': 'Planprüfung fehlgeschlagen', **result}), 400
@@ -902,6 +907,114 @@ class WebServer:
             result.setdefault('errors', []).append(
                 'Abfahrposition, Fahrzeugausrichtung oder Route haben sich seit der Simulation geändert; bitte erneut simulieren'
             )
+
+    def _heading_block_findings(self, result, start_pose):
+        """Stellen der kompilierten Route, an denen der Regler sperren wird.
+
+        Der Regler stoppt jede Bahn, deren Winkelfehler am Anfang
+        ``track_heading_block_deg`` erreicht (``_handle_track_pose``). Bisher
+        fiel das erst auf der Fläche auf: Play lief an, das Fahrzeug fuhr bis
+        zur Stelle und blieb dort stehen. Hier wird dieselbe Größe vorab
+        gerechnet - mit der Funktion des Reglers, nicht mit einer Näherung.
+
+        Diese Prüfung sitzt bewusst im Web-Server und nicht im PlanManager:
+        nur hier liegen Plan und Navigationskonfiguration zusammen. Der
+        PlanManager importiert sonst nichts aus ``navigation`` und soll es
+        auch nicht - das würde die Schichtung umdrehen.
+        """
+        if not self.navigation or not self.mapping:
+            return [], None
+        segments = result.get('executable_segments') or []
+        if not segments:
+            return [], None
+        try:
+            limits = (self.navigation.get_status() or {}).get('limits') or {}
+            block_deg = float(limits['track_heading_block_deg'])
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return [], None
+        # Lookahead aus der Konfiguration, nicht aus ``limits``: dort steht der
+        # zuletzt gesetzte Wert, den ein manueller Waypoint-Aufruf verändert
+        # haben kann. Der Planlauf ruft ``set_waypoints`` ohne ``lookahead_m``
+        # auf und bekommt damit immer den Konfigurationswert.
+        lookahead_m = float(getattr(self.navigation.config, 'track_lookahead_m', 0.8))
+
+        headings = self.mapping.plans.segment_start_headings(segments, start_pose)
+        first_mow_index = next(
+            (index for index, item in enumerate(segments) if item.get('type') == 'mow'),
+            None,
+        )
+        findings = []
+        for index, segment in enumerate(segments):
+            heading = headings[index]
+            # Nur Track-Segmente: die Sperre sitzt hinter der Verzweigung auf
+            # ``mode == 'track'``, ein Goto mit einzelnem Zielpunkt läuft nie
+            # in sie hinein.
+            if heading is None or segment.get('mode') != 'track':
+                continue
+            error = NavigationController.track_start_heading_error_deg(
+                segment.get('coordinates') or [],
+                heading,
+                direction=segment.get('direction', 'forward'),
+                lookahead_m=lookahead_m,
+            )
+            # Der Regler vergleicht mit >=, nicht mit >.
+            if error is None or abs(error) < block_deg:
+                continue
+            findings.append({
+                'route_index': index,
+                'type': segment.get('type'),
+                'label': self._route_segment_label(segments, index),
+                'heading_error_deg': round(error, 1),
+                'limit_deg': round(block_deg, 1),
+            })
+        return findings, first_mow_index
+
+    @staticmethod
+    def _route_segment_label(segments, index):
+        """Segmentnummer des Plans zu einer Stelle der kompilierten Route."""
+        segment = segments[index]
+        if segment.get('type') == 'mow':
+            number = segment.get('source_index')
+            return f'Bahn {number}' if number is not None else 'Bahn'
+        prefix = 'Anfahrt' if segment.get('type') == 'positioning' else 'Übergang'
+        for follower in segments[index + 1:]:
+            if follower.get('type') != 'mow':
+                continue
+            number = follower.get('source_index')
+            return f'{prefix} zu Bahn {number}' if number is not None else prefix
+        return prefix
+
+    def _apply_heading_block_check(self, result, start_pose):
+        """Winkelsperren melden - als Warnung, solange noch etwas gemäht wird.
+
+        Ein harter Fehler pro Stelle würde einen Plan sperren, der weitgehend
+        fährt (Brunnen: mehrere solcher Stellen bei sonst intakter Route).
+        Blockiert dagegen schon die Anfahrt oder die erste Bahn, bringt der
+        Start nichts - dann ist die Ablehnung die ehrlichere Antwort.
+        """
+        if not result.get('success'):
+            return
+        findings, first_mow_index = self._heading_block_findings(result, start_pose)
+        if not findings:
+            return
+        result['heading_blocks'] = findings
+        limit = findings[0]['limit_deg']
+        detail = '; '.join(
+            f"{finding['label']} {finding['heading_error_deg']:+.1f}°"
+            for finding in findings
+        )
+        if first_mow_index is None or findings[0]['route_index'] <= first_mow_index:
+            result['success'] = False
+            result.setdefault('errors', []).append(
+                f'Winkelsperre des Reglers ({limit:.0f}°) greift schon vor der ersten '
+                f'gemähten Bahn: {detail}'
+            )
+            return
+        result.setdefault('warnings', []).append(
+            f'{len(findings)} Stelle(n) erreichen die Winkelsperre des Reglers '
+            f'({limit:.0f}°); dort stoppt die Fahrt: {detail} '
+            f'(aus geplanten Kursen gerechnet, real weicht der Kurs ab)'
+        )
 
     @staticmethod
     def _route_log_summary(segments):

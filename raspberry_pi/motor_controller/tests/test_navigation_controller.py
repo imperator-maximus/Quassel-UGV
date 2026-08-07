@@ -823,5 +823,80 @@ class NavigationControllerTests(unittest.TestCase):
             ], mode='goto', direction='reverse')
 
 
+class TrackStartHeadingErrorTests(unittest.TestCase):
+    """Die Vorabpruefung muss dieselbe Zahl liefern wie der laufende Regler.
+
+    Sonst prueft der Plan-Check gegen etwas anderes als das, woran die Fahrt
+    spaeter scheitert - genau der Fehler, den er verhindern soll.
+    """
+
+    LANE = [[10.0, 52.0], [10.001, 52.0]]
+
+    def _live_state(self, heading_deg, direction='forward'):
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+        controller.set_waypoints(
+            [{'latitude': coord[1], 'longitude': coord[0]} for coord in self.LANE],
+            mode='track',
+            direction=direction,
+        )
+        controller.start()
+        try:
+            controller.on_pose_update({
+                'latitude': self.LANE[0][1],
+                'longitude': self.LANE[0][0],
+                'heading_deg': heading_deg,
+            })
+            return controller.get_status()
+        finally:
+            controller.shutdown()
+
+    def test_matches_the_live_controller_on_both_sides_of_the_block(self):
+        # Dieselben Posen wie in
+        # test_track_heading_block_threshold_is_a_single_cutoff: 66 Grad
+        # bleibt knapp unter der lokal auf 25 gesetzten Grenze, 64 Grad
+        # darueber.
+        below = NavigationController.track_start_heading_error_deg(
+            self.LANE, 66.0, lookahead_m=NavConfig().track_lookahead_m
+        )
+        above = NavigationController.track_start_heading_error_deg(
+            self.LANE, 64.0, lookahead_m=NavConfig().track_lookahead_m
+        )
+
+        self.assertAlmostEqual(below, 24.0, delta=0.5)
+        self.assertAlmostEqual(above, 26.0, delta=0.5)
+        self.assertLess(abs(below), NavConfig().track_heading_block_deg)
+        self.assertGreaterEqual(abs(above), NavConfig().track_heading_block_deg)
+        self.assertNotEqual('heading_block', self._live_state(66.0)['state'])
+        self.assertEqual('heading_block', self._live_state(64.0)['state'])
+
+    def test_reverse_lane_is_measured_against_the_reversed_nose(self):
+        """Rueckwaerts zeigt die Nase entgegen der Bahnrichtung.
+
+        Ohne die 180-Grad-Drehung meldete die Pruefung genau bei den Posen
+        eine Sperre, die der Regler problemlos faehrt - und umgekehrt.
+        """
+        error = NavigationController.track_start_heading_error_deg(
+            self.LANE, 270.0, direction='reverse',
+            lookahead_m=NavConfig().track_lookahead_m,
+        )
+
+        self.assertAlmostEqual(error, 0.0, delta=0.5)
+        self.assertNotEqual(
+            'heading_block', self._live_state(270.0, direction='reverse')['state']
+        )
+
+    def test_degenerate_lane_reports_nothing_instead_of_a_bearing(self):
+        """Ohne Ausdehnung ist die Peilung Rauschen - keine erfundene Sperre."""
+        self.assertIsNone(
+            NavigationController.track_start_heading_error_deg([[10.0, 52.0]], 0.0)
+        )
+        self.assertIsNone(
+            NavigationController.track_start_heading_error_deg(
+                [[10.0, 52.0], [10.0, 52.0]], 0.0
+            )
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -846,6 +846,30 @@ class MowingPlanManager:
             return heading
         return fallback
 
+    def segment_start_headings(
+        self,
+        segments: List[Dict[str, Any]],
+        start_pose: Optional[Dict[str, Any]] = None,
+    ) -> List[Optional[float]]:
+        """Kurs, mit dem das Fahrzeug jedes kompilierte Segment beginnt.
+
+        Fuer das erste Segment ist das der gemessene Kurs aus der Pose, danach
+        der Kurs am Ende des Vorgaengers - dieselbe Kette, aus der
+        ``executable_segments`` die Fahrtrichtungen und Eindrehmanoever
+        ableitet.
+
+        Nur das erste Glied ist gemessen; alle weiteren sind modelliert. Real
+        weicht der Kurs davon ab (RTK-Rauschen, Regelverhalten, Untergrund),
+        deshalb taugt das Ergebnis fuer eine Vorabpruefung, nicht als Zusage
+        ueber das, was der Regler unterwegs tatsaechlich sieht.
+        """
+        heading = self._pose_heading(start_pose)
+        headings: List[Optional[float]] = []
+        for segment in segments:
+            headings.append(heading)
+            heading = self._segment_end_heading(segment, heading)
+        return headings
+
     def summarize_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "map_name": plan.get("map_name", plan.get("name")),
