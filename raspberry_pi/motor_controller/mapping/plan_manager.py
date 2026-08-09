@@ -174,6 +174,14 @@ class MowingPlanManager:
     TURN_IN_RESERVE_M = 2.0
     MIN_TURN_IN_M = 4.0
     MAX_TURN_IN_M = 20.0
+    # Wie viel Weg die umgedrehte Bahnfolge sparen muss, damit sie umgedreht
+    # wird. Eine Bahnreihenfolge ist nichts, was man fuer einen halben Meter
+    # anfasst; gemessen am Brunnen spart die Umkehrung 12,1 m (5,2 statt
+    # 17,3 m Anfahrt) und liegt damit weit ueber dieser Schwelle.
+    BLOCK_REVERSAL_GAIN_M = 2.0
+    # Ab wie vielen Bahnen ein Stueck Plan als eigener Block gilt. Zwei
+    # genuegen: weniger ist keine Reihenfolge, die man umdrehen koennte.
+    MIN_REORDERED_BLOCK_LANES = 2
 
     def __init__(self, maps_dir: str, pose_provider: Optional[Callable[[], Dict[str, Any]]] = None):
         self.maps_dir = Path(maps_dir).expanduser()
@@ -389,12 +397,13 @@ class MowingPlanManager:
             if source_limit < 1:
                 raise ValueError("max_source_segments muss mindestens 1 sein")
             sequence = sequence[:source_limit]
+        runtime_router = self._runtime_transition_router(plan)
+        sequence = self._blocks_entered_from_the_near_end(sequence, runtime_router)
         transitions_by_pair = {
             (item.get("from_segment_index"), item.get("to_segment_index")): item
             for item in plan.get("transitions") or []
         }
         executable: List[Dict[str, Any]] = []
-        runtime_router = self._runtime_transition_router(plan)
         current_end = None
         previous_index = None
         previous_segment = None
@@ -736,6 +745,172 @@ class MowingPlanManager:
             previous_segment = segment
 
         return executable
+
+    def _blocks_entered_from_the_near_end(
+        self,
+        sequence: List[Dict[str, Any]],
+        runtime_router,
+    ) -> List[Dict[str, Any]]:
+        """Bahnbloecke hinter einer Sperrzone am naeheren Ende beginnen.
+
+        Der Planer legt die Bahnreihenfolge fest, ohne zu wissen, dass eine
+        Sperrzone dazwischen liegt. Am Brunnen fuehrt das dazu, dass die
+        Bahnen links davon an ihrem *unteren* Ende begonnen werden: das
+        Fahrzeug kommt oben rechts an und muss einmal um den halben Brunnen
+        herum, um dort hinzukommen.
+
+        Dieser Weg ist nicht fahrbar. Er entsteht als ``around_sub`` und legt
+        sich damit an die Grenze der Sperrzone - 23 Stuetzpunkte auf 40 m
+        Umfang, Ecken von 43 bis 53 Grad, also Wenderadien von 1,4 bis 3,5 m.
+        Das Fahrzeug braucht fuer eine anhaltende Drehung rund 7 m. Real am
+        09.08. zweimal belegt: voller Lenkausschlag, der Kursfehler zur Bahn
+        schrumpft, die Querabweichung waechst trotzdem von 0,49 auf 0,91 m,
+        dann cross_track_stop. Im Simulator lief derselbe Uebergang - 13,8 m
+        auf 16 Stuetzpunkten - 207 s lang und wurde nicht fertig; die Bahn
+        danach begann mit 86,3 Grad Kursfehler.
+
+        Ein Bahnblock hat aber zwei Enden, und beide sind erlaubte Anfaenge -
+        welches genommen wird, entscheidet nur, in welcher Richtung er
+        abgearbeitet wird. Vom oberen Ende her kostet der Wechsel 5,2 statt
+        17,3 m und laeuft nordlich am Brunnen vorbei statt um ihn herum: drei
+        Stuetzpunkte, eine Ecke von 26 Grad.
+
+        Angefasst wird ausschliesslich die Reihenfolge *innerhalb* eines
+        Blocks, dessen Anfahrt eine Sperrzone umgehen muss. Steht keine
+        Sperrzone im Weg, bleibt der Plan Bahn fuer Bahn so, wie der Planer
+        ihn gelegt hat - die Wiesenroute enthaelt keinen einzigen solchen
+        Uebergang und aendert sich dadurch nicht.
+        """
+        if runtime_router is None or len(sequence) < 3:
+            return sequence
+        result = list(sequence)
+        index = 1
+        while index < len(result):
+            block_end = self._lane_block_behind_a_sub(runtime_router, result, index)
+            if block_end is None:
+                index += 1
+                continue
+            if self._block_is_shorter_reversed(runtime_router, result, index, block_end):
+                logging.getLogger(__name__).info(
+                    "Bahnen %r bis %r werden vom anderen Ende her gefahren - "
+                    "sonst fuehrt die Anfahrt um eine Sperrzone herum",
+                    result[index].get("segment_index"),
+                    result[block_end - 1].get("segment_index"),
+                )
+                result[index:block_end] = list(reversed(result[index:block_end]))
+            index = block_end
+        return result
+
+    def _lane_block_behind_a_sub(
+        self,
+        runtime_router,
+        sequence: List[Dict[str, Any]],
+        index: int,
+    ) -> Optional[int]:
+        """Ende des Blocks, dessen Anfahrt um eine Sperrzone herum fuehrt.
+
+        ``None``, wenn an dieser Stelle keine Sperrzone im Weg steht oder das
+        Stueck dahinter zu kurz ist, um eine Reihenfolge zu haben - dann gibt
+        es nichts umzuordnen.
+
+        Der Block reicht so weit, wie seine Bahnen ohne Umweg aneinander
+        haengen. Die erste Bahn, die selbst wieder um etwas herum angefahren
+        werden muss, gehoert schon zum naechsten Block und wird gesondert
+        betrachtet.
+        """
+        previous = sequence[index - 1]
+        segment = sequence[index]
+        if previous.get("type") != "rest_lane" or segment.get("type") != "rest_lane":
+            return None
+        entry = self._block_link(
+            runtime_router, self._coords(previous)[-1], self._coords(segment)[0]
+        )
+        if entry is None or entry[1] != "around_sub":
+            return None
+        end = index + 1
+        while end < len(sequence) and sequence[end].get("type") == "rest_lane":
+            step = self._block_link(
+                runtime_router,
+                self._coords(sequence[end - 1])[-1],
+                self._coords(sequence[end])[0],
+            )
+            if step is None or step[1] != "direct":
+                break
+            end += 1
+        if end - index < self.MIN_REORDERED_BLOCK_LANES:
+            return None
+        return end
+
+    def _block_is_shorter_reversed(
+        self,
+        runtime_router,
+        sequence: List[Dict[str, Any]],
+        index: int,
+        block_end: int,
+    ) -> bool:
+        """Lohnt es, den Block von hinten nach vorn zu fahren?
+
+        Gerechnet wird der ganze Preis, nicht nur die Anfahrt: ein umgedrehter
+        Block endet am anderen Ende, und der Weg von dort zum naechsten Block
+        gehoert dazu. Steht kein naechster Block mehr an - wie am Brunnen, wo
+        die linken Bahnen den Plan beschliessen -, kostet das Ende nichts.
+        """
+        arrival = self._coords(sequence[index - 1])[-1]
+        first = self._coords(sequence[index])[0]
+        last = self._coords(sequence[block_end - 1])[-1]
+        departure = (
+            self._coords(sequence[block_end])[0]
+            if block_end < len(sequence) else None
+        )
+        planned = self._block_cost_m(runtime_router, arrival, first, last, departure)
+        turned = self._block_cost_m(runtime_router, arrival, last, first, departure)
+        if turned is None:
+            return False
+        if planned is None:
+            # Der geplante Weg ist ueberhaupt nicht sicher zu routen, der
+            # andere schon - dann ist die Wahl keine Abwaegung mehr.
+            return True
+        return planned - turned > self.BLOCK_REVERSAL_GAIN_M
+
+    def _block_cost_m(
+        self,
+        runtime_router,
+        arrival: List[float],
+        entry: List[float],
+        exit_point: List[float],
+        departure: Optional[List[float]],
+    ) -> Optional[float]:
+        """Weg zum Block hin und von ihm weg, ohne die Bahnen selbst."""
+        link = self._block_link(runtime_router, arrival, entry)
+        if link is None:
+            return None
+        total = link[0]
+        if departure is not None:
+            onward = self._block_link(runtime_router, exit_point, departure)
+            if onward is None:
+                return None
+            total += onward[0]
+        return total
+
+    @staticmethod
+    def _block_link(
+        runtime_router,
+        from_coord: List[float],
+        to_coord: List[float],
+    ) -> Optional[Tuple[float, str]]:
+        """Laenge und Art des Wegs zwischen zwei Bahnenden.
+
+        ``None``, wenn es keinen sicheren Weg gibt.
+        """
+        routed = runtime_router.plan_between(
+            from_coord,
+            to_coord,
+            from_type="rest_lane",
+            to_type="rest_lane",
+        )
+        if not routed.safe:
+            return None
+        return float(routed.length_m), str(routed.route_kind)
 
     def _absorbs_short_rest_lane_transfer(
         self,

@@ -747,3 +747,160 @@ class EveryLaneCanBeAStartTests(unittest.TestCase):
                         # Ein Weg, der durch eine Sperrzone fuehrt, ist ein
                         # echter Grund - der gewaehlte Punkt selbst nie.
                         self.assertNotIn("Abfahrposition", str(exc))
+
+
+class LanesBehindTheWellTests(unittest.TestCase):
+    """Die Bahnen links vom Brunnen werden von oben angefahren.
+
+    Der Planer legt sie von unten nach oben, ohne zu wissen, dass der Brunnen
+    dazwischen liegt. Das Fahrzeug kommt aber oben rechts an, und der Weg zum
+    unteren Ende fuehrt einmal um den halben Brunnen herum: 19,2 m als
+    ``around_sub``, also entlang der Grenze der Sperrzone. Die hat 23
+    Stuetzpunkte auf 40 m Umfang mit Ecken von 43 bis 53 Grad - Wenderadien
+    von 1,4 bis 3,5 m, waehrend das Fahrzeug fuer eine anhaltende Drehung rund
+    7 m braucht.
+
+    Real am 09.08. zweimal belegt: voller Lenkausschlag (x = -0,900), der
+    Kursfehler zur Bahn schrumpft, die Querabweichung waechst trotzdem von
+    0,49 auf 0,91 m, dann cross_track_stop. Im Simulator lief derselbe
+    Uebergang 207 s lang und wurde nicht fertig.
+
+    Vom oberen Ende her sind es 5,2 m mit einer einzigen Ecke von 26 Grad, und
+    der Weg laeuft nordlich am Brunnen vorbei statt um ihn herum.
+    """
+
+    POSE = {
+        "gps": {"lat": 53.3325422, "lon": 11.0786776, "satellites": 25},
+        "heading": 183.7,
+        "heading_source": "dual_gnss",
+        "rtk_status": "RTK FIXED",
+    }
+    SELECTED_START = [11.0786425, 53.3324661]
+    # Die Bahnen links vom Brunnen, in der Reihenfolge des Planers.
+    FIRST_LANE_LEFT = 68
+    LAST_LANE_LEFT = 101
+
+    @classmethod
+    def setUpClass(cls):
+        cls.plan = json.loads(
+            (FIXTURES / "Brunnen.plan.json").read_text(encoding="utf-8")
+        )
+
+    def _route(self):
+        pose = dict(self.POSE, timestamp=time.time())
+        manager = MowingPlanManager(str(FIXTURES), lambda: pose)
+        route = manager.executable_segments(
+            self.plan,
+            start_segment_index=0,
+            start_coordinate=self.SELECTED_START,
+            start_pose=pose,
+        )
+        return manager, pose, route
+
+    def _left_lanes(self, route):
+        return [
+            segment for segment in route
+            if segment["type"] == "mow"
+            and self.FIRST_LANE_LEFT <= (segment.get("source_index") or -1)
+            <= self.LAST_LANE_LEFT
+        ]
+
+    def test_the_left_lanes_are_worked_from_the_top_down(self):
+        left = self._left_lanes(self._route()[2])
+
+        self.assertTrue(left, "Keine Bahn links vom Brunnen in der Route")
+        indices = [segment["source_index"] for segment in left]
+        self.assertEqual(
+            sorted(indices, reverse=True), indices,
+            "Der Block links vom Brunnen muss oben beginnen",
+        )
+
+    def test_no_route_wraps_around_the_well(self):
+        """Kein Uebergang legt sich mehr an die Grenze der Sperrzone.
+
+        Ein kurzes Stueck um die Nordseite herum bleibt uebrig - die gerade
+        Verbindung streift dort die Ecke der Sperrzone. Das ist etwas anderes
+        als eine Umfahrung: drei Stuetzpunkte statt sechzehn, eine Ecke statt
+        vierzehn.
+        """
+        route = self._route()[2]
+        around = [
+            segment for segment in route
+            if str(segment.get("route_kind", "")).endswith("around_sub")
+        ]
+
+        for segment in around:
+            with self.subTest(length=segment["length_m"]):
+                self.assertLess(
+                    segment["length_m"], 8.0,
+                    "So lang kann der Weg nur sein, wenn er um den Brunnen "
+                    "herum fuehrt",
+                )
+                self.assertLessEqual(
+                    self._sharpest_corner_deg(segment["coordinates"]),
+                    MowingPlanManager.MAX_TURN_STEP_DEG + 10.0,
+                    "Ein Weg entlang der Sperrzonengrenze knickt schaerfer, "
+                    "als das Fahrzeug fahren kann",
+                )
+
+    def test_nothing_starts_at_an_angle_the_controller_blocks(self):
+        """Dieselbe Zusage wie fuer die Wiese, jetzt auch fuer den Brunnen.
+
+        Vor der Umkehrung stand das Fahrzeug nach der Umfahrung 86,3 Grad quer
+        zur ersten Bahn links - der Regler haette dort gesperrt.
+        """
+        manager, pose, route = self._route()
+        headings = manager.segment_start_headings(route, start_pose=pose)
+
+        blocked = []
+        for index, (segment, heading) in enumerate(zip(route, headings)):
+            coords = segment.get("coordinates") or []
+            if heading is None or len(coords) < 2 or segment.get("mode") == "goto":
+                continue
+            nose = MowingPlanManager._edge_bearing_deg(coords[0], coords[1])
+            if nose is None:
+                continue
+            if segment.get("direction") == "reverse":
+                nose = (nose + 180.0) % 360.0
+            error = MowingPlanManager._angle_error_deg(nose, heading)
+            if error >= 45.0:
+                blocked.append((index, segment["type"], round(error, 1)))
+
+        self.assertEqual([], blocked)
+
+    def test_reordering_only_touches_blocks_behind_an_exclusion_zone(self):
+        """Ohne Sperrzone im Weg bleibt die Reihenfolge des Planers stehen.
+
+        Die festgenagelte Wiesenroute haengt daran: sie enthaelt keinen
+        einzigen Uebergang, der um etwas herum muss, und darf sich durch diese
+        Regel deshalb nicht um eine Bahn bewegen.
+        """
+        plan = json.loads((FIXTURES / "Wiese.plan.json").read_text(encoding="utf-8"))
+        manager = MowingPlanManager(str(FIXTURES))
+        sequence = [
+            item for item in plan["sequence"]
+            if len(item.get("coordinates") or []) >= 2
+        ]
+        router = MowingPlanManager._runtime_transition_router(plan)
+
+        reordered = manager._blocks_entered_from_the_near_end(sequence, router)
+
+        self.assertEqual(
+            [item.get("segment_index") for item in sequence],
+            [item.get("segment_index") for item in reordered],
+        )
+
+    @staticmethod
+    def _sharpest_corner_deg(coords):
+        worst = 0.0
+        previous = None
+        for first, second in zip(coords, coords[1:]):
+            bearing = MowingPlanManager._edge_bearing_deg(first, second)
+            if bearing is None:
+                continue
+            if previous is not None:
+                worst = max(
+                    worst, MowingPlanManager._angle_error_deg(bearing, previous)
+                )
+            previous = bearing
+        return worst
