@@ -35,7 +35,46 @@ class WebServer:
     - Light/Mower-Steuerung
     """
     
-    def __init__(self, config, motor_control, joystick_handler, can_handler, gpio_controller, navigation_controller=None, mapping_recorder=None, safety_monitor=None):
+    # Ausschlussliste fuer Push-Meldungen: nur diese Zustaende gelten als in
+    # Ordnung. Jeder andere ist eine Stoerung - auch einer, den es heute noch
+    # gar nicht gibt. Bewusst so herum: wer hier eine Ergaenzung vergisst,
+    # bekommt eine Meldung zu viel, nicht eine zu wenig.
+    QUIET_PLAN_STATES = frozenset({
+        'idle',           # nichts los
+        'running',        # faehrt
+        'rtk_wait',       # wartet auf Fix, loest sich meist in Sekunden
+        'completed',      # Plan durch
+        'paused',         # vom Benutzer pausiert
+        'stopped',        # vom Benutzer beendet
+        'stopping',       # beendet gerade
+        'shutdown',       # Dienst faehrt herunter
+        'cleared',        # Wegpunkte geleert
+    })
+
+    # Diese Zustaende meldet der Safety-Monitor selbst, mit der echten Ursache.
+    # Hier nochmal zu melden ergaebe zwei Toene fuer denselben Vorgang.
+    SAFETY_REPORTED_STATES = frozenset({'safety_stop'})
+
+    # Reine Kosmetik: Klartext fuer den Betreff. Diese Liste entscheidet nicht,
+    # ob gemeldet wird - fehlt ein Zustand hier, steht sein technischer Name im
+    # Betreff. Lieber unschoen als stumm.
+    PLAN_FAULT_TITLES = {
+        'error': 'Planfahrt abgebrochen',
+        'mower_fault': 'Mähdeck-Störung',
+        'nogo_stop': 'No-Go-Zone erreicht',
+        'rtk_lost': 'RTK-Fix verloren',
+        'safety_stop': 'Sicherheitsstopp',
+        'service_restart': 'Dienst neu gestartet',
+        'geofence': 'Geofence verlassen',
+        'divergence_stop': 'Fahrzeug läuft vom Wegpunkt weg',
+        'cross_track_stop': 'Zu weit neben der Bahn',
+        'heading_block': 'Kurs blockiert',
+        'align_stall': 'Ausrichtung kommt nicht voran',
+        'track_stall': 'Kein Bahnfortschritt',
+        'watchdog': 'Navigations-Watchdog',
+    }
+
+    def __init__(self, config, motor_control, joystick_handler, can_handler, gpio_controller, navigation_controller=None, mapping_recorder=None, safety_monitor=None, notifier=None):
         """
         Initialisiert Web-Server
 
@@ -45,6 +84,7 @@ class WebServer:
             joystick_handler: JoystickHandler-Instanz
             can_handler: CANHandler-Instanz
             gpio_controller: GPIOController-Instanz
+            notifier: optionaler PushNotifier fuer Stoerungsmeldungen
         """
         self.logger = logging.getLogger(__name__)
         self.config = config
@@ -55,7 +95,8 @@ class WebServer:
         self.navigation = navigation_controller
         self.mapping = mapping_recorder
         self.safety = safety_monitor
-        
+        self.notifier = notifier
+
         # Flask-App
         self.flask_available = FLASK_AVAILABLE
         self.socketio_available = SOCKETIO_AVAILABLE
@@ -285,6 +326,9 @@ class WebServer:
                 'plan_execution_status': self.get_plan_execution_status(),
                 'mapping_status': self.mapping.get_status() if self.mapping else {'state': 'disabled'},
                 'safety_status': self.safety.get_status() if self.safety else {},
+                'notification_status': (
+                    self.notifier.get_status() if self.notifier else {'enabled': False}
+                ),
                 'light_state': self.light_state,
                 # Der Schieberegler liest diesen Wert beim Laden. Bisher gab es
                 # ihn nur im WebSocket-Status, nicht ueber HTTP.
@@ -292,6 +336,29 @@ class WebServer:
                 **self._mower_api_status()
             })
         
+        @self.app.route('/api/notifications/test', methods=['POST'])
+        def api_notifications_test():
+            """Schickt eine Testmeldung, damit die Kette pruefbar ist.
+
+            Ohne das muesste man einen echten Fehler provozieren, um zu sehen,
+            ob Topic, Netz und Telefon zusammenpassen.
+            """
+            if not self.notifier or not getattr(self.notifier, 'enabled', False):
+                return jsonify({
+                    'success': False,
+                    'error': 'Push-Meldungen sind nicht aktiv',
+                    'status': self.notifier.get_status() if self.notifier else {},
+                }), 503
+            queued = self.notifier.info(
+                f'test:{time.time():.0f}',
+                'UGV: Testmeldung',
+                'Wenn du das liest, funktioniert der Meldeweg.',
+            )
+            return jsonify({
+                'success': bool(queued),
+                'status': self.notifier.get_status(),
+            })
+
         @self.app.route('/api/can/toggle', methods=['POST'])
         def api_can_toggle():
             """Schaltet CAN Ein/Aus"""
@@ -1255,9 +1322,14 @@ class WebServer:
         self._plan_pause_event.set()
         self._save_resume_state(reason=reason)
         with self._plan_lock:
-            if self._plan_status.get('running'):
+            previous_state = self._plan_status.get('state')
+            was_running = bool(self._plan_status.get('running'))
+            if was_running:
                 self._plan_status['state'] = reason
                 self._plan_status['running'] = False
+            last_error = self._plan_status.get('last_error')
+        if was_running:
+            self._notify_plan_transition(previous_state, reason, last_error)
         if self.navigation:
             self.navigation.stop(reason=reason)
 
@@ -1357,17 +1429,32 @@ class WebServer:
             self._active_plan_map_name = map_name
             if reason == 'paused':
                 self._plan_status['state'] = 'paused'
+                restart_message = None
             else:
                 self._plan_status['state'] = 'service_restart'
-                self._plan_status['last_error'] = (
+                restart_message = (
                     f'Dienst wurde neu gestartet; davor endete die Fahrt um '
                     f'{when} Uhr mit "{reason}"{where}. Fortsetzen ist moeglich.'
                 )
+                self._plan_status['last_error'] = restart_message
             self._plan_status['active_index'] = resume.get('active_index') or 0
         self.logger.warning(
             'Offener Plan nach Neustart gefunden: map=%s reason=%s Bahn=%r um %s',
             map_name, reason, lane, when,
         )
+        # Dieser Zustand entsteht ohne Zustandswechsel im laufenden Prozess -
+        # der Prozess ist ja neu. Deshalb hier direkt melden statt ueber
+        # _notify_plan_transition.
+        if restart_message and self.notifier:
+            try:
+                self.notifier.fault(
+                    'plan',
+                    'UGV: Dienst neu gestartet',
+                    restart_message,
+                )
+            except Exception as exc:  # noqa: BLE001 - Melden ist Nebensache
+                self.logger.error('Push-Meldung zum Neustart fehlgeschlagen: %s', exc)
+
     def get_plan_execution_status(self):
         self._restore_last_stop_reason()
         with self._plan_lock:
@@ -1473,10 +1560,51 @@ class WebServer:
 
     def _set_plan_status(self, **updates):
         with self._plan_lock:
+            previous_state = self._plan_status.get('state')
             self._plan_status.update(updates)
+            current_state = self._plan_status.get('state')
+            last_error = self._plan_status.get('last_error')
             should_save = bool(self._plan_status.get('running'))
+        # Ausserhalb des Locks: Melden darf den Planstatus nicht aufhalten.
+        self._notify_plan_transition(previous_state, current_state, last_error)
         if should_save:
             self._save_resume_state(reason='running')
+
+    def _notify_plan_transition(self, previous_state, current_state, last_error):
+        """Schickt eine Push-Meldung, wenn der Plan in einen Fehlerzustand geht.
+
+        Bewertet wird allein der Zustand, nicht das ``running``-Flag: sonst
+        bliebe ein Fehler stumm, der das Flag stehen laesst oder auftritt, bevor
+        der Plan ueberhaupt als laufend markiert ist. Und bewertet wird die
+        Flanke, nicht der Dauerzustand - ``_set_plan_status`` laeuft im
+        Sekundentakt (RTK-Countdown) und wuerde sonst dauernd dasselbe melden.
+        """
+        if not self.notifier or current_state == previous_state:
+            return
+        if current_state in self.SAFETY_REPORTED_STATES:
+            # Der Safety-Monitor meldet denselben Vorgang bereits, und zwar mit
+            # der tatsaechlichen Ursache statt nur "Plan gestoppt".
+            return
+        try:
+            if current_state not in self.QUIET_PLAN_STATES:
+                title = self.PLAN_FAULT_TITLES.get(
+                    current_state, f'Planfahrt gestoppt ({current_state})'
+                )
+                self.notifier.fault(
+                    'plan',
+                    f'UGV: {title}',
+                    last_error or f'Mähplan gestoppt: {current_state}',
+                )
+            elif current_state == 'running':
+                self.notifier.recovery(
+                    'plan', 'UGV: Fahrt läuft wieder', 'Der Mähplan wird fortgesetzt.'
+                )
+            elif current_state == 'completed':
+                self.notifier.recovery(
+                    'plan', 'UGV: Mähplan fertig', 'Der Plan wurde vollständig abgefahren.'
+                )
+        except Exception as exc:  # noqa: BLE001 - Melden ist Nebensache
+            self.logger.error('Push-Meldung zum Planstatus fehlgeschlagen: %s', exc)
 
     def _rtk_available(self):
         if not self.mapping:
@@ -2002,6 +2130,10 @@ class WebServer:
             return
         
         self.running = True
+        # Nicht warten, bis jemand die Oberflaeche oeffnet: Ein offener
+        # Wiederaufsetzpunkt bedeutet, dass die letzte Fahrt abgebrochen ist.
+        # Genau das soll die Push-Meldung ja mitteilen.
+        self._restore_last_stop_reason()
         self.server_thread = threading.Thread(target=self._run_server, daemon=True)
         self.server_thread.start()
 

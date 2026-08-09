@@ -61,6 +61,13 @@ class SafetyMonitor:
         self.system_stop_reason: Optional[str] = None
         self.system_stop_time: Optional[float] = None
         self._watchdog_started_monotonic = 0.0
+
+        # Push-Meldungen. Ein Sicherheitsstopp faerbt die Oberflaeche rot, aber
+        # niemand sieht hin, waehrend das Fahrzeug im Garten steht.
+        self.notifier = None
+        self._motion_hold_monotonic: Optional[float] = None
+        self._motion_hold_notified = False
+        self._motion_hold_notify_after_s = 20.0
         
         # Watchdog-Thread
         self.watchdog_running = False
@@ -151,6 +158,54 @@ class SafetyMonitor:
         """Setzt den Callback fuer die Fortsetzung nach Telemetrie-Rueckkehr."""
         self.motion_resume_callback = callback
 
+    def set_notifier(self, notifier):
+        """Setzt den PushNotifier fuer Stoerungsmeldungen aufs Telefon."""
+        self.notifier = notifier
+        self._motion_hold_notify_after_s = max(
+            0.0,
+            float(getattr(getattr(notifier, 'config', None), 'motion_hold_after_s', 20.0)),
+        )
+
+    def _check_motion_hold_duration(self):
+        """Meldet eine Fahrpause erst, wenn sie sich nicht von selbst loest.
+
+        Kurze Telemetrieluecken sind Alltag und erledigen sich in Sekunden.
+        Eine Pause, die anhaelt, ist dagegen ein stehendes Fahrzeug ohne
+        sichtbaren Fehler - genau der Fall, den man sonst erst Stunden spaeter
+        bemerkt.
+        """
+        if not self.notifier:
+            return
+        with self._lock:
+            started = self._motion_hold_monotonic
+            if (
+                not self.motion_hold_active
+                or started is None
+                or self._motion_hold_notified
+            ):
+                return
+            after_s = getattr(self, '_motion_hold_notify_after_s', 20.0)
+            elapsed = time.monotonic() - started
+            if elapsed < after_s:
+                return
+            self._motion_hold_notified = True
+            reason = self.motion_hold_reason or "Telemetrie unterbrochen"
+        self._notify(
+            'fault',
+            'motion_hold',
+            'UGV: Fahrpause hält an',
+            f"Seit {elapsed:.0f}s pausiert: {reason}",
+        )
+
+    def _notify(self, method: str, event: str, title: str, message: str) -> None:
+        """Ruft den Notifier so auf, dass er die Sicherheitslogik nie stoert."""
+        if not self.notifier:
+            return
+        try:
+            getattr(self.notifier, method)(event, title, message)
+        except Exception as exc:  # noqa: BLE001 - Melden ist Nebensache
+            self.logger.error("Push-Meldung fehlgeschlagen: %s", exc)
+
     def trigger_motion_hold(self, reason: str):
         """Sperrt Bewegung voruebergehend, ohne den Maehantrieb zu stoppen."""
         with self._lock:
@@ -159,6 +214,11 @@ class SafetyMonitor:
             self.motion_hold_active = True
             self.motion_hold_reason = str(reason)
             self.motion_hold_time = time.time()
+            # Noch nicht melden: Eine kurze WLAN-Luecke pausiert das Fahrzeug
+            # dauernd und loest sich meist in Sekunden. Erst der Watchdog
+            # entscheidet anhand der Dauer, ob daraus eine Stoerung wird.
+            self._motion_hold_monotonic = time.monotonic()
+            self._motion_hold_notified = False
 
         self.logger.warning("⏸️ FAHRPAUSE: %s", reason)
         if self.motion_hold_callback:
@@ -177,8 +237,18 @@ class SafetyMonitor:
             self.motion_hold_active = False
             self.motion_hold_reason = None
             self.motion_hold_time = None
+            self._motion_hold_monotonic = None
+            was_notified = self._motion_hold_notified
+            self._motion_hold_notified = False
             system_stop_latched = self.system_stop_latched
         self.logger.info("▶️ SensorHub-Telemetrie wieder da; Fahrpause freigegeben")
+        if was_notified:
+            self._notify(
+                'recovery',
+                'motion_hold',
+                'UGV: Fahrpause beendet',
+                'Die Telemetrie ist zurueck, das Fahrzeug darf wieder fahren.',
+            )
         if self.motion_resume_callback and not system_stop_latched:
             try:
                 self.motion_resume_callback()
@@ -195,6 +265,9 @@ class SafetyMonitor:
             self.system_stop_time = time.time()
 
         self.logger.critical("🚨 SYSTEM-SICHERHEITSSTOPP: %s", reason)
+        self._notify(
+            'fault', 'system_stop', 'UGV: Sicherheitsstopp', str(reason)
+        )
         if self.system_stop_callback:
             try:
                 self.system_stop_callback(str(reason))
@@ -225,6 +298,12 @@ class SafetyMonitor:
             self.system_stop_reason = None
             self.system_stop_time = None
         self.logger.info("✅ System-Sicherheitsstopp zurueckgesetzt")
+        self._notify(
+            'recovery',
+            'system_stop',
+            'UGV: Sicherheitsstopp entriegelt',
+            'Das CAN-Netz ist gesund, die Verriegelung wurde aufgehoben.',
+        )
         return True, None
     
     def trigger_emergency_stop(self):
@@ -351,7 +430,9 @@ class SafetyMonitor:
                             healthy, reason = False, f"CAN-Healthcheck fehlgeschlagen: {exc}"
                         if not healthy:
                             self.trigger_system_stop(reason or "CAN-Netz ausgefallen")
-                
+
+                self._check_motion_hold_duration()
+
                 # 100ms Wartezeit
                 interval_s = float(getattr(self.config, 'can_watchdog_interval_s', 0.1))
                 self._stop_event.wait(max(0.02, interval_s))

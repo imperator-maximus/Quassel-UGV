@@ -302,6 +302,37 @@ class WebConfig:
     auth_lockout_s: float = 60.0
 
 
+@dataclass
+class NotificationsConfig:
+    """Push-Meldungen ueber ntfy, wenn eine Stoerung das Fahrzeug stoppt.
+
+    Ein roter Zustand in der Weboberflaeche faellt nur auf, solange jemand
+    hinsieht. Topic und Token gehoeren nicht in die YAML, sondern in
+    UGV_NTFY_TOPIC bzw. UGV_NTFY_TOKEN: bei ntfy.sh ist der Topic-Name das
+    einzige Geheimnis, das fremde Mitleser fernhaelt.
+    """
+    enabled: bool = False
+    server: str = 'https://ntfy.sh'
+    topic: str = ''
+    token: str = ''
+    # Beim Antippen der Meldung zu oeffnen, z.B. die eigene Weboberflaeche.
+    click_url: str = ''
+    request_timeout_s: float = 5.0
+    # Dieselbe Stoerung nicht oefter melden. Ein Fehler, den man einmal
+    # kennt, muss nicht im Minutentakt wiederholt werden.
+    min_interval_s: float = 120.0
+    # Solange wird eine unzustellbare Meldung weiter versucht. Danach ist sie
+    # ueberholt: das Fahrzeug steht dann schon lange sichtbar still.
+    retry_max_age_s: float = 900.0
+    queue_size: int = 32
+    fault_priority: int = 5  # ntfy 1-5; 5 klingelt auch im Stummmodus
+    recovery_priority: int = 3
+    notify_recovery: bool = True
+    # Eine kurze Telemetrieluecke pausiert das Fahrzeug staendig und loest
+    # sich meist in Sekunden. Erst eine Pause ueber diese Dauer ist eine
+    # Stoerung, die jemand erfahren muss.
+    motion_hold_after_s: float = 20.0
+
 
 @dataclass
 class LoggingConfig:
@@ -327,6 +358,7 @@ class Config:
     navigation: NavigationConfig = field(default_factory=NavigationConfig)
     mapping: MappingConfig = field(default_factory=MappingConfig)
     web: WebConfig = field(default_factory=WebConfig)
+    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     
     quiet: bool = False
@@ -375,6 +407,8 @@ class Config:
             config.mapping = MappingConfig(**data['mapping'])
         if 'web' in data:
             config.web = WebConfig(**data['web'])
+        if 'notifications' in data:
+            config.notifications = NotificationsConfig(**data['notifications'])
         if 'logging' in data:
             config.logging = LoggingConfig(**data['logging'])
         
@@ -416,6 +450,21 @@ class Config:
         hub_user = os.getenv('SENSOR_HUB_TELEMETRY_USER')
         if hub_user:
             self.sensor_hub.auth_username = hub_user
+
+        # Bei ntfy.sh darf jeder mitlesen und mitschreiben, der den Topic-Namen
+        # kennt. Er ist damit ein Geheimnis und gehoert wie die Passwoerter in
+        # die Umgebung, nicht in eine kopierbare YAML.
+        ntfy_topic = os.getenv('UGV_NTFY_TOPIC')
+        if ntfy_topic:
+            self.notifications.topic = ntfy_topic
+
+        ntfy_token = os.getenv('UGV_NTFY_TOKEN')
+        if ntfy_token:
+            self.notifications.token = ntfy_token
+
+        ntfy_server = os.getenv('UGV_NTFY_SERVER')
+        if ntfy_server:
+            self.notifications.server = ntfy_server
 
 
     def to_yaml(self, filepath: str):
@@ -560,6 +609,21 @@ class Config:
                 'allowed_origins': list(self.web.allowed_origins),
                 'auth_max_failures': self.web.auth_max_failures,
                 'auth_lockout_s': self.web.auth_lockout_s
+            },
+            # topic und token bleiben draussen: bei ntfy.sh ist der Topic-Name
+            # das Geheimnis. Beide kommen aus der Umgebung.
+            'notifications': {
+                'enabled': self.notifications.enabled,
+                'server': self.notifications.server,
+                'click_url': self.notifications.click_url,
+                'request_timeout_s': self.notifications.request_timeout_s,
+                'min_interval_s': self.notifications.min_interval_s,
+                'retry_max_age_s': self.notifications.retry_max_age_s,
+                'queue_size': self.notifications.queue_size,
+                'fault_priority': self.notifications.fault_priority,
+                'recovery_priority': self.notifications.recovery_priority,
+                'notify_recovery': self.notifications.notify_recovery,
+                'motion_hold_after_s': self.notifications.motion_hold_after_s
             },
             'logging': {
                 'level': self.logging.level,

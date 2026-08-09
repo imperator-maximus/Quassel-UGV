@@ -207,6 +207,34 @@ web:
   auth_max_failures: 8     # danach sperrt die IP für auth_lockout_s
   auth_lockout_s: 60.0
 
+# Push-Meldungen bei Stoerungen (ntfy)
+#
+# Bleibt das Fahrzeug wegen eines Fehlers stehen, faerbt die Oberflaeche das
+# rot - aber nur, solange jemand hinsieht. Diese Meldungen gehen aufs Telefon.
+#
+# Topic und Token stehen NICHT hier, sondern in der Umgebung des Dienstes:
+#
+#   UGV_NTFY_TOPIC   Pflicht; bei ntfy.sh ist der Topic-Name das einzige
+#                    Geheimnis - einen zufaelligen Namen waehlen, keinen
+#                    ratbaren wie "ugv-fehler"
+#   UGV_NTFY_TOKEN   optional, fuer ein geschuetztes oder eigenes ntfy
+#   UGV_NTFY_SERVER  optional, ueberschreibt server
+#
+# Auf dem Telefon die ntfy-App installieren und dasselbe Topic abonnieren.
+# Ein Testruf ohne echten Fehler:
+#   curl -u ugv:PASSWORT -X POST http://<ugv>/api/notifications/test
+notifications:
+  enabled: false           # true schaltet die Meldungen ein
+  server: https://ntfy.sh
+  click_url: ''            # beim Antippen zu oeffnen, z.B. die Weboberflaeche
+  request_timeout_s: 5.0
+  min_interval_s: 120.0    # dieselbe Stoerung nicht oefter melden
+  retry_max_age_s: 900.0   # so lange wird eine Meldung weiter versucht
+  queue_size: 32
+  fault_priority: 5        # ntfy 1-5; 5 klingelt auch im Stummmodus
+  recovery_priority: 3
+  notify_recovery: true    # Entwarnung, wenn die Fahrt weitergeht
+  motion_hold_after_s: 20.0 # erst so lange Fahrpause gilt als Stoerung
 
 # Logging-Konfiguration
 logging:

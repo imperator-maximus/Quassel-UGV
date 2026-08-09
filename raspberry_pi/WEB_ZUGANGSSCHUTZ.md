@@ -43,6 +43,14 @@ UGV_WEB_PASSWORD=hier-ein-langes-passwort
 UGV_WEB_SECRET_KEY=hier-ein-zufaelliger-wert
 SENSOR_HUB_TELEMETRY_USER=smart
 SENSOR_HUB_TELEMETRY_PASSWORD=passwort-des-sensorhubs
+UGV_NTFY_TOPIC=zufaelliger-topic-name
+```
+
+`UGV_NTFY_TOPIC` ist das Ziel der Störungsmeldungen. Bei `ntfy.sh` kann jeder
+mitlesen und mitschreiben, der den Topic-Namen kennt — er gehört deshalb hierher
+und nicht in die `config.yaml`. Details in
+[motor_controller/README.md](motor_controller/README.md#-push-meldungen-bei-störungen).
+
 Rechte setzen und übernehmen:
 
 ```bash

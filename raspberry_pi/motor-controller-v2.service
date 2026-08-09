@@ -11,7 +11,8 @@ WorkingDirectory=/home/nicolay
 Environment="PYTHONUNBUFFERED=1"
 Environment="PYTHONPATH=/home/nicolay/.venvs/odrive056/lib/python3.11/site-packages"
 
-# Zugangsdaten der Weboberflaeche und des SensorHub-Telemetrieabrufs.
+# Zugangsdaten der Weboberflaeche, des SensorHub-Telemetrieabrufs und das
+# ntfy-Topic fuer Stoerungsmeldungen (UGV_NTFY_TOPIC).
 # Liegt mit Modus 600 auf dem Geraet und gehoert nicht ins Repository, siehe
 # raspberry_pi/WEB_ZUGANGSSCHUTZ.md. Das fuehrende '-' laesst den Dienst auch
 # ohne die Datei starten: Der Webserver antwortet dann mit 503, waehrend

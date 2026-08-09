@@ -137,6 +137,65 @@ dieser Datei - siehe [WEB_ZUGANGSSCHUTZ.md](../WEB_ZUGANGSSCHUTZ.md).
 - `POST /api/mapping/maps/<name>/plan/simulate` - einen Plan ohne Hardware mit
   dem produktiven Navigationscontroller und einem kinematischen Fahrzeugmodell
   simulieren
+- `POST /api/notifications/test` - Testmeldung an das konfigurierte ntfy-Topic
+
+## 📲 Push-Meldungen bei Störungen
+
+Bleibt das Fahrzeug wegen eines Fehlers stehen, färbt die Oberfläche den
+Zustand rot - das hilft aber nur, solange jemand hinsieht. Optional geht
+dieselbe Information als Push-Nachricht aufs Telefon.
+
+### Einrichten
+
+1. Auf dem Telefon die **ntfy**-App installieren (Android/iOS).
+2. Einen zufälligen Topic-Namen wählen. Bei `ntfy.sh` darf jeder mitlesen und
+   mitschreiben, der den Namen kennt - er ist damit ein Passwort. Zum Beispiel:
+
+   ```bash
+   head -c 18 /dev/urandom | base64 | tr -d '/+=' 
+   ```
+
+3. Denselben Namen in der App abonnieren und auf dem Fahrzeug in
+   `/etc/ugv-web.env` eintragen:
+
+   ```
+   UGV_NTFY_TOPIC=<der gewählte Name>
+   ```
+
+4. In `config.yaml` unter `notifications:` `enabled: true` setzen, Dienst neu
+   starten und die Kette prüfen:
+
+   ```bash
+   curl -u ugv:PASSWORT -X POST http://<ugv>/api/notifications/test
+   ```
+
+Für ein eigenes oder zugangsgeschütztes ntfy zusätzlich `UGV_NTFY_SERVER` und
+`UGV_NTFY_TOKEN` setzen.
+
+### Was gemeldet wird
+
+- **Sicherheitsstopp** (`SafetyMonitor`): Sicherheitsschaltleiste, CAN-Ausfall,
+  ODrive-Fehler, SensorHub-Timeout - mit der tatsächlichen Ursache.
+- **Fahrpause**, die länger als `motion_hold_after_s` anhält. Kurze
+  Telemetrielücken lösen sich in Sekunden und bleiben still.
+- **Abbruch einer Planfahrt**: `mower_fault`, `nogo_stop`, `rtk_lost`,
+  `heading_block`, `track_stall`, `geofence`, Navigations-Watchdog und jeder
+  weitere Zustand, der nicht ausdrücklich als gewollt gilt. Bewusst pausierte,
+  gestoppte oder fertige Pläne lösen nichts aus.
+- **Dienst-Neustart** mit offenem Wiederaufsetzpunkt - der Fall, in dem das
+  System nach einem Absturz sonst stumm dasteht.
+- **Entwarnung**, wenn die Fahrt weitergeht, der Plan fertig wird oder ein
+  Sicherheitsstopp entriegelt wird (`notify_recovery: false` schaltet das ab).
+
+### Eigenschaften
+
+Gemeldet wird die Flanke, nicht der Zustand: derselbe Fehler kommt einmal, nicht
+im Sekundentakt. Das Senden läuft in einem eigenen Thread mit Warteschlange und
+Wiederholversuchen bis `retry_max_age_s` - ein Fahrzeug, das gerade wegen einer
+schlechten Funkverbindung stehenbleibt, meldet sich also nach, sobald das Netz
+wieder da ist. Jede Meldung trägt die Uhrzeit des Ereignisses im Text. Fehler
+des Meldewegs bleiben im Journal und erreichen nie die Steuer- oder
+Sicherheitsthreads.
 
 ## Offline-Fahrtsimulation
 

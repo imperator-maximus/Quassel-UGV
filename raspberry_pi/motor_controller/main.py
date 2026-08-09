@@ -21,6 +21,7 @@ from .hardware.odrive_mower import ODriveMowerController
 from .hardware.odrive_usb_mower import ODriveUSBMowerController
 from .hardware.safety_monitor import SafetyMonitor
 from .communication.can_handler import CANHandler
+from .communication.push_notifier import PushNotifier
 from .communication.sensor_hub_http import SensorHubHttpClient
 from .control.motor_control import MotorControl
 from .control.joystick_handler import JoystickHandler
@@ -61,6 +62,7 @@ class MotorControllerApp:
         self.navigation: NavigationController = None
         self.mapping: MappingRecorder = None
         self.web: WebServer = None
+        self.notifier: PushNotifier = None
         self._sensor_pause_resume_mode = None
         self._sensor_recovery_started_monotonic = None
         
@@ -142,9 +144,14 @@ class MotorControllerApp:
                 self.gpio
             )
             
+            # Push-Meldungen. Muss vor dem Safety-Monitor stehen, damit dessen
+            # allererster Stopp bereits gemeldet werden kann.
+            self.notifier = PushNotifier(self.config.notifications)
+
             # Safety-Monitor
             self.logger.info("Initialisiere Safety-Monitor...")
             self.safety = SafetyMonitor(self.config.safety, self.gpio)
+            self.safety.set_notifier(self.notifier)
             
             # CAN-Handler
             self.logger.info("Initialisiere CAN-Handler...")
@@ -247,6 +254,7 @@ class MotorControllerApp:
                     self.navigation,
                     self.mapping,
                     self.safety,
+                    notifier=self.notifier,
                 )
                 # Hardware-Referenzen setzen
                 self.web.set_hardware_refs(
@@ -524,6 +532,10 @@ class MotorControllerApp:
         self.logger.info("Starte Komponenten...")
         
         try:
+            # Zuerst der Meldeweg: Was beim Start schiefgeht, soll ankommen.
+            if self.notifier:
+                self.notifier.start()
+
             # CAN-Reader starten
             if self.can:
                 self.can.start_reader()
@@ -577,6 +589,19 @@ class MotorControllerApp:
         Ohne diesen Schritt bliebe der Fahrantrieb auf dem letzten PWM-Wert
         stehen, und der Mähplan haette keinen Wiederaufsetzpunkt.
         """
+        # Dieser Weg geht am SafetyMonitor vorbei und meldet deshalb selbst.
+        # Ohne das bliebe genau der Fall stumm, der den Prozess beendet: das
+        # Fahrzeug steht, die Messer sind aus, und die naechste Nachricht kaeme
+        # erst nach dem Neustart (real 08.08., 21:06 und 21:18).
+        if self.notifier:
+            try:
+                self.notifier.fault(
+                    'system_stop',
+                    'UGV: ODrive-USB hängt',
+                    f'{reason} - Dienst wird neu gestartet.',
+                )
+            except Exception as exc:  # noqa: BLE001 - Melden ist Nebensache
+                self.logger.error("Push-Meldung zum Transporthaenger: %s", exc)
         try:
             self._system_safety_stop(f"ODrive USB haengt: {reason}")
         except Exception as exc:
@@ -586,6 +611,10 @@ class MotorControllerApp:
                 self.motor.emergency_stop()
         except Exception as exc:
             self.logger.error("Fahrantrieb-Notstopp fehlgeschlagen: %s", exc)
+        # Gleich folgt os._exit; ohne diesen Halt ginge genau die Meldung
+        # verloren, die den Neustart erklaert.
+        if self.notifier:
+            self.notifier.flush(timeout_s=3.0)
         time.sleep(0.2)
 
     def _odrive_usb_hang_reason(self) -> str | None:
@@ -676,7 +705,12 @@ class MotorControllerApp:
             if self.gpio:
                 self.logger.info("GPIO-Controller cleanup...")
                 self.gpio.cleanup()
-            
+
+            # Als Letztes: offene Meldungen sollen den Shutdown ueberleben.
+            if self.notifier:
+                self.notifier.flush(timeout_s=3.0)
+                self.notifier.stop()
+
             self.logger.info("=" * 60)
             self.logger.info("✅ Shutdown abgeschlossen")
             self.logger.info("=" * 60)
