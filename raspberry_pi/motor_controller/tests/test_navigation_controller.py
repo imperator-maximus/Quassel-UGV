@@ -27,6 +27,7 @@ class NavConfig:
     track_stall_timeout_s: float = 10.0
     track_stall_min_progress_m: float = 0.15
     min_inner_wheel_speed: float = 0.15
+    turn_gain_left: float = 1.0
 
 
 @dataclass
@@ -126,6 +127,68 @@ class NavigationControllerTests(unittest.TestCase):
         self.assertLessEqual(abs(x), 0.30)
         self.assertLessEqual(abs(y), 0.30)
         self.assertFalse(use_ramping)
+
+    def _command_at_heading(self, config, heading_deg: float):
+        """Ein Kommando fuer einen weit entfernten Wegpunkt im Osten."""
+        motor = FakeMotor()
+        controller = NavigationController(motor, config)
+        controller.set_waypoints([{'latitude': 52.0, 'longitude': 10.0002}])
+        controller.start()
+        try:
+            controller.on_pose_update({
+                'latitude': 52.0, 'longitude': 10.0, 'heading_deg': heading_deg,
+            })
+            return motor.commands[-1]
+        finally:
+            controller.shutdown()
+
+    def test_turn_gain_left_only_strengthens_the_weak_side(self):
+        """Der Antrieb lenkt nach links schwaecher als nach rechts, ohne dass
+        eine Rueckmeldung das verraet. ``turn_gain_left`` haelt genau diesen
+        Unterschied vor - und nur ihn: rechts bleibt unveraendert."""
+        config = NavConfig(turn_gain_left=2.0, max_joystick=0.30)
+        # WP im Osten (bearing 90°). heading=95° → Fehler -5° (links),
+        # heading=85° → Fehler +5° (rechts). turn_kp=0.02 → |turn|=0.10.
+        left_x, _, _ = self._command_at_heading(config, 95.0)
+        right_x, _, _ = self._command_at_heading(config, 85.0)
+
+        self.assertAlmostEqual(right_x, 0.10, delta=0.005)
+        self.assertAlmostEqual(left_x, -0.20, delta=0.005)
+
+    def test_turn_gain_left_keeps_inner_wheel_rolling_forward(self):
+        """Der Vorhalt greift vor der Innen-Rad-Garantie, damit deren
+        PWM-Rechnung mit dem Wert arbeitet, der wirklich rausgeht. Sonst
+        liefe das kurveninnere Rad unbemerkt rueckwaerts."""
+        x, y, _ = self._command_at_heading(
+            NavConfig(turn_gain_left=2.0, max_joystick=0.30, min_inner_wheel_speed=0.50),
+            95.0,
+        )
+
+        self.assertLess(x, 0.0)
+        inner_pwm = 1500 + y * 500.0 - abs(x) * 300.0
+        self.assertGreater(inner_pwm, 1500.0,
+                           f'Innen-Rad muss vorwärts rollen, ist {inner_pwm} μs')
+
+    def test_turn_gain_left_saturates_at_full_joystick_on_pivot(self):
+        """Beim Pivot steht der Drehanteil schon bei limit/ratio. Mit Vorhalt
+        darf daraus kein Kommando jenseits des Knueppelanschlags werden."""
+        # heading=180° (S), WP Osten → Fehler -90° → Pivot nach links.
+        # pivot_turn = 0.30/0.6 = 0.50, mal 2.0 → auf 1.0 begrenzt.
+        x, y, _ = self._command_at_heading(
+            NavConfig(turn_gain_left=2.0, max_joystick=0.30), 180.0,
+        )
+
+        self.assertAlmostEqual(x, -1.0, delta=0.001)
+        self.assertEqual(y, 0.0)
+
+    def test_max_joystick_is_capped_by_the_absolute_backstop(self):
+        """``max_joystick`` ist der Betriebspunkt, nicht die letzte Grenze:
+        eine verrutschte Konfiguration darf das Fahrzeug nicht autonom auf
+        Vollgas schicken."""
+        # heading=90° = direkt auf den WP → kein Drehanteil, y am Deckel.
+        _, y, _ = self._command_at_heading(NavConfig(max_joystick=0.90), 90.0)
+
+        self.assertAlmostEqual(y, NavigationController.MAX_AUTONOMOUS_JOYSTICK, delta=0.001)
 
     def test_inner_wheel_rolls_forward_at_moderate_heading_error(self):
         """Innen-Rad-Garantie: bei moderatem Heading-Fehler (hier 30°) muss

@@ -133,7 +133,17 @@ navigation:
   rtk_resume_stable_s: 2.0     # So lange muss RTK FIXED halten, bevor es weitergeht
   rtk_lost_timeout_s: 90.0     # Erst danach Plan-Abbruch; davor nur anhalten und warten
   geofence_radius_m: 50.0      # Um ersten Wegpunkt
-  max_joystick: 0.30           # Max. 30% Joystick-Skala
+  max_joystick: 0.45           # Max. 45% Joystick-Skala. Deckelt nicht nur die
+                               # Fahrt: ueber die Innen-Rad-Garantie haengt auch
+                               # der Lenkanteil daran. Bei 0.30 blieb er unter
+                               # der Losbrechgrenze (Handtest 09.08.: 60 us kein
+                               # Ausschlag, 150 us gerade eben nach links).
+  turn_gain_left: 2.0          # Vorhalt fuer die Links/Rechts-Asymmetrie des
+                               # Antriebs (gemessen 09.08.: rechts wirkt etwa
+                               # doppelt so stark, 0.42 Grad/s Rechtszug bei
+                               # neutralem Lenkbefehl). 1.0 = kein Vorhalt.
+                               # Fahrzeugspezifisch - nach einer Reparatur am
+                               # Antrieb neu bestimmen.
   acceptance_radius_m: 0.25    # Wegpunkt erreicht (Skid-Steer-Limit + RTK-Rauschen)
   slowdown_radius_m: 0.5       # Vor Ziel abbremsen, Throttle skaliert linear bis 0
   turn_kp: 0.02                # Joystick-X pro Grad Heading-Fehler

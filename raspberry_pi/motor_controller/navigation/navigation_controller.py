@@ -27,6 +27,12 @@ class Waypoint:
 class NavigationController:
     """Einfacher Bearing-Hold-Controller für Wegpunktnavigation."""
 
+    # Letzter Riegel gegen eine verrutschte Konfiguration - nicht der
+    # Betriebspunkt, der steht in ``max_joystick``. Lag bei 0.30 und war damit
+    # zugleich die stillschweigende Obergrenze der Lenkautoritaet, weil die
+    # Innen-Rad-Garantie den Drehanteil aus demselben Budget bedient.
+    MAX_AUTONOMOUS_JOYSTICK = 0.50
+
     def __init__(self, motor_control, config, safety_monitor=None):
         self.logger = logging.getLogger(__name__)
         self.motor = motor_control
@@ -338,6 +344,7 @@ class NavigationController:
                     'watchdog_timeout_s': self.config.watchdog_timeout_s,
                     'geofence_radius_m': self.config.geofence_radius_m,
                     'max_joystick': self.config.max_joystick,
+                    'turn_gain_left': float(getattr(self.config, 'turn_gain_left', 1.0)),
                     'pivot_joystick': self._pivot_turn_level(),
                     'track_lookahead_m': self._track_lookahead_m,
                     'pivot_heading_threshold_deg': self._pivot_heading_threshold_deg(),
@@ -671,7 +678,7 @@ class NavigationController:
             # ausgerichtet wird, darf der Drehanteil deshalb nicht unter die
             # Losbrechgrenze fallen - lieber die letzten Grad zuegig drehen
             # als endlos mit wirkungslosem Kommando auf der Narbe zu stehen.
-            limit = min(0.30, max(0.0, float(self.config.max_joystick)))
+            limit = self._speed_limit()
             floor = min(limit, self._track_align_min_turn())
             magnitude = min(
                 limit,
@@ -684,7 +691,9 @@ class NavigationController:
             # das Fahrzeug den noetigen Wert selbst und die Narbe sieht nur
             # so viel Drehmoment, wie tatsaechlich gebraucht wird.
             magnitude = min(limit, magnitude + (limit - magnitude) * self._align_escalation(now))
-            turn = math.copysign(magnitude, path_error) if path_error else 0.0
+            turn = self._turn_gain(
+                math.copysign(magnitude, path_error) if path_error else 0.0
+            )
             rolling = min(limit, abs(turn) * self._turn_to_forward_ratio)
             longitudinal = -rolling if direction == 'reverse' else rolling
             self._send_command(turn, longitudinal)
@@ -901,13 +910,17 @@ class NavigationController:
         return math.hypot(b[0] - a[0], b[1] - a[1])
 
     def _calculate_command(self, heading_error: float, distance: float, direction: str = 'forward') -> Tuple[float, float]:
-        limit = min(0.30, max(0.0, float(self.config.max_joystick)))
+        limit = self._speed_limit()
         distance_factor = self._clamp(distance / float(self.config.slowdown_radius_m), 0.0, 1.0)
 
         # Heading-proportionaler Turn, in der Slowdown-Zone proportional
         # heruntergeskaliert (sonst würde die Innen-Rad-Garantie unten den
         # Vorwärts-Anteil am WP wieder hochziehen und das Fahrzeug rasen lassen).
+        # Der Asymmetrie-Vorhalt kommt danach und darf ``limit`` auf der
+        # schwachen Seite bewusst ueberschreiten - begrenzt wird der Drehanteil
+        # ohnehin erst von der Innen-Rad-Garantie weiter unten.
         turn = self._clamp(heading_error * float(self.config.turn_kp), -limit, limit) * distance_factor
+        turn = self._turn_gain(turn)
         heading_factor = max(0.0, 1.0 - abs(heading_error) / 90.0)
         forward = limit * heading_factor * distance_factor
 
@@ -924,7 +937,7 @@ class NavigationController:
             # der Totzone. Skaliere reine Drehungen so, dass beide Raeder
             # denselben absoluten PWM-Offset wie 30 % Vorwaertsfahrt erhalten.
             pivot_turn = self._pivot_turn_level()
-            return math.copysign(pivot_turn, turn or heading_error), 0.0
+            return self._turn_gain(math.copysign(pivot_turn, turn or heading_error)), 0.0
 
         # Innen-Rad-Garantie (anti-Pivot): das kurveninnere Skid-Rad darf
         # nicht rückwärts laufen (Scrubbing). PWM-Mix:
@@ -965,8 +978,30 @@ class NavigationController:
             89.0,
         )
 
+    def _speed_limit(self) -> float:
+        return min(
+            self.MAX_AUTONOMOUS_JOYSTICK,
+            max(0.0, float(self.config.max_joystick)),
+        )
+
+    def _turn_gain(self, turn: float) -> float:
+        """Haelt die gemessene Links/Rechts-Asymmetrie des Antriebs vor.
+
+        Der Antrieb hat keine Rueckmeldung, die Software kann also nicht
+        merken, dass derselbe Zahlenwert nach links weniger bewirkt als nach
+        rechts (gemessen 09.08.: Rechtsbefehl etwa doppelt so wirksam, dazu
+        0.42 Grad/s Rechtszug bei neutralem Lenkbefehl). Der Faktor liegt
+        deshalb vor der Innen-Rad-Garantie: deren PWM-Rechnung soll mit dem
+        Wert arbeiten, der tatsaechlich an die Motoren geht, sonst laeuft das
+        Innenrad unbemerkt rueckwaerts.
+        """
+        if turn >= 0.0:
+            return turn
+        gain = max(0.0, float(getattr(self.config, 'turn_gain_left', 1.0)))
+        return self._clamp(turn * gain, -1.0, 0.0)
+
     def _pivot_turn_level(self) -> float:
-        limit = min(0.30, max(0.0, float(self.config.max_joystick)))
+        limit = self._speed_limit()
         ratio = max(0.01, float(self._turn_to_forward_ratio))
         return self._clamp(limit / ratio, limit, 1.0)
 

@@ -191,7 +191,15 @@ class NavigationConfig:
     rtk_resume_stable_s: float = 2.0
     rtk_lost_timeout_s: float = 90.0
     geofence_radius_m: float = 50.0
-    max_joystick: float = 0.30
+    # 0.30 reichte fuer die Bahnverfolgung nicht: der Deckel begrenzt nicht
+    # nur die Fahrt, sondern ueber die Innen-Rad-Garantie auch den Lenkanteil
+    # auf |x| <= max_joystick·(1 - min_inner_wheel_speed·heading_factor)/ratio,
+    # bei 0.30/0.50 also rund 0.30 = 90 us PWM-Unterschied. Im Handtest vom
+    # 09.08. drehte das Fahrzeug bei 60 us gar nicht und bei 150 us nach links
+    # gerade eben - die Autonomie lenkte also dauerhaft unterhalb der
+    # Losbrechgrenze. 0.45 hebt den Lenkanteil auf rund 138 us, ohne die
+    # Innen-Rad-Garantie aufzugeben (vgl. min_inner_wheel_speed).
+    max_joystick: float = 0.45
     # A 25 cm target circle was too tight for a heavy skid-steer mower: in a
     # real run it missed by 1 cm, overshot, and then pivoted back toward the
     # now lateral target. 40 cm still preserves RTK path accuracy while
@@ -262,6 +270,15 @@ class NavigationConfig:
     # pivotieren, schont Rasen. Skaliert in der Slowdown-Zone proportional
     # mit ``distance_factor``.
     min_inner_wheel_speed: float = 0.50
+    # Der Antrieb laeuft ueber PWM ohne jede Rueckmeldung: dass ein Links-
+    # befehl schwaecher wirkt als der gleich grosse Rechtsbefehl, kann die
+    # Software nicht messen, sie kann es nur vorhalten. Gemessen am 09.08.:
+    # bei neutralem Lenkbefehl zieht das Fahrzeug vorwaerts mit 0.42 Grad/s
+    # nach rechts, und ein Rechtsbefehl wirkt etwa doppelt so stark wie ein
+    # gleich grosser Linksbefehl. 1.0 = keine Kompensation; der Wert gehoert
+    # ins Fahrzeug-YAML, nicht in den Default, weil er die Eigenheit eines
+    # bestimmten Antriebs beschreibt.
+    turn_gain_left: float = 1.0
 
 
 @dataclass
@@ -586,7 +603,8 @@ class Config:
                 'track_heading_block_deg': self.navigation.track_heading_block_deg,
                 'track_stall_timeout_s': self.navigation.track_stall_timeout_s,
                 'track_stall_min_progress_m': self.navigation.track_stall_min_progress_m,
-                'min_inner_wheel_speed': self.navigation.min_inner_wheel_speed
+                'min_inner_wheel_speed': self.navigation.min_inner_wheel_speed,
+                'turn_gain_left': self.navigation.turn_gain_left
             },
             'mapping': {
                 'enabled': self.mapping.enabled,
