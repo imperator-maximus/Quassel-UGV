@@ -95,6 +95,14 @@ class GPSNTRIPBridge:
         """Überwacht RTK-Status und Verbindungen"""
         while self.running:
             try:
+                # Stehenden, aber offenen NTRIP-Socket erkennen: Der Caster
+                # sendet bei einem Ausfall keine Daten mehr, schickt aber
+                # minutenlang kein FIN. Ohne diese Prüfung bliebe connected=True
+                # und RTK hinge bis zum serverseitigen Timeout auf GPS FIX.
+                # Muss vor reconnect_if_needed() laufen, damit derselbe
+                # Durchlauf trennt und sofort neu verbindet.
+                self.ntrip.check_stalled_stream()
+
                 # NTRIP Reconnect wenn nötig
                 self.ntrip.reconnect_if_needed()
 

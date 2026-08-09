@@ -16,12 +16,13 @@ logger = logging.getLogger(__name__)
 class NTRIPClient:
     """NTRIP Client für RTK-Korrekturdaten"""
     
-    def __init__(self, host: str, port: int, mountpoint: str, 
+    def __init__(self, host: str, port: int, mountpoint: str,
                  username: str, password: str, timeout: float = 10.0,
-                 reconnect_interval: float = 30.0):
+                 reconnect_interval: float = 30.0,
+                 stale_timeout: float = 10.0):
         """
         Initialisiert NTRIP Client
-        
+
         Args:
             host: NTRIP Server Host
             port: NTRIP Server Port
@@ -30,6 +31,11 @@ class NTRIPClient:
             password: Passwort
             timeout: Verbindungs-Timeout
             reconnect_interval: Reconnect-Versuch nach X Sekunden
+            stale_timeout: Fliessen so lange keine Bytes, obwohl der Socket noch
+                als verbunden gilt, wird die Verbindung als tot behandelt und
+                neu aufgebaut. Der Caster laesst den Socket bei einem Ausfall
+                minutenlang offen, ohne Daten zu senden - ohne diese Schwelle
+                haengt RTK bis zum serverseitigen Timeout auf GPS FIX.
         """
         self.host = host
         self.port = port
@@ -38,6 +44,7 @@ class NTRIPClient:
         self.password = password
         self.timeout = timeout
         self.reconnect_interval = reconnect_interval
+        self.stale_timeout = max(0.0, float(stale_timeout))
         
         self.socket = None
         self.running = False
@@ -64,7 +71,13 @@ class NTRIPClient:
             # Socket erstellen
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.settimeout(self.timeout)
-            
+
+            # TCP-Keepalive aktivieren, damit ein halboffener Socket auf
+            # Betriebssystemebene erkannt wird. Der eigentliche Schutz gegen
+            # einen still stehenden Caster ist der Daten-Wachhund
+            # (check_stalled_stream); Keepalive ist der zweite Riegel.
+            self._enable_keepalive(self.socket)
+
             # Mit Server verbinden
             self.socket.connect((self.host, self.port))
             
@@ -97,6 +110,9 @@ class NTRIPClient:
                 self.connected = True
                 self.connection_attempts = 0
                 self.running = True
+                # Frisch setzen, damit der Daten-Wachhund auch eine Verbindung
+                # erkennt, die nie Daten liefert (last_data_time bliebe sonst 0).
+                self.last_data_time = time.time()
                 
                 # Reader-Thread starten
                 self.reader_thread = threading.Thread(target=self._read_loop, daemon=True)
@@ -168,7 +184,69 @@ class NTRIPClient:
     def is_connected(self) -> bool:
         """Gibt Verbindungsstatus zurück"""
         return self.connected and self.running
-    
+
+    @staticmethod
+    def _enable_keepalive(sock: socket.socket) -> None:
+        """Aktiviert TCP-Keepalive so aggressiv wie die Plattform es erlaubt."""
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError:
+            return
+        for name, value in (('TCP_KEEPIDLE', 15),
+                            ('TCP_KEEPINTVL', 5),
+                            ('TCP_KEEPCNT', 3)):
+            option = getattr(socket, name, None)
+            if option is None:
+                continue
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, option, value)
+            except OSError:
+                pass
+
+    def seconds_since_data(self) -> Optional[float]:
+        """Sekunden seit dem letzten empfangenen Byte, None wenn getrennt."""
+        if not self.connected or self.last_data_time <= 0:
+            return None
+        return max(0.0, time.time() - self.last_data_time)
+
+    def data_is_stale(self) -> bool:
+        """True, wenn der Socket verbunden ist, aber zu lange keine Daten kamen."""
+        if self.stale_timeout <= 0:
+            return False
+        gap = self.seconds_since_data()
+        return gap is not None and gap > self.stale_timeout
+
+    def _force_disconnect(self, reason: str) -> None:
+        """Behandelt einen offenen, aber toten Socket wie eine Trennung."""
+        self.connected = False
+        sock = self.socket
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        logger.warning(
+            f"⚠️  NTRIP-Datenstrom steht still ({reason}) - erzwinge Reconnect"
+        )
+
+    def check_stalled_stream(self) -> bool:
+        """Erkennt einen stehenden NTRIP-Strom und stößt den Reconnect an.
+
+        Der Caster hört bei einem Ausfall auf, RTCM zu senden, hält die
+        TCP-Verbindung aber offen. ``recv()`` läuft dann in seinen Timeout und
+        wird verschluckt, ``connected`` bliebe True, und der Empfänger fiele
+        bis zum serverseitigen Timeout (~7 min) auf GPS FIX zurück. Diese
+        Prüfung verkürzt das auf wenige Sekunden.
+
+        Returns:
+            True, wenn ein Stillstand erkannt und die Verbindung getrennt wurde.
+        """
+        if self.data_is_stale():
+            gap = self.seconds_since_data() or 0.0
+            self._force_disconnect(f"{gap:.0f}s ohne Daten")
+            return True
+        return False
+
     def get_status(self) -> dict:
         """Gibt NTRIP-Status zurück"""
         return {
@@ -178,6 +256,8 @@ class NTRIPClient:
             'mountpoint': self.mountpoint,
             'bytes_received': self.bytes_received,
             'last_data_time': self.last_data_time,
+            'seconds_since_data': self.seconds_since_data(),
+            'stale': self.data_is_stale(),
             'connection_attempts': self.connection_attempts
         }
     

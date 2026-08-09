@@ -165,7 +165,8 @@ class SensorHubApp:
                 username=config.NTRIP_USERNAME,
                 password=config.NTRIP_PASSWORD,
                 timeout=config.NTRIP_TIMEOUT,
-                reconnect_interval=config.NTRIP_RECONNECT_INTERVAL
+                reconnect_interval=config.NTRIP_RECONNECT_INTERVAL,
+                stale_timeout=config.NTRIP_STALE_TIMEOUT
             )
 
             # GPS-NTRIP Bridge starten

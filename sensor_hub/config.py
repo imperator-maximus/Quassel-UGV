@@ -33,6 +33,11 @@ NTRIP_USERNAME = os.getenv('NTRIP_USERNAME', '')  # Aus .env laden!
 NTRIP_PASSWORD = os.getenv('NTRIP_PASSWORD', '')  # Aus .env laden!
 NTRIP_TIMEOUT = float(os.getenv('NTRIP_TIMEOUT', '10.0'))
 NTRIP_RECONNECT_INTERVAL = float(os.getenv('NTRIP_RECONNECT_INTERVAL', '30.0'))
+# Kommen so lange keine RTCM-Bytes, obwohl der Socket noch verbunden ist, gilt
+# die Verbindung als tot und wird neu aufgebaut. Der Caster laesst den Socket
+# bei einem Ausfall minutenlang offen, ohne Daten zu senden; ohne diese
+# Schwelle haengt RTK bis zum serverseitigen Timeout (~7 min) auf GPS FIX.
+NTRIP_STALE_TIMEOUT = float(os.getenv('NTRIP_STALE_TIMEOUT', '10.0'))
 
 # ============================================================================
 # IMU KONFIGURATION
@@ -51,6 +56,24 @@ WEB_HOST = os.getenv('WEB_HOST', '0.0.0.0')
 WEB_PORT = int(os.getenv('WEB_PORT', '8080'))
 WEB_DEBUG = _env_flag('WEB_DEBUG', False)
 WEB_UPDATE_RATE = int(os.getenv('WEB_UPDATE_RATE', '2'))
+
+# ----------------------------------------------------------------------------
+# ZUGANGSSCHUTZ
+# ----------------------------------------------------------------------------
+# Der Webserver ist über eine Portfreigabe aus dem Internet erreichbar und
+# liefert die metergenaue Position des Fahrzeugs. Ohne Passwort liest sie jeder,
+# der die Adresse kennt. Das Passwort gehört in die .env, niemals in den Code
+# (siehe SECURITY.md).
+#
+# WEB_AUTH_PASSWORD akzeptiert Klartext oder einen Werkzeug-Hash
+# (pbkdf2:... / scrypt:...). Denselben Wert braucht der Raspberry in
+# SENSOR_HUB_TELEMETRY_PASSWORD, sonst bleibt die Pose aus.
+WEB_AUTH_ENABLED = _env_flag('WEB_AUTH_ENABLED', True)
+WEB_AUTH_USERNAME = os.getenv('WEB_AUTH_USERNAME', 'ugv')
+WEB_AUTH_PASSWORD = os.getenv('WEB_AUTH_PASSWORD', '')
+WEB_AUTH_REALM = os.getenv('WEB_AUTH_REALM', 'Quassel UGV SensorHub')
+WEB_AUTH_MAX_FAILURES = int(os.getenv('WEB_AUTH_MAX_FAILURES', '8'))
+WEB_AUTH_LOCKOUT_S = float(os.getenv('WEB_AUTH_LOCKOUT_S', '60.0'))
 VEHICLE_GEOMETRY_PATH = os.getenv('VEHICLE_GEOMETRY_PATH', str(Path(__file__).with_name('vehicle_geometry.json')))
 
 # ============================================================================
