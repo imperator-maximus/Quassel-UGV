@@ -1548,7 +1548,35 @@ class MowingPlanManager:
                 heading = (heading + step) % 360.0
                 position = cls._offset_coord(position, heading, step_length)
                 path.append(list(position))
-            heading = cls._edge_bearing_deg(position, waypoint) or heading
+            # Der Wegpunkt wurde bisher immer angehaengt - auch dann, wenn die
+            # Nase nach dem Bogen noch quer zu ihm stand. Dann klaffte
+            # zwischen Bogenende und Wegpunkt ein Sprung, und der Knick dort
+            # war beliebig gross. Zwei Ausstiege der Schleife fuehren dahin:
+            # das Ziel liegt *innerhalb* des Wendekreises, dann dreht sich der
+            # Bogen einmal aussen herum, ohne je darauf zu zeigen
+            # (MAX_TURN_STEPS erschoepft); oder er ist naeher als eine
+            # Schrittweite, aber in der falschen Richtung.
+            #
+            # Real am 09.08. am Brunnen, Abfahrposition 95,1 %: 12 Schritte im
+            # Kreis (220 Grad auf 4,3 m Radius), dann 5,01 m Sprung und 0,15 m
+            # zurueck - eine Kehre von 174,6 Grad mitten im Uebergang, die den
+            # Regler nach 0,08 m stoppte. Die Vorabpruefung sah davon nichts:
+            # Anfang und Ende des Uebergangs waren in Ordnung, der Knick lag
+            # dazwischen.
+            #
+            # Fuer die Anfahrt ist derselbe Fall seit dem 08.08. verboten
+            # (test_approach_never_loops_around_its_own_turning_circle), fuer
+            # diesen Bogen fehlte die Bremse. Kein Bogen ist besser als ein
+            # gesprungener: die Aufrufer pruefen die Laenge und nehmen dann
+            # den Weg ohne Bogen, darueber greift die Manoeverleiter in
+            # executable_segments.
+            bearing = cls._edge_bearing_deg(position, waypoint)
+            if (
+                bearing is not None
+                and cls._angle_error_deg(bearing, heading) > cls.MAX_TURN_STEP_DEG
+            ):
+                return []
+            heading = bearing if bearing is not None else heading
             position = list(waypoint)
             path.append(list(waypoint))
         return path

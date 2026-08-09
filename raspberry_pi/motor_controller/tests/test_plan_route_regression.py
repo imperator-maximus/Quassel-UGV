@@ -749,6 +749,104 @@ class EveryLaneCanBeAStartTests(unittest.TestCase):
                         self.assertNotIn("Abfahrposition", str(exc))
 
 
+class RollingTurnNeverJumpsTests(unittest.TestCase):
+    """Der rollende Bogen haengt seinen Wegpunkt nie mit einem Sprung an.
+
+    Real am 09.08. am Brunnen, Abfahrposition 95,1 % im Schieberegler: der
+    Uebergang zu den Bahnen links war 26,43 m lang und bestand aus 12
+    Kreisschritten (220 Grad auf 4,3 m Radius), einem Sprung von 5,01 m und
+    0,15 m zurueck - eine Kehre von 174,6 Grad mitten im Weg. Der Regler kam
+    0,08 m weit und lief 387,6 s in die Zeitueberschreitung.
+
+    Die Vorabpruefung sah davon nichts: ``_blocks_on_heading`` prueft die
+    erste Kante, ``_leaves_vehicle_across_lane`` den Ankunftskurs - der Knick
+    lag dazwischen. Die Ursache war, dass der Wegpunkt auch dann angehaengt
+    wurde, wenn der Bogen ihn gar nicht erreicht hatte.
+    """
+
+    GOAL = [11.0784131, 53.3326649]
+
+    def _starts(self):
+        for east in (-20.0, -8.0, -5.0, -2.0, -1.0, 1.0, 2.0, 5.0, 8.0, 20.0):
+            for north in (-20.0, -8.0, -5.0, -2.0, -1.0, 1.0, 2.0, 5.0, 8.0, 20.0):
+                yield east, north, MowingPlanManager._offset_coord(
+                    self.GOAL,
+                    math.degrees(math.atan2(east, north)),
+                    math.hypot(east, north),
+                )
+
+    def test_a_delivered_arc_never_kinks_harder_than_one_step(self):
+        checked = 0
+        for east, north, start in self._starts():
+            for heading in range(0, 360, 15):
+                coords = MowingPlanManager._rolling_turn_coords(
+                    start, float(heading), [list(self.GOAL)]
+                )
+                if not coords:
+                    # Kein Bogen ist ein erlaubtes Ergebnis - die Aufrufer
+                    # pruefen die Laenge und nehmen dann den Weg ohne Bogen.
+                    continue
+                checked += 1
+                previous = None
+                for first, second in zip(coords, coords[1:]):
+                    bearing = MowingPlanManager._edge_bearing_deg(first, second)
+                    if bearing is None:
+                        continue
+                    if previous is not None:
+                        with self.subTest(heading=heading, start=(east, north)):
+                            self.assertLessEqual(
+                                MowingPlanManager._angle_error_deg(bearing, previous),
+                                MowingPlanManager.MAX_TURN_STEP_DEG + 0.01,
+                                "Ein Knick ueber der Schrittweite heisst, dass "
+                                "der Bogen seinen Wegpunkt uebersprungen hat",
+                            )
+                    previous = bearing
+        self.assertGreater(checked, 500, "Zu wenige Boegen geprueft")
+
+    def test_a_delivered_arc_really_ends_on_its_waypoint(self):
+        for east, north, start in self._starts():
+            for heading in range(0, 360, 15):
+                coords = MowingPlanManager._rolling_turn_coords(
+                    start, float(heading), [list(self.GOAL)]
+                )
+                if not coords:
+                    continue
+                with self.subTest(heading=heading, start=(east, north)):
+                    self.assertLess(
+                        MowingPlanManager._coord_distance_m(coords[-1], self.GOAL),
+                        0.01,
+                    )
+
+    def test_a_goal_inside_the_turning_circle_yields_no_arc(self):
+        """Der Fall vom Brunnen: seitlich und naeher als der Wendekreis.
+
+        Der Bogen dreht 20 Grad je 1,5 m, das ist ein Kreis von 4,3 m Radius.
+        Ein Ziel, das quer dazu und innerhalb liegt, ist mit einem Bogen nicht
+        zu erreichen - dann darf keiner geliefert werden.
+
+        Dasselbe Ziel geradeaus ist dagegen kein Problem und muss weiter
+        einen Weg ergeben, sonst prueft der Test nur die Entfernung.
+        """
+        # Fahrzeug 3 m suedlich des Ziels, Nase nach Osten: das Ziel liegt
+        # quer zur Fahrt und naeher als der Wendekreis.
+        south = MowingPlanManager._offset_coord(self.GOAL, 180.0, 3.0)
+
+        for heading in (90.0, 270.0):
+            with self.subTest(heading=heading):
+                self.assertEqual(
+                    [], MowingPlanManager._rolling_turn_coords(
+                        south, heading, [list(self.GOAL)]
+                    ),
+                )
+
+        self.assertEqual(
+            2, len(MowingPlanManager._rolling_turn_coords(
+                south, 0.0, [list(self.GOAL)]
+            )),
+            "Geradeaus muss derselbe Punkt weiter erreichbar bleiben",
+        )
+
+
 class LanesBehindTheWellTests(unittest.TestCase):
     """Die Bahnen links vom Brunnen werden von oben angefahren.
 
