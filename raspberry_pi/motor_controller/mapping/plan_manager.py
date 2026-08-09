@@ -35,9 +35,33 @@ class MowingPlanManager:
     # pursuit removes for free. The absorbed offset also stays well inside
     # track_cross_track_limit_m (1.0 m).
     ABSORBED_REST_LANE_TRANSFER_M = 0.60
-    # Kept as an alias for callers/tests that referred to the first version of
-    # this rule when it only covered the initial RTK positioning leg.
-    POSITIONING_REVERSE_THRESHOLD_DEG = TRANSFER_REVERSE_THRESHOLD_DEG
+    # Zweites Kriterium neben der reinen Laenge: wie weit der Huepfer quer zur
+    # naechsten Bahn liegt. Nur das muss der Regler beim Aufnehmen ausgleichen,
+    # und er darf es bis navigation.track_cross_track_limit_m (1,0 m). 0,75 m
+    # laesst Reserve. Die Laengengrenze bleibt daneben bestehen, damit aus
+    # einem echten Standortwechsel nicht stillschweigend eine Bahn mit langem
+    # Vorlauf wird.
+    ABSORBED_REST_LANE_CROSS_M = 0.75
+    ABSORBED_REST_LANE_STEP_M = 1.50
+    # Wie gross die Luecke zwischen Anfang und Ende eines Rings hoechstens
+    # sein darf, damit sie als Teil des Rings geschlossen wird. Sie entsteht
+    # beim Zuschneiden auf die Fahrzeugposition und ist real wenige Dezimeter
+    # (gemessen 0,61 m beim Fortsetzen auf Ring 0). Groesser heisst: das ist
+    # keine Naht, sondern ein echtes Stueck Weg, und der wird nicht erfunden.
+    # Wie weit das Fahrzeug beim Fortsetzen vom Bahnanfang entfernt stehen
+    # darf, ohne dass daraus eine eigene Anfahrt gebaut wird. Bleibt bewusst
+    # unter navigation.track_cross_track_limit_m (1,0 m): so viel gleicht der
+    # Regler beim Aufnehmen der Bahn ohnehin aus.
+    RESUME_ON_TRACK_M = 0.9
+    # Wie schief die Nase am Ende der Anfahrt zur ersten Bahn stehen darf.
+    # Spiegelt navigation.track_heading_block_deg: darueber lehnt der Regler
+    # die folgende Bahn ab, und eine Anfahrt darf das Fahrzeug nicht so
+    # abstellen. Entscheidet nur noch ueber die eine Anfahrt, die geradeaus
+    # rueckwaerts an den Bahnanfang stoesst - reicht die dabei erreichte
+    # Ausrichtung nicht, wird stattdessen vorwaerts eingeschwenkt (real
+    # 08.08., Brunnen: 3,7 m rueckwaerts, danach 128 Grad Winkelfehler und
+    # Stopp).
+    ARRIVAL_ALIGNMENT_LIMIT_DEG = 45.0
     # Ein geschlossener Ring kann an jedem seiner Stützpunkte begonnen werden.
     # Rein nach Abstand gewählt landet der Start regelmäßig auf einer Ecke,
     # deren Tangente quer zur Ankunftsrichtung steht: Ring endet mit Kurs
@@ -64,6 +88,44 @@ class MowingPlanManager:
     MAX_TURN_STEP_DEG = 20.0
     TURN_STEP_M = 1.5
     MAX_TURN_STEPS = 12
+    # Schrittweite der Rueckfallebene _rolling_turn_coords, die nur noch
+    # Uebergaenge zwischen Segmenten betrifft.
+    POSITIONING_TURN_STEP_M = 0.6
+    # Wie eng ein geplanter Bogen sein darf, haengt davon ab, wie weit er
+    # dreht - ein kurzer enger Bogen ist fahrbar, eine anhaltende enge Drehung
+    # nicht. Im Simulator gegen reine Kreisboegen gemessen (08.08.):
+    #
+    #     Radius   20 Grad  30 Grad  45 Grad  60 Grad  90 Grad  120 Grad
+    #     2,0 m    faehrt   faehrt   faehrt   faehrt   raus     -
+    #     3,0 m    faehrt   faehrt   faehrt   kriecht  kriecht  -
+    #     4,0 m    faehrt   faehrt   faehrt   kriecht  kriecht  -
+    #     6,0 m    faehrt   faehrt   faehrt   faehrt   faehrt   kriecht
+    #     7,0 m    faehrt   faehrt   faehrt   faehrt   faehrt   faehrt
+    #
+    # "kriecht" heisst: das Fahrzeug bleibt auf dem Pfad, faellt aber in den
+    # Ausrichtmodus und braucht ein Vielfaches der Zeit; "raus" heisst, es
+    # verlaesst ihn. Beides ist unbrauchbar. Die Tabelle passt zur Physik:
+    # 0,35 m/s Radgeschwindigkeit, davon 10 % Gierrate (gemessen 02.08.),
+    # gegen navigation.max_joystick = 0,30 bleiben rund 1,9 Grad/s.
+    #
+    # Dass kurze enge Boegen wirklich gehen, zeigen die Konturringe selbst:
+    # ihre engsten Stellen liegen bei 2,0 m und werden gemaeht.
+    #
+    # Daraus die beiden Leitern - je Radius der groesste Winkel, den er noch
+    # traegt. Der engste Bogen wird zuerst probiert, weil er den kuerzesten
+    # Weg ergibt.
+    APPROACH_MERGE_ARCS = ((4.0, 45.0), (6.0, 90.0))
+    APPROACH_TURN_ARCS = ((4.0, 45.0), (6.0, 90.0), (7.0, 120.0))
+    # Engster Radius, der eine anhaltende Drehung traegt. Frueher standen hier
+    # 1,72 m - die Zahl kam aus 0,6 m Sehne je 20 Grad, also aus der Abtastung
+    # des Plans, und beschrieb nie, was das Fahrzeug fahren kann. Die damit
+    # geplante Anfahrt brach in der Simulation nach 10,9 von 13,1 m mit
+    # cross_track_stop ab (08.08., Brunnen).
+    POSITIONING_TURN_RADIUS_M = APPROACH_TURN_ARCS[-1][0]
+    MAX_APPROACH_TURN_DEG = APPROACH_TURN_ARCS[-1][1]
+    # Wie weit vor dem Marker die Nahtstelle spaetestens liegt. Weiter draussen
+    # wuerde der Einlauf laenger als die Anfahrt selbst.
+    MAX_APPROACH_MERGE_LEAD_M = 25.0
     # Eindrehmanöver: wie weit in die Zielbahn hineingefahren wird, bevor das
     # Fahrzeug an deren Anfang zurückstößt. Aus dem Drehwinkel gerechnet
     # (~13°/m gemessen) plus Reserve; genau diese Strecke wird doppelt
@@ -290,40 +352,118 @@ class MowingPlanManager:
             approach_bearing,
             vehicle=start_coord,
         )
+        if selected_start is not None and sequence and start_coord is not None:
+            # Ein geschlossener Ring wird in beide Richtungen vollständig
+            # gemäht. Welche davon gefahren wird, entscheidet ab hier die
+            # Anfahrt: das Fahrzeug faehrt keinen engeren Bogen als
+            # POSITIONING_TURN_RADIUS_M, also liegt die Richtung, in der es am
+            # Marker ankommen kann, weitgehend fest - der Ring hat dagegen die
+            # freie Wahl. Andersherum gerechnet musste frueher der Ringanfang
+            # vom Marker weglaufen, bis er zur Anfahrt passte.
+            reverse_rings = self._ring_sense_for_selected_start(
+                sequence[0],
+                selected_start,
+                start_coord,
+                start_heading_deg,
+                default=reverse_rings,
+            )
+        elif (
+            sequence
+            and start_coord is not None
+            and start_heading_deg is not None
+            and self._is_closed(self._coords(sequence[0]))
+            and min(
+                self._coord_distance_m(start_coord, point)
+                for point in self._coords(sequence[0])
+            ) <= self.ON_TRACK_DISTANCE_M
+        ):
+            # Fortsetzen: das Fahrzeug steht schon auf dem ersten Ring. Ein
+            # Ring wird nie rueckwaerts gemaeht, sondern andersherum
+            # durchfahren - und zwar der ganze Plan, nicht nur dieser eine.
+            # Nur den ersten umzudrehen stiess ihn gegen den naechsten: aus
+            # einem 1,55-m-Uebergang wurde ein 25,8-m-Eindrehmanoever
+            # (08.08.), waehrend alle folgenden Uebergaenge kurz blieben.
+            reverse_rings = self._ring_sense_for_resume(
+                sequence[0], start_coord, start_heading_deg, default=reverse_rings
+            )
 
         for segment in sequence:
             if reverse_rings:
                 segment = dict(segment, coordinates=list(reversed(self._coords(segment))))
             if current_end is None and selected_start is not None:
-                coords = self._coords_from_selected_start(
-                    segment,
-                    selected_start,
-                    # Anflugrichtung auf die gewählte Abfahrposition. Ein
-                    # geschlossener Ring wird an jeder Stelle vollständig
-                    # gemäht, also darf der Startpunkt ein Stück wandern,
-                    # wenn er sonst auf einer Spitze läge: die Wiese hat an
-                    # der gewählten Stelle eine 155°-Haarnadel, die kein
-                    # Skid-Steer am Bahnanfang fahren kann (real, 02.08.).
-                    approach_heading_deg=approach_bearing,
-                    vehicle=start_coord,
-                )
+                # Ohne Anflugrichtung: die Bahn beginnt am gewählten Punkt,
+                # und die Anfahrt kommt dort in Bahnrichtung an, egal wie das
+                # Fahrzeug steht. Welchen Drehsinn der Ring bekommt, ist damit
+                # schon oben entschieden.
+                coords = self._coords_from_selected_start(segment, selected_start)
             else:
+                # Vor der ersten Bahn steht normalerweise die Anfahrt, die auf
+                # die Bahn einschwenkt - dort zählt die Anflugrichtung, nicht
+                # der Kurs am Stellplatz.
+                #
+                # Beim Fortsetzen steht das Fahrzeug aber schon auf dieser
+                # Bahn. Dann gibt es keine Anfahrt, und die Anflugrichtung ist
+                # die Peilung auf einen Punkt direkt unter dem Fahrzeug, also
+                # beliebig. Damit gewählt begann der Ring an einem Stützpunkt,
+                # der 91,3° zur Nase stand, obwohl 45,9° möglich waren
+                # (08.08.). Hier zählt der gemessene Kurs.
+                orientation = (
+                    approach_bearing if current_end is None else current_heading_deg
+                )
+                if (
+                    current_end is None
+                    and selected_start is None
+                    and start_coord is not None
+                    and start_heading_deg is not None
+                    and min(
+                        self._coord_distance_m(start_coord, point)
+                        for point in self._coords(segment)
+                    ) <= self.ON_TRACK_DISTANCE_M
+                ):
+                    orientation = start_heading_deg
                 coords = self._oriented_track_coords(
                     segment,
                     current_end or start_coord,
-                    # Vor der ersten Bahn steht die Anfahrt, die auf die Bahn
-                    # einschwenkt - dort zählt die Anflugrichtung, nicht der
-                    # Kurs am Stellplatz.
-                    approach_bearing if current_end is None else current_heading_deg,
+                    orientation,
                     vehicle=start_coord if current_end is None else None,
                 )
             if current_end is None and selected_start is None and start_coord is not None:
-                trimmed = self._trim_coords_from_point(coords, start_coord, max_distance_m=1.5)
-                if trimmed is not None:
-                    coords = trimmed
+                if self._is_closed(self._coords(segment)):
+                    # Ein Ring wird nicht zugeschnitten. _oriented_track_coords
+                    # hat ihn schon auf den Stuetzpunkt beim Fahrzeug gedreht,
+                    # und zwar geschlossen - der Regler erkennt eine Bahn nur
+                    # dann als Ring, wenn Anfang und Ende auf 5 cm
+                    # zusammenfallen. Zugeschnitten klaffte dort eine kleine
+                    # Luecke; die Bahn galt dann als beendet, sobald das
+                    # Fahrzeug in der Naehe des letzten Stuetzpunkts stand.
+                    pass
+                else:
+                    trimmed = self._trim_coords_from_point(coords, start_coord, max_distance_m=1.5)
+                    if trimmed is not None:
+                        coords = trimmed
             start = coords[0]
             if current_end is None:
-                if start_coord is None or self._coord_distance_m(start_coord, start) > 0.05:
+                already_on_track = (
+                    start_coord is not None
+                    and selected_start is None
+                    and self._distance_to_polyline_m(start_coord, coords)
+                    <= self.RESUME_ON_TRACK_M
+                )
+                # Beim Fortsetzen steht das Fahrzeug auf seiner Bahn - gemessen
+                # wird deshalb der Abstand zur Bahnlinie, nicht der zum
+                # naechsten Stuetzpunkt. Der ist eine ganz andere Groesse: bei
+                # Ring 9 lag der naechste Stuetzpunkt 0,99 m entfernt, die
+                # Bahnlinie selbst aber 0,01 m. Nach dem Stuetzpunkt gemessen
+                # entstand daraus eine 0,98 m lange "Anfahrt", und bei so
+                # kurzen Stuecken ist die Richtung fast beliebig: der Regler
+                # sperrte sie mit 63,9 Grad, 1,8 s nach dem Start (08.08.,
+                # 20:22 Uhr). Der Rest ist Querabweichung, die der Regler beim
+                # Aufnehmen der Bahn selbst ausgleicht - sie bleibt klar unter
+                # track_cross_track_limit_m.
+                if not already_on_track and (
+                    start_coord is None
+                    or self._coord_distance_m(start_coord, start) > 0.05
+                ):
                     if start_coord is None:
                         # Direct callers may inspect a plan without a live pose.
                         # Production check_plan always supplies the current RTK
@@ -345,6 +485,9 @@ class MowingPlanManager:
                             source_type=segment.get("type", "positioning"),
                             to_segment_index=segment.get("segment_index"),
                             start_heading_deg=start_heading_deg,
+                            arrival_heading_deg=self._segment_entry_heading(
+                                coords, segment.get("direction")
+                            ),
                         )
                         executable.append(positioning)
                         current_heading_deg = self._segment_end_heading(
@@ -352,15 +495,28 @@ class MowingPlanManager:
                             current_heading_deg,
                         )
             elif self._coord_distance_m(current_end, start) > 0.05:
-                transfer = self._transfer_segment(
-                    transitions_by_pair.get((previous_index, segment.get("segment_index"))),
-                    current_end,
-                    start,
-                    runtime_router=runtime_router,
-                    previous_segment=previous_segment,
-                    next_segment=segment,
-                    start_heading_deg=current_heading_deg,
-                )
+                def build_transfer(target):
+                    return self._transfer_segment(
+                        transitions_by_pair.get(
+                            (previous_index, segment.get("segment_index"))
+                        ),
+                        current_end,
+                        target,
+                        runtime_router=runtime_router,
+                        previous_segment=previous_segment,
+                        next_segment=segment,
+                        start_heading_deg=current_heading_deg,
+                    )
+
+                # Hier waere der Platz, die Restbahn vom anderen Ende her
+                # anzufangen - beide Enden sind erlaubt, und beim Fall vom
+                # 08.08. stuende die Nase dort 27,1 statt 85,6 Grad zur Bahn.
+                # Ausprobiert und wieder entfernt: es verschiebt die
+                # festgenagelte Wiesenroute um 68 m (2245,0 -> 2313,0) und
+                # loeste den Fall trotzdem nicht (74,7 Grad blieben). Die
+                # Wahl gehoert in _oriented_track_coords und braucht eine
+                # eigene Runde am Pruefstand.
+                transfer = build_transfer(start)
                 if not self._absorbs_short_rest_lane_transfer(
                     transfer,
                     previous_segment,
@@ -370,12 +526,37 @@ class MowingPlanManager:
                 ):
                     # Sperrt der Regler diesen Übergang am Winkel, wird
                     # stattdessen in die Fläche hinein eingedreht und an den
-                    # Bahnanfang zurückgestoßen.
+                    # Bahnanfang zurückgestoßen. Das gilt für beide Enden:
+                    # ein Übergang, in den das Fahrzeug gut hineinkommt, kann
+                    # es trotzdem quer zur nächsten Bahn abstellen. Real am
+                    # 08.08. um 22:16: der Übergang selbst lag bei 41,3° und
+                    # galt damit als fahrbar, nach seinen 14,7 m rückwärts
+                    # stand das Fahrzeug aber 85,6° quer zur Restbahn - und
+                    # dort sperrte der Regler. Geprüft wurde nur die Einfahrt.
                     manoeuvre = None
-                    if self._blocks_on_heading(transfer, current_heading_deg):
+                    if self._blocks_on_heading(
+                        transfer, current_heading_deg
+                    ) or self._leaves_vehicle_across_lane(
+                        transfer, segment, coords, current_heading_deg
+                    ):
                         manoeuvre = self._turn_in_transfer(
                             current_end, current_heading_deg, coords, runtime_router
                         )
+                        if manoeuvre is None:
+                            # Das Eindrehmanoever faehrt in die Zielbahn hinein
+                            # und stoesst zurueck - dafuer muss die Bahn lang
+                            # genug sein. Bei 14,6 m seitlichem Versatz
+                            # verlangte es 20 m Tiefe in einer 4,64 m langen
+                            # Restbahn und kam nicht zustande (08.08.). Dann
+                            # der Bogen, der auch die Anfahrt zum Planbeginn
+                            # baut: der braucht die Bahn nicht als Platz.
+                            manoeuvre = self._arc_transfer(
+                                current_end,
+                                current_heading_deg,
+                                segment,
+                                coords,
+                                runtime_router,
+                            )
                     for item in manoeuvre or [transfer]:
                         executable.append(item)
                         current_heading_deg = self._segment_end_heading(
@@ -424,7 +605,22 @@ class MowingPlanManager:
             return False
         if str(transfer.get("route_kind", "")).split("_")[-1] != "direct":
             return False
-        return self._coord_distance_m(from_coord, to_coord) <= self.ABSORBED_REST_LANE_TRANSFER_M
+        step_m = self._coord_distance_m(from_coord, to_coord)
+        if step_m <= self.ABSORBED_REST_LANE_TRANSFER_M:
+            return True
+        # Entscheidend ist nicht, wie lang der Huepfer ist, sondern wie weit
+        # er quer zur naechsten Bahn liegt - denn nur das muss der Regler
+        # ausgleichen. Ein Schritt, der groesstenteils in Bahnrichtung geht,
+        # ist als eigener Track sogar schaedlich: bei 0,97 m Laenge zeigte er
+        # 316 Grad, waehrend die Nase mit 268,7 Grad korrekt auf beiden Bahnen
+        # lag - 47,5 Grad Differenz, und der Regler sperrte (real 09.08.,
+        # 11:48 Uhr). Bei so kurzen Stuecken ist die Richtung Rauschen.
+        if step_m > self.ABSORBED_REST_LANE_STEP_M:
+            return False
+        return (
+            self._distance_to_polyline_m(from_coord, self._coords(next_segment))
+            <= self.ABSORBED_REST_LANE_CROSS_M
+        )
 
     def _transfer_segment(
         self,
@@ -484,6 +680,115 @@ class MowingPlanManager:
             nose = (nose + 180.0) % 360.0
         return cls._angle_error_deg(nose, heading_deg) > cls.RING_START_HEADING_LIMIT_DEG
 
+    def _leaves_vehicle_across_lane(
+        self,
+        transfer: Dict[str, Any],
+        segment: Dict[str, Any],
+        lane_coords: List[List[float]],
+        heading_deg: Optional[float],
+    ) -> bool:
+        """Stellt dieser Uebergang das Fahrzeug quer zur naechsten Bahn ab?
+
+        Gegenstueck zu _blocks_on_heading, das nur die Einfahrt prueft. Ein
+        langer Uebergang dreht das Fahrzeug unterwegs; entscheidend fuer die
+        folgende Bahn ist, wie die Nase am *Ende* steht.
+
+        Eine Restbahn darf in beide Richtungen gefahren werden, also zaehlt
+        die guenstigere der beiden. Ein geschlossener Ring wird immer vorwaerts
+        gefahren - dort gibt es nur eine.
+        """
+        return (
+            self._lane_arrival_error(transfer, segment, lane_coords, heading_deg)
+            > self.RING_START_HEADING_LIMIT_DEG
+        )
+
+    def _lane_arrival_error(
+        self,
+        transfer: Dict[str, Any],
+        segment: Dict[str, Any],
+        lane_coords: List[List[float]],
+        heading_deg: Optional[float],
+    ) -> float:
+        """Wie schief die Nase am Ende des Uebergangs zur Bahn steht."""
+        if heading_deg is None or len(lane_coords) < 2:
+            return 0.0
+        arrival = self._segment_end_heading(transfer, heading_deg)
+        tangent = self._segment_entry_heading(lane_coords, "forward")
+        if arrival is None or tangent is None:
+            return 0.0
+        error = self._angle_error_deg(tangent, arrival)
+        if segment.get("type") == "rest_lane" and self.reverse_track_supported:
+            error = min(
+                error,
+                self._angle_error_deg((tangent + 180.0) % 360.0, arrival),
+            )
+        return error
+
+    def _arc_transfer(
+        self,
+        from_coord: List[float],
+        start_heading_deg: Optional[float],
+        segment: Dict[str, Any],
+        lane_coords: List[List[float]],
+        runtime_router,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Uebergang als Bogen, der in Bahnrichtung am Bahnanfang ankommt.
+
+        Letzte Moeglichkeit, wenn der gerade Uebergang das Fahrzeug quer
+        abstellt und das Eindrehmanoever nicht in die Zielbahn passt. Benutzt
+        dieselbe Konstruktion wie die Anfahrt zum Planbeginn - Radien, die der
+        Regler nachweislich haelt, und ein Einlauf in Bahnrichtung.
+
+        Eine Restbahn darf in beide Richtungen gefahren werden; genommen wird
+        die, zu der weniger gedreht werden muss.
+        """
+        if start_heading_deg is None or runtime_router is None:
+            return None
+        tangent = self._segment_entry_heading(lane_coords, "forward")
+        if tangent is None:
+            return None
+        targets = [tangent]
+        if segment.get("type") == "rest_lane" and self.reverse_track_supported:
+            targets.append((tangent + 180.0) % 360.0)
+        targets.sort(key=lambda value: self._angle_error_deg(value, start_heading_deg))
+
+        # Bewusst die Bauer direkt und nicht _approach_arc_coords: das misst
+        # jeden Bogen gegen die gerade Verbindung und verwirft ihn, wenn die
+        # nicht schlechter ankommt. Fuer die Anfahrt stimmt das - dort ist die
+        # Gerade die Alternative. Hier ist sie es nicht: sie ist unbrauchbar,
+        # weil das Fahrzeug quer zu ihr steht, und genau deshalb sind wir hier.
+        for target in targets:
+            for build in (
+                self._merge_onto_lane_coords, self._bend_onto_marker_coords
+            ):
+                coords = build(
+                    from_coord, start_heading_deg, lane_coords[0], target
+                )
+                if coords is None or len(coords) < 2:
+                    continue
+                if self._route_heading_error(coords, start_heading_deg) > (
+                    self.RING_START_HEADING_LIMIT_DEG
+                ):
+                    # Der Regler muss den Bogen auch aufnehmen koennen.
+                    continue
+                arrival = self._edge_bearing_deg(coords[-2], coords[-1])
+                if self._angle_error_deg(arrival, target) > (
+                    self.RING_START_HEADING_LIMIT_DEG
+                ):
+                    continue
+                if not runtime_router.is_polyline_safe(coords):
+                    continue
+                return [{
+                    "type": "transition",
+                    "source_index": None,
+                    "mode": "track",
+                    "direction": "forward",
+                    "route_kind": "arc_transfer",
+                    "coordinates": coords,
+                    "length_m": round(self._polyline_length_m(coords), 2),
+                }]
+        return None
+
     def _turn_in_transfer(
         self,
         from_coord: List[float],
@@ -528,6 +833,13 @@ class MowingPlanManager:
         if entry is None or self._coord_distance_m(entry, lane_coords[0]) < self.MIN_TURN_IN_M / 2.0:
             return None
 
+        # ACHTUNG: dieser Bogen beschreibt einen 4,3-m-Kreis (TURN_STEP_M je
+        # MAX_TURN_STEP_DEG). Gemessen haelt der Regler eine anhaltende
+        # Drehung erst ab 7 m, und in der Simulation laeuft das Manoever
+        # deshalb aus dem Pfad (08.08., Brunnen, Uebergang nach dem
+        # Fortsetzen). Der Ersatz durch _approach_arc_coords ist der richtige
+        # Weg, aendert aber die festgenagelte Wiesenroute (2245,0 -> 2252,5 m)
+        # und braucht eine eigene Runde am Pruefstand.
         approach = self._rolling_turn_coords(from_coord, start_heading_deg, [entry])
         if len(approach) < 2 or not runtime_router.is_polyline_safe(approach):
             return None
@@ -639,6 +951,7 @@ class MowingPlanManager:
         source_type: str,
         to_segment_index: Optional[int],
         start_heading_deg: Optional[float] = None,
+        arrival_heading_deg: Optional[float] = None,
     ) -> Dict[str, Any]:
         if runtime_router is None:
             raise ValueError("Startposition kann ohne Kartengeometrie nicht sicher geroutet werden")
@@ -677,28 +990,53 @@ class MowingPlanManager:
         segment["length_m"] = round(self._polyline_length_m(coordinates), 2)
         segment = self._select_transfer_direction(segment, start_heading_deg)
         if segment.get("direction") == "reverse":
-            # Zeigt das Fahrzeug annähernd von der Bahn weg, ist Rückwärts-
-            # fahren der kürzeste Weg: geradeaus zurückstoßen statt einen
-            # Wendebogen über die Wiese zu fahren.
-            return segment
-        if start_heading_deg is not None and len(coordinates) >= 2:
-            # Das Fahrzeug dreht nicht auf der Stelle, also muss die Kurve in
-            # den Weg. Mehr Anspruch als das erhebt die Anfahrt nicht: sie
-            # fährt die Gerade zum Bahnanfang, und dass der Ring dort in
-            # Fahrtrichtung weiterläuft, hat die Startpunktwahl schon
-            # sichergestellt.
-            turned = self._rolling_turn_coords(
-                coordinates[0], start_heading_deg, coordinates[1:]
+            # Rueckwaerts wird nur geradeaus zurueckgestossen, nie im Bogen:
+            # ein aus dem Nasenkurs gerechneter Bogen liefe spiegelverkehrt zur
+            # tatsaechlichen Bewegung. Dafuer muss das Fahrzeug aber an beiden
+            # Enden passen - am Ziel richtig herum ankommen UND am Stellplatz
+            # schon annaehernd auf der Linie stehen. Nur die Ankunft zu pruefen
+            # liess Anfahrten stehen, die der Regler sofort am Kursfehler
+            # sperrte, weil die Nase 60 bis 75 Grad quer zur Linie stand
+            # (gemessen 08.08., Brunnen, Kurs 90 und 315).
+            entry_error = (
+                0.0 if start_heading_deg is None
+                else self._route_heading_error(
+                    coordinates, (float(start_heading_deg) + 180.0) % 360.0
+                )
             )
-            # Der Bogen stammt nicht vom Router und darf deshalb nur gefahren
-            # werden, wenn er dieselbe Prüfung besteht wie die gerade
-            # Verbindung. Sonst bleibt es beim geraden Weg - lieber eine
-            # Anfahrt, die der Regler ablehnt, als eine durch eine Sperrzone.
-            if len(turned) > len(coordinates) and runtime_router.is_polyline_safe(
-                turned, confine_to_mow_area=False
+            if entry_error <= self.ARRIVAL_ALIGNMENT_LIMIT_DEG and (
+                arrival_heading_deg is None
+                or self._arrival_error(segment, arrival_heading_deg)
+                <= self.ARRIVAL_ALIGNMENT_LIMIT_DEG
             ):
-                segment["coordinates"] = turned
-                segment["length_m"] = round(self._polyline_length_m(turned), 2)
+                return segment
+            # Sonst zeigt die Nase am Ziel entgegen der ersten Bahn - dann
+            # lieber vorwaerts einschwenken.
+            segment["direction"] = "forward"
+        if start_heading_deg is not None and arrival_heading_deg is not None:
+            # Nicht nur den Punkt treffen, sondern dort in Bahnrichtung
+            # ankommen. Der Bogen stammt nicht vom Router, deshalb gilt fuer
+            # ihn dieselbe Pruefung wie fuer die gerade Verbindung - sonst
+            # bleibt es beim geraden Weg darunter.
+            curved = self._approach_arc_coords(
+                from_coord, start_heading_deg, to_coord, arrival_heading_deg
+            )
+            if curved is not None and runtime_router.is_polyline_safe(
+                curved, confine_to_mow_area=False
+            ):
+                segment["coordinates"] = curved
+                segment["length_m"] = round(self._polyline_length_m(curved), 2)
+                return segment
+        # Kein Bogen moeglich: der Marker liegt seitlich und naeher als der
+        # Wendekreis, dorthin fuehrt in einem Zug kein kurzer Weg. Hier stand
+        # frueher ein eingerollter Ersatzbogen. Der sah fahrbar aus - 20 Grad
+        # Knick je Stuetzpunkt -, war es aber nie: mit 0,6 m Schrittweite
+        # beschreibt er einen 1,7-m-Kreis, und der Regler haelt erst 6 m. In
+        # der Simulation lief das Fahrzeug nach zweieinhalb Metern aus dem
+        # Pfad (08.08.). Vor allem verdeckte er den wahren Kursfehler: der
+        # Plan-Check sah 20 Grad statt der tatsaechlichen 75 und liess eine
+        # Fahrt zu, die der Regler sofort abbrach. Die gerade Verbindung sagt
+        # die Wahrheit - der Check lehnt sie ab und nennt den Winkel.
         return segment
 
     @classmethod
@@ -708,6 +1046,7 @@ class MowingPlanManager:
         heading_deg: float,
         waypoints: List[List[float]],
         clockwise: Optional[bool] = None,
+        step_m: Optional[float] = None,
     ) -> List[List[float]]:
         """Anfahrt als rollender Bogen statt als Knick.
 
@@ -722,6 +1061,7 @@ class MowingPlanManager:
         path = [list(start)]
         heading = float(heading_deg) % 360.0
         position = list(start)
+        step_length = float(cls.TURN_STEP_M if step_m is None else step_m)
         for waypoint in waypoints:
             for _ in range(cls.MAX_TURN_STEPS):
                 bearing = cls._edge_bearing_deg(position, waypoint)
@@ -731,7 +1071,7 @@ class MowingPlanManager:
                 if abs(error) <= cls.MAX_TURN_STEP_DEG:
                     break
                 remaining = cls._coord_distance_m(position, waypoint)
-                if remaining <= cls.TURN_STEP_M:
+                if remaining <= step_length:
                     break
                 # ``clockwise`` erzwingt die Drehrichtung. Ohne Vorgabe wird
                 # die kürzere genommen; die führt am Flächenrand aber
@@ -743,7 +1083,7 @@ class MowingPlanManager:
                     if abs(error) <= cls.MAX_TURN_STEP_DEG:
                         step = error
                 heading = (heading + step) % 360.0
-                position = cls._offset_coord(position, heading, cls.TURN_STEP_M)
+                position = cls._offset_coord(position, heading, step_length)
                 path.append(list(position))
             heading = cls._edge_bearing_deg(position, waypoint) or heading
             position = list(waypoint)
@@ -763,6 +1103,486 @@ class MowingPlanManager:
             float(coord[0]) + east / (111320.0 * max(0.01, math.cos(latitude))),
             float(coord[1]) + north / 111320.0,
         ]
+
+    def _ring_sense_for_selected_start(
+        self,
+        segment: Dict[str, Any],
+        selected_start: List[float],
+        start_coord: List[float],
+        start_heading_deg: Optional[float],
+        default: bool,
+    ) -> bool:
+        """Drehsinn des Rings so waehlen, dass die Anfahrt dazu passt.
+
+        Gefahren wird derselbe geschlossene Ring, nur herum. Verglichen wird,
+        wie schief die Nase am Marker steht - einmal fuer die gespeicherte
+        Reihenfolge, einmal fuer die umgekehrte. Bei offenen Bahnen gibt es
+        nichts zu waehlen, dort bleibt es bei ``default``.
+        """
+        coords = self._coords(segment)
+        if start_heading_deg is None or not self._is_closed(coords):
+            return default
+
+        best = default
+        best_error = None
+        for reversed_ring in (False, True):
+            candidate = dict(
+                segment,
+                coordinates=list(reversed(coords)) if reversed_ring else list(coords),
+            )
+            try:
+                oriented = self._coords_from_selected_start(candidate, selected_start)
+            except ValueError:
+                continue
+            entry = self._segment_entry_heading(oriented, candidate.get("direction"))
+            if entry is None:
+                continue
+            # Dieselben Moeglichkeiten durchspielen, die spaeter auch
+            # _routed_positioning_segment hat - sonst waehlt die Drehrichtung
+            # gegen eine Anfahrt, die so nie gebaut wird. Genau daran ging es
+            # einmal schief: nur die vorwaerts gefahrene Gerade betrachtet,
+            # verlor der Drehsinn die drei Aufstellungen, die rueckwaerts
+            # sauber ankamen.
+            straight = self._edge_bearing_deg(start_coord, oriented[0])
+            if straight is None:
+                continue
+            options = []
+            approach = self._approach_arc_coords(
+                start_coord, start_heading_deg, oriented[0], entry
+            )
+            if approach is not None and len(approach) >= 2:
+                options.append(self._edge_bearing_deg(approach[-2], approach[-1]))
+            else:
+                options.append(straight)
+            if (
+                self._angle_error_deg(
+                    (straight + 180.0) % 360.0, start_heading_deg
+                )
+                <= self.ARRIVAL_ALIGNMENT_LIMIT_DEG
+            ):
+                # Rueckwaerts zurueckgestossen zeigt die Nase entgegen der
+                # Fahrtrichtung; erlaubt ist das nur, wenn das Fahrzeug schon
+                # annaehernd so steht.
+                options.append((straight + 180.0) % 360.0)
+            error = min(
+                self._angle_error_deg(arrival, entry)
+                for arrival in options
+                if arrival is not None
+            )
+            if best_error is None or error < best_error:
+                best_error = error
+                best = reversed_ring
+        return best
+
+    @classmethod
+    def _merge_onto_lane_coords(
+        cls,
+        from_coord: List[float],
+        start_heading_deg: float,
+        to_coord: List[float],
+        arrival_heading_deg: Optional[float] = None,
+    ) -> Optional[List[List[float]]]:
+        """Bogen raus, Gerade, Bogen auf die Bahn.
+
+        Der Zielpunkt allein reicht nicht: kommt das Fahrzeug quer an, sperrt
+        der Regler die erste Bahn am Kursfehler. Es dreht aber nicht auf der
+        Stelle, also muessen beide Drehungen in den Weg - die aus dem
+        Stellplatz heraus und die auf die Bahn hinein.
+
+        Gebaut wird von hinten her. Auf der Bahnlinie, ein Stueck vor dem
+        Marker, liegt die Nahtstelle. Dorthin fuehrt eine Gerade, die
+        tangential am Wendekreis des Stellplatzes anliegt; an der Nahtstelle
+        legt ein zweiter Bogen sie an die Bahnlinie an, und die letzten Meter
+        laufen genau in Bahnrichtung in den Marker. Alles haengt tangential
+        aneinander, es gibt also nirgends einen Knick.
+
+        Die beiden Boegen duerfen unterschiedlich eng sein, weil sie
+        unterschiedlich lang sind. Gemessen (08.08., Simulator gegen reine
+        Kreisboegen): eine anhaltende Drehung haelt der Regler erst ab 7 m,
+        ein kurzes Einschwenken bis 45 Grad aber schon mit 4 m und bis
+        90 Grad mit 6 m. Dass kurze enge Boegen fahrbar sind, zeigen auch die
+        Konturringe selbst - ihre engsten Stellen liegen bei 2,0 m.
+
+        Gibt ``None`` zurueck, wenn keine Nahtstelle passt; dann bleibt es bei
+        der geraden Verbindung, deren Kursfehler der Plan-Check meldet.
+        """
+        if arrival_heading_deg is None:
+            return None
+        lat_scale = 111320.0
+        lon_scale = 111320.0 * max(0.01, math.cos(math.radians(float(to_coord[1]))))
+
+        def unit(bearing_deg):
+            angle = math.radians(bearing_deg)
+            return (math.sin(angle), math.cos(angle))
+
+        start_xy = (
+            (float(from_coord[0]) - float(to_coord[0])) * lon_scale,
+            (float(from_coord[1]) - float(to_coord[1])) * lat_scale,
+        )
+        start_heading = float(start_heading_deg) % 360.0
+        arrival = float(arrival_heading_deg) % 360.0
+        along = unit(arrival)
+
+        # Wendekreise am Stellplatz: links und rechts, und je Seite in allen
+        # Weiten, die die Messung traegt. Ein enger Kreis versperrt weniger
+        # Flaeche und erreicht Nahtstellen, an denen ein weiter Kreis schon
+        # vorbeigelaufen ist - solange die noetige Drehung klein bleibt.
+        circles = []
+        for left in (True, False):
+            side = unit(start_heading - 90.0 if left else start_heading + 90.0)
+            for out_radius, out_limit in cls.APPROACH_TURN_ARCS:
+                circles.append((
+                    left,
+                    (start_xy[0] + side[0] * out_radius,
+                     start_xy[1] + side[1] * out_radius),
+                    out_radius,
+                    out_limit,
+                ))
+
+        best = None
+        steps = int(round((cls.MAX_APPROACH_MERGE_LEAD_M - 1.5) / 0.5))
+        for step in range(steps + 1):
+            lead = 1.5 + 0.5 * step
+            corner = (-along[0] * lead, -along[1] * lead)
+            for left, centre, out_radius, out_limit in circles:
+                reach_e = corner[0] - centre[0]
+                reach_n = corner[1] - centre[1]
+                reach = math.hypot(reach_e, reach_n)
+                if reach <= out_radius:
+                    # Die Nahtstelle liegt im Wendekreis - dorthin fuehrt von
+                    # dieser Seite keine Gerade.
+                    continue
+                towards = math.degrees(math.atan2(reach_e, reach_n)) % 360.0
+                opening = math.degrees(
+                    math.acos(max(-1.0, min(1.0, out_radius / reach)))
+                )
+                run = math.sqrt(reach * reach - out_radius * out_radius)
+                for spoke in (towards - opening, towards + opening):
+                    # Nur an einem der beiden Beruehrpunkte laeuft der Bogen in
+                    # die Gerade hinein statt aus ihr heraus.
+                    leaving = (
+                        (spoke - 90.0) % 360.0 if left else (spoke + 90.0) % 360.0
+                    )
+                    contact = (
+                        centre[0] + unit(spoke)[0] * out_radius,
+                        centre[1] + unit(spoke)[1] * out_radius,
+                    )
+                    heading_to_corner = math.degrees(
+                        math.atan2(corner[0] - contact[0], corner[1] - contact[1])
+                    ) % 360.0
+                    if abs(
+                        (leaving - heading_to_corner + 180.0) % 360.0 - 180.0
+                    ) > 0.5:
+                        continue
+                    out_turn = (
+                        (start_heading - leaving) % 360.0 if left
+                        else (leaving - start_heading) % 360.0
+                    )
+                    if out_turn > out_limit:
+                        continue
+                    signed = (arrival - leaving + 540.0) % 360.0 - 180.0
+                    merge_turn = abs(signed)
+                    for merge_radius, turn_limit in cls.APPROACH_MERGE_ARCS:
+                        if merge_turn > turn_limit:
+                            continue
+                        tangent_m = merge_radius * math.tan(
+                            math.radians(merge_turn) / 2.0
+                        )
+                        if tangent_m > (lead - 0.5) or tangent_m > (run - 0.5):
+                            # Der Einschwenkbogen wuerde ueber den Marker
+                            # hinaus oder in den Wendekreis zurueckreichen.
+                            continue
+                        total = (
+                            math.radians(out_turn) * out_radius
+                            + (run - tangent_m)
+                            + math.radians(merge_turn) * merge_radius
+                            + (lead - tangent_m)
+                        )
+                        if best is None or total < best[0]:
+                            best = (
+                                total, centre, left, out_turn, out_radius,
+                                leaving, signed, merge_turn, tangent_m,
+                                merge_radius, corner,
+                            )
+                        break
+
+        if best is None:
+            return None
+        (
+            _total, centre, left, out_turn, out_radius, leaving, signed,
+            merge_turn, tangent_m, merge_radius, corner,
+        ) = best
+
+        def arc(centre_xy, radius, from_heading, turn_deg, turns_left):
+            points = []
+            count = max(1, int(math.ceil(turn_deg / cls.MAX_TURN_STEP_DEG)))
+            for index in range(1, count + 1):
+                travelled = turn_deg * index / count
+                heading = (
+                    from_heading - travelled if turns_left
+                    else from_heading + travelled
+                )
+                spoke = unit(heading + 90.0 if turns_left else heading - 90.0)
+                points.append((
+                    centre_xy[0] + spoke[0] * radius,
+                    centre_xy[1] + spoke[1] * radius,
+                ))
+            return points
+
+        path = [start_xy]
+        path.extend(arc(centre, out_radius, start_heading, out_turn, left))
+        entry = unit(leaving)
+        merge_start = (
+            corner[0] - entry[0] * tangent_m,
+            corner[1] - entry[1] * tangent_m,
+        )
+        path.append(merge_start)
+        merge_left = signed < 0.0
+        merge_dir = unit(leaving - 90.0 if merge_left else leaving + 90.0)
+        merge_centre = (
+            merge_start[0] + merge_dir[0] * merge_radius,
+            merge_start[1] + merge_dir[1] * merge_radius,
+        )
+        path.extend(
+            arc(merge_centre, merge_radius, leaving, merge_turn, merge_left)
+        )
+        path.append((0.0, 0.0))
+
+        coords = [
+            [
+                float(to_coord[0]) + east / lon_scale,
+                float(to_coord[1]) + north / lat_scale,
+            ]
+            for east, north in path
+        ]
+        deduplicated = [coords[0]]
+        for coord in coords[1:]:
+            if cls._coord_distance_m(deduplicated[-1], coord) > 0.02:
+                deduplicated.append(coord)
+        # Der Zielpunkt ist gesetzt, nicht gerechnet: die erste Bahn beginnt
+        # exakt dort, und schon zwei Zentimeter daneben zaehlen als eigener
+        # Uebergang.
+        deduplicated[-1] = [float(to_coord[0]), float(to_coord[1])]
+        if len(deduplicated) < 2:
+            return None
+        return deduplicated
+
+    @classmethod
+    def _required_turn_radius_m(cls, turn_deg: float) -> Optional[float]:
+        """Engster Radius, mit dem der Regler ``turn_deg`` noch sauber faehrt."""
+        for radius, limit in cls.APPROACH_TURN_ARCS:
+            if turn_deg <= limit:
+                return radius
+        return None
+
+    @classmethod
+    def _bend_onto_marker_coords(
+        cls,
+        from_coord: List[float],
+        start_heading_deg: float,
+        to_coord: List[float],
+        arrival_heading_deg: float,
+    ) -> Optional[List[List[float]]]:
+        """Ein Bogen, der im Marker endet - so schief wie noetig, nicht exakt.
+
+        Der Regler verlangt keine exakte Bahnrichtung, sondern nur, dass die
+        Nase am Bahnanfang innerhalb von track_heading_block_deg steht. Genau
+        das macht diese Konstruktion moeglich, wo ein exakter Einlauf nicht
+        hinpasst: durch Marker und Fahrzeug laeuft genau ein Kreis, der den
+        aktuellen Kurs aufnimmt, und der biegt die Ankunft schon um den
+        doppelten Winkel zwischen Kurs und Sehne.
+
+        Real am Brunnen: 8,78 m Luftlinie, das Fahrzeug 14,2 Grad neben der
+        Sehne. Der Bogen dreht 28,4 Grad, hat 17,9 m Radius, ist 8,87 m lang -
+        neun Zentimeter mehr als die Gerade - und senkt den Winkelfehler zur
+        ersten Bahn von 50,5 auf 36,3 Grad. Damit faehrt der Plan, waehrend
+        die Gerade gesperrt wurde.
+
+        Ueber die Laenge der Geraden davor laesst sich der Ankunftskurs
+        einstellen: je weiter geradeaus vorgefahren wird, desto schaerfer
+        biegt der Rest ein.
+        """
+        lat_scale = 111320.0
+        lon_scale = 111320.0 * max(0.01, math.cos(math.radians(float(to_coord[1]))))
+
+        def unit(bearing_deg):
+            angle = math.radians(bearing_deg)
+            return (math.sin(angle), math.cos(angle))
+
+        start_xy = (
+            (float(from_coord[0]) - float(to_coord[0])) * lon_scale,
+            (float(from_coord[1]) - float(to_coord[1])) * lat_scale,
+        )
+        start_heading = float(start_heading_deg) % 360.0
+        arrival = float(arrival_heading_deg) % 360.0
+        ahead = unit(start_heading)
+        span = math.hypot(*start_xy)
+
+        best = None
+        steps = int(max(0.0, span - 1.0) / 0.5)
+        for step in range(steps + 1):
+            run = 0.5 * step
+            begin = (
+                start_xy[0] + ahead[0] * run,
+                start_xy[1] + ahead[1] * run,
+            )
+            reach_e = -begin[0]
+            reach_n = -begin[1]
+            reach = math.hypot(reach_e, reach_n)
+            if reach < 0.5:
+                continue
+            chord = math.degrees(math.atan2(reach_e, reach_n)) % 360.0
+            offset = (chord - start_heading + 540.0) % 360.0 - 180.0
+            turn = 2.0 * abs(offset)
+            if abs(offset) < 0.25:
+                # Der Marker liegt genau voraus: nichts zu biegen.
+                radius = None
+                total = run + reach
+                lands = start_heading
+            else:
+                if turn > cls.MAX_APPROACH_TURN_DEG:
+                    continue
+                needed = cls._required_turn_radius_m(turn)
+                radius = reach / (2.0 * math.sin(math.radians(abs(offset))))
+                if needed is None or radius < needed:
+                    # Enger als der Regler halten kann.
+                    continue
+                total = run + math.radians(turn) * radius
+                lands = (start_heading + 2.0 * offset) % 360.0
+            error = cls._angle_error_deg(lands, arrival)
+            rank = (round(error, 1), round(total, 2))
+            if best is None or rank < best[0]:
+                best = (rank, run, begin, offset, turn, radius)
+
+        if best is None:
+            return None
+        _rank, run, begin, offset, turn, radius = best
+
+        path = [start_xy]
+        if run > 0.02:
+            path.append(begin)
+        if radius is not None:
+            left = offset < 0.0
+            side = unit(start_heading - 90.0 if left else start_heading + 90.0)
+            centre = (begin[0] + side[0] * radius, begin[1] + side[1] * radius)
+            count = max(1, int(math.ceil(turn / cls.MAX_TURN_STEP_DEG)))
+            for index in range(1, count + 1):
+                travelled = turn * index / count
+                heading = (
+                    start_heading - travelled if left
+                    else start_heading + travelled
+                )
+                spoke = unit(heading + 90.0 if left else heading - 90.0)
+                path.append((
+                    centre[0] + spoke[0] * radius,
+                    centre[1] + spoke[1] * radius,
+                ))
+        path.append((0.0, 0.0))
+
+        coords = [
+            [
+                float(to_coord[0]) + east / lon_scale,
+                float(to_coord[1]) + north / lat_scale,
+            ]
+            for east, north in path
+        ]
+        deduplicated = [coords[0]]
+        for coord in coords[1:]:
+            if cls._coord_distance_m(deduplicated[-1], coord) > 0.02:
+                deduplicated.append(coord)
+        deduplicated[-1] = [float(to_coord[0]), float(to_coord[1])]
+        if len(deduplicated) < 2:
+            return None
+        return deduplicated
+
+    @classmethod
+    def _approach_arc_coords(
+        cls,
+        from_coord: List[float],
+        start_heading_deg: float,
+        to_coord: List[float],
+        arrival_heading_deg: Optional[float] = None,
+    ) -> Optional[List[List[float]]]:
+        """Die Anfahrt, die am Marker am besten zur ersten Bahn passt.
+
+        Zwei Bauarten stehen zur Wahl, und sie ergaenzen sich:
+
+        ``_merge_onto_lane_coords`` legt den Weg exakt auf die Bahnlinie -
+        null Grad Fehler, aber es braucht Platz, um sich anzulegen: der
+        Einschwenkbogen muss vor dem Marker auf die Bahnlinie passen.
+
+        ``_bend_onto_marker_coords`` biegt bloss auf den Marker zu und nimmt
+        den Restfehler in Kauf. Das kostet fast nichts an Weg und geht auch
+        dann, wenn kein Platz zum Anlegen da ist.
+
+        Genommen wird, was am Ziel weniger schief steht; bei gleichem Winkel
+        der kuerzere Weg. Der Regler verlangt nicht mehr als
+        track_heading_block_deg - eine Anfahrt, die diese Grenze einhaelt,
+        ist gut genug, auch wenn sie nicht exakt auf der Bahn endet. Das war
+        der Denkfehler vom 08.08.: nur die exakte Loesung gesucht und, wo sie
+        nicht hinpasste, gar keinen Bogen gebaut - obwohl ein flacher Bogen
+        den Fehler am realen Stellplatz von 50,5 auf 36,3 Grad gedrueckt und
+        damit die Fahrt freigegeben haette.
+        """
+        if arrival_heading_deg is None:
+            return None
+
+        # Messlatte ist die gerade Verbindung, die sonst gefahren wuerde. Ein
+        # Bogen wird nur gebaut, wenn er die Ankunft wirklich verbessert -
+        # sonst biegt er im Zweifel von der Bahn weg statt zu ihr hin (bei
+        # Kurs 210 am Brunnen gemessen: 60,3 statt 53,0 Grad).
+        straight = cls._edge_bearing_deg(from_coord, to_coord)
+        best = None
+        if straight is not None:
+            best = (
+                (round(cls._angle_error_deg(straight, arrival_heading_deg), 1),
+                 round(cls._coord_distance_m(from_coord, to_coord), 2)),
+                None,
+            )
+        for build in (cls._merge_onto_lane_coords, cls._bend_onto_marker_coords):
+            coords = build(
+                from_coord, start_heading_deg, to_coord, arrival_heading_deg
+            )
+            if coords is None or len(coords) < 2:
+                continue
+            arrival = cls._edge_bearing_deg(coords[-2], coords[-1])
+            if arrival is None:
+                continue
+            rank = (
+                round(cls._angle_error_deg(arrival, arrival_heading_deg), 1),
+                round(cls._polyline_length_m(coords), 2),
+            )
+            if best is None or rank < best[0]:
+                best = (rank, coords)
+        return None if best is None else best[1]
+
+    @classmethod
+    def _segment_entry_heading(
+        cls,
+        coords: List[List[float]],
+        direction: Optional[str],
+    ) -> Optional[float]:
+        """Kurs, den die Nase am Anfang dieses Segments haben muss."""
+        for start, end in zip(coords, coords[1:]):
+            if cls._coord_distance_m(start, end) <= 0.02:
+                continue
+            bearing = cls._edge_bearing_deg(start, end)
+            if bearing is None:
+                continue
+            return (bearing + 180.0) % 360.0 if direction == "reverse" else bearing
+        return None
+
+    @classmethod
+    def _arrival_error(
+        cls,
+        segment: Dict[str, Any],
+        arrival_heading_deg: float,
+    ) -> float:
+        """Wie schief die Nase am Ende dieser Anfahrt zur naechsten Bahn steht."""
+        end = cls._segment_end_heading(segment)
+        if end is None:
+            return 0.0
+        return abs((end - float(arrival_heading_deg) + 180.0) % 360.0 - 180.0)
 
     def _select_transfer_direction(
         self,
@@ -921,6 +1741,40 @@ class MowingPlanManager:
             ),
         }
 
+    def _ring_sense_for_resume(
+        self,
+        segment: Dict[str, Any],
+        start_coord: List[float],
+        start_heading_deg: float,
+        default: bool,
+    ) -> bool:
+        """Drehsinn beim Fortsetzen: der, in den die Nase schon zeigt.
+
+        Gebaut werden beide Moeglichkeiten genau so, wie sie die Route spaeter
+        auch baut, und verglichen wird der Kursfehler am Bahnanfang. Eine
+        Schwelle taugt dafuer nicht: das Umdrehen sucht sich einen anderen
+        Stuetzpunkt als Anfang, dort verlaeuft der Ring anders, und ein
+        vorher gerechneter Winkel stimmt nicht mehr.
+        """
+        best = default
+        best_error = None
+        for reversed_ring in (False, True):
+            candidate = dict(
+                segment,
+                coordinates=list(reversed(self._coords(segment)))
+                if reversed_ring else list(self._coords(segment)),
+            )
+            oriented = self._oriented_track_coords(
+                candidate, start_coord, start_heading_deg, vehicle=start_coord
+            )
+            if len(oriented) < 2:
+                continue
+            error = abs(self._route_heading_error(oriented, start_heading_deg))
+            if best_error is None or error < best_error:
+                best_error = error
+                best = reversed_ring
+        return best
+
     def _transition_segment(
         self,
         transition: Dict[str, Any],
@@ -1008,8 +1862,6 @@ class MowingPlanManager:
         self,
         segment: Dict[str, Any],
         point: List[float],
-        approach_heading_deg: Optional[float] = None,
-        vehicle: Optional[List[float]] = None,
     ) -> List[List[float]]:
         """Start the first route segment at the UI-selected path point."""
         coords = self._coords(segment)
@@ -1034,19 +1886,14 @@ class MowingPlanManager:
         # ausserhalb, Ring 0 -> Ring 1). Gefahren wird die geplante Bahn.
         point = self._project_on_segment(point, coords[best_index], coords[best_index + 1])
 
-        if approach_heading_deg is not None and self._is_closed(coords):
-            # Der gewählte Punkt bleibt der Startpunkt, solange die Bahn dort
-            # ungefähr in die Richtung läuft, aus der das Fahrzeug ankommt.
-            # Nur wenn sie quer dazu liegt, beginnt der Ring wenige Meter
-            # daneben - gemäht wird derselbe geschlossene Ring, nur fahrbar
-            # begonnen. Ob der Ring hier knickt, ist dafür ohne Belang: eine
-            # Ecke am Anfang liegt auf der Naht und wird nie durchfahren.
-            tangent = self._edge_bearing_deg(point, coords[best_index + 1])
-            if self._angle_error_deg(tangent, approach_heading_deg) > self.RING_START_HEADING_LIMIT_DEG:
-                return self._rotate_closed_ring_near(
-                    coords, point, approach_heading_deg, vehicle=vehicle
-                )
-
+        # Der gewählte Punkt ist der Startpunkt - immer, auch wenn der Ring
+        # dort quer zur Anflugrichtung liegt. Bis zum 08.08. rutschte der
+        # Start in genau dem Fall einige Meter am Ring entlang (real: 12,45 m
+        # beim Brunnen), damit die Anfahrt ihn geradeaus erreichen konnte. Der
+        # Marker in der Karte blieb dabei stehen, und das Fahrzeug fuhr
+        # sichtbar woandershin. Nötig ist das nicht mehr: die Anfahrt schwenkt
+        # jetzt selbst ein und kommt in Bahnrichtung an, egal wie das Fahrzeug
+        # steht (_tangential_approach_coords).
         if self._is_closed(coords):
             open_ring = coords[:-1]
             next_index = (best_index + 1) % len(open_ring)
@@ -1101,6 +1948,20 @@ class MowingPlanManager:
             float(start[0]) + (float(end[0]) - float(start[0])) * t,
             float(start[1]) + (float(end[1]) - float(start[1])) * t,
         ]
+
+    @classmethod
+    def _distance_to_polyline_m(
+        cls,
+        point: List[float],
+        coords: List[List[float]],
+    ) -> float:
+        """Kuerzester Abstand zur Bahn selbst, nicht zu ihren Stuetzpunkten."""
+        if len(coords) < 2:
+            return cls._coord_distance_m(point, coords[0]) if coords else 0.0
+        return min(
+            cls._point_to_line_distance_m(point, start, end)
+            for start, end in zip(coords, coords[1:])
+        )
 
     @staticmethod
     def _point_to_line_distance_m(point: List[float], start: List[float], end: List[float]) -> float:

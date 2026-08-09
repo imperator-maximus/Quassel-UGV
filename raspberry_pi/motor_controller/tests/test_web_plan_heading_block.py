@@ -389,6 +389,46 @@ class StopReasonSurvivesARestartTests(unittest.TestCase):
 
         self.assertEqual('running', status['state'])
         self.assertIsNone(status['last_error'])
+
+
+class SimulationWithoutRtkTests(unittest.TestCase):
+    """Rechnen darf man immer, losfahren nur mit RTK FIXED.
+
+    Die Simulation bewegt nichts, hing aber am selben RTK-Fix wie die echte
+    Fahrt. Damit liess sich eine Anfahrt ausgerechnet dann nicht durchrechnen,
+    wenn das Fahrzeug wegen fehlendem Fix ohnehin stand (08.08., Status
+    "RTK GPS Fix" statt "RTK FIXED").
+    """
+
+    def setUp(self):
+        self.script = (
+            Path(__file__).resolve().parents[2] / 'static' / 'js' / 'mapping_editor.js'
+        ).read_text(encoding='utf-8')
+
+    def _simulate_function(self):
+        start = self.script.index('function simulateLanePlan(')
+        return self.script[start:start + 1400]
+
+    def test_simulation_only_needs_a_position(self):
+        body = self._simulate_function()
+        guard = body[body.index('useCurrentPose &&'):][:120]
+
+        self.assertIn('latestVehiclePose === null', guard)
+        self.assertNotIn('rtkAvailable', guard)
+
+    def test_a_missing_fix_is_named_in_the_status_line(self):
+        """Ohne Fix ist die Startposition ungenau - das muss dastehen."""
+        body = self._simulate_function()
+
+        self.assertIn('OHNE RTK-Fix', body)
+
+    def test_driving_still_requires_a_fix(self):
+        self.assertIn(
+            "if (!rtkAvailable) return {ready: false, reason: 'RTK FIXED ist erforderlich'};",
+            self.script,
+        )
+
+
 class PlanAlertVisibilityTests(unittest.TestCase):
     """Ein gestoppter Plan muss ohne Suchen sichtbar sein.
 

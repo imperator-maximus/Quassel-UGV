@@ -579,8 +579,13 @@ function simulateLanePlan() {
         return;
     }
     const useCurrentPose = document.getElementById('simulationUseCurrentPose')?.checked === true;
-    if (useCurrentPose && (!rtkAvailable || latestVehiclePose === null)) {
-        setSimulationStatus('Für die simulierte Anfahrt ist ein aktueller RTK-Fix erforderlich');
+    // Die Simulation rechnet nur - sie bewegt nichts. Deshalb verlangt sie
+    // eine Position, aber keinen RTK-Fix: sonst laesst sich eine Anfahrt
+    // ausgerechnet dann nicht durchrechnen, wenn das Fahrzeug wegen fehlendem
+    // Fix ohnehin steht. Losfahren bleibt an RTK FIXED gebunden, das
+    // entscheidet planReadiness weiter unten.
+    if (useCurrentPose && latestVehiclePose === null) {
+        setSimulationStatus('Für die simulierte Anfahrt fehlt die Fahrzeugposition');
         return;
     }
     laneSimulationRunning = true;
@@ -589,7 +594,9 @@ function simulateLanePlan() {
     laneSimulationAbortController = new AbortController();
     refreshPlanButtons();
     const startLabel = useCurrentPose
-        ? 'ab aktueller RTK-Position'
+        ? (rtkAvailable
+            ? 'ab aktueller RTK-Position'
+            : 'ab aktueller Position OHNE RTK-Fix – die Lage kann Meter danebenliegen')
         : 'ab gewählter Abfahrposition';
     const scopeValue = document.getElementById('simulationScope')?.value || '3';
     const maxSourceSegments = scopeValue === 'all' ? null : Number(scopeValue);
@@ -1477,8 +1484,12 @@ function planAlertText(plan, planState) {
     const detail = plan.last_error ? ` · ${plan.last_error}` : '';
     // Ein vom Benutzer ausgeloester Halt ohne Fehlertext ist keine Stoerung.
     if (!detail && ['paused', 'stopped', 'stopping'].includes(planState)) return null;
-    const progress = `${plan.active_index || 0}/${plan.total || 0}`;
-    return `⛔ Plan gestoppt: ${planState} · Segment ${progress}${detail}`;
+    // Nach einem Neustart des Dienstes ist die Segmentzahl unbekannt - dann
+    // "Segment 3/0" zu schreiben wäre schlechter als nichts.
+    const progress = plan.total
+        ? ` · Segment ${plan.active_index || 0}/${plan.total}`
+        : '';
+    return `⛔ Plan gestoppt: ${planState}${progress}${detail}`;
 }
 
 function updateActivePlanLabel() {

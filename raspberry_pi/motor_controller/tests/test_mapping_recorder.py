@@ -1069,13 +1069,20 @@ class MappingRecorderTests(unittest.TestCase):
         self.assertEqual(self._coord_m(12.0, 0.0), executable[0]["coordinates"][0])
         self.assertEqual(selected, executable[0]["coordinates"][-1])
 
-    def test_approach_rolls_into_the_turn_instead_of_demanding_a_pivot(self):
-        """Quer geparkt muss die Anfahrt trotzdem fahrbar sein.
+    def test_a_crooked_stand_is_reported_instead_of_smoothed_away(self):
+        """Quer geparkt und zu nah: dann gibt es keine Anfahrt, und das zählt.
 
-        Als gerader Track lehnte der Regler sie ab, sobald das Fahrzeug mehr
-        als 45° verdreht stand (real, 02.08.: -46,8°, 0 m gefahren), und
-        rückwärts greift erst ab 100°. Dazwischen gab es keine fahrbare
-        Variante - der Gegenlauf-Pivot dreht dieses Fahrzeug nicht.
+        Das Fahrzeug steht 7 m vom Ziel und 60° verdreht - zu viel für den
+        Track-Regler, zu wenig für rückwärts. Hier stand früher ein
+        eingerollter Ersatzbogen, damit überhaupt etwas Fahrbares herauskam.
+        Der war es aber nie: mit 0,6 m Schrittweite beschreibt er einen
+        1,7-m-Kreis, und der Regler hält erst 7 m. Schlimmer noch, er drückte
+        den Kursfehler im Plan auf 20° - der Plan-Check sah nichts mehr und
+        gab eine Fahrt frei, die nach 2,5 m abbrach (real, 08.08.).
+
+        Bei 7 m Abstand liegt das Ziel innerhalb des Wendekreises; dorthin
+        führt in einem Zug kein Weg. Der Plan zeigt dann die gerade
+        Verbindung mit ihrem echten Kursfehler, und der Check lehnt ab.
         """
         manager = MowingPlanManager("/tmp/maps", lambda: self._pose_m(12.0, 0.0, 90.0))
         plan = self._reverse_transition_plan()
@@ -1085,36 +1092,29 @@ class MappingRecorderTests(unittest.TestCase):
             plan,
             start_segment_index=1,
             start_coordinate=selected,
-            # 60° verdreht: zu viel für den Track-Regler, zu wenig für rückwärts.
             start_pose=self._pose_m(12.0, 0.0, 210.0),
         )
 
         approach = executable[0]
         self.assertEqual("positioning", approach["type"])
         self.assertEqual("forward", approach["direction"])
-        coords = approach["coordinates"]
-        self.assertGreater(len(coords), 2, "Anfahrt wurde nicht eingelenkt")
-        # Kein Knick über der Schrittweite - inklusive des ersten Knicks
-        # gegenüber der Fahrzeugausrichtung.
-        heading = 210.0
-        for start, end in zip(coords, coords[1:]):
-            bearing = manager._edge_bearing_deg(start, end)
-            if bearing is None:
-                continue
-            self.assertLessEqual(
-                manager._angle_error_deg(bearing, heading),
-                manager.MAX_TURN_STEP_DEG + 0.01,
-            )
-            heading = bearing
+        self.assertGreater(
+            manager._route_heading_error(approach["coordinates"], 210.0),
+            manager.ARRIVAL_ALIGNMENT_LIMIT_DEG,
+            "Der wahre Kursfehler muss im Plan stehen, damit der Check ihn sieht",
+        )
 
-    def test_start_moves_only_when_the_lane_runs_across_the_approach(self):
-        """Verschoben wird wegen der Anfahrtsrichtung - nicht wegen einer Ecke.
+    def test_selected_start_stays_where_it_was_chosen(self):
+        """Der gewaehlte Punkt ist der Startpunkt - ohne Ausnahme.
 
-        Eine Ecke am Bahnanfang liegt bei einem geschlossenen Ring auf der
-        Naht zwischen Anfang und Ende und wird nie durchfahren; sie ist damit
-        sogar ein guter Anfang. Als Knick gewertet schob sie den Start real
-        3,2 m in die Bahn hinein - dort wären dieselben 67° mitten im Track
-        gelandet, wo der Regler sperrt (02.08.).
+        Frueher rutschte der Start am Ring entlang, wenn die Bahn dort quer
+        zur Anflugrichtung lag: nur so konnte die Anfahrt ihn geradeaus
+        erreichen. Der Marker in der Karte blieb dabei stehen, das Fahrzeug
+        fuhr sichtbar woandershin - beim Brunnen 12,45 m (real, 08.08.).
+        Seit die Anfahrt selbst einschwenkt (_tangential_approach_coords),
+        kommt sie aus jeder Richtung in Bahnrichtung an, und der Ring darf
+        stehenbleiben. Eine Ecke am Anfang stoert dabei nicht: sie liegt auf
+        der Naht zwischen Ringanfang und -ende und wird nie durchfahren.
         """
         manager = MowingPlanManager("/tmp/maps")
         # Stützpunkte alle 2 m wie in einem echten Konturring - sonst gibt es
@@ -1130,21 +1130,14 @@ class MappingRecorderTests(unittest.TestCase):
         spike = {"type": "contour", "coordinates": densified}
         tip = self._coord_m(10.0, 1.0)
 
-        # Quer angefahren: der Ring läuft an der Spitze nach Nordwesten, die
-        # Anfahrt kommt von Osten - dort ist kein Start möglich.
-        moved = manager._coords_from_selected_start(spike, tip, approach_heading_deg=270.0)
-        self.assertGreater(manager._coord_distance_m(moved[0], tip), 0.05)
-        self.assertEqual(moved[0], moved[-1])
-
-        # Dieselbe Spitze, aber in Bahnrichtung angefahren: bleibt stehen,
-        # obwohl der Ring hier scharf knickt.
-        tangent = manager._edge_bearing_deg(tip, densified[densified.index(tip) + 1])
-        kept = manager._coords_from_selected_start(spike, tip, approach_heading_deg=tangent)
+        # Auf der Spitze: der Ring beginnt genau dort und schliesst sich dort.
+        kept = manager._coords_from_selected_start(spike, tip)
         self.assertLess(manager._coord_distance_m(kept[0], tip), 0.05)
+        self.assertEqual(kept[0], kept[-1])
 
-        # Mitten auf der geraden Unterkante, in Fahrtrichtung angefahren.
+        # Mitten auf der geraden Unterkante: ebenso.
         on_edge = self._coord_m(10.0, 0.0)
-        kept = manager._coords_from_selected_start(spike, on_edge, approach_heading_deg=90.0)
+        kept = manager._coords_from_selected_start(spike, on_edge)
         self.assertLess(manager._coord_distance_m(kept[0], on_edge), 0.05)
 
     def test_approach_ends_aligned_with_the_first_lane(self):
