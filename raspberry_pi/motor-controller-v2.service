@@ -11,6 +11,13 @@ WorkingDirectory=/home/nicolay
 Environment="PYTHONUNBUFFERED=1"
 Environment="PYTHONPATH=/home/nicolay/.venvs/odrive056/lib/python3.11/site-packages"
 
+# Zugangsdaten der Weboberflaeche und des SensorHub-Telemetrieabrufs.
+# Liegt mit Modus 600 auf dem Geraet und gehoert nicht ins Repository, siehe
+# raspberry_pi/WEB_ZUGANGSSCHUTZ.md. Das fuehrende '-' laesst den Dienst auch
+# ohne die Datei starten: Der Webserver antwortet dann mit 503, waehrend
+# Fahrantrieb und Sicherheitslogik weiterlaufen.
+EnvironmentFile=-/etc/ugv-web.env
+
 # Haupt-Befehl mit Config-Datei
 ExecStart=/usr/bin/python3 -m motor_controller.main --config /home/nicolay/motor_controller/config.yaml
 

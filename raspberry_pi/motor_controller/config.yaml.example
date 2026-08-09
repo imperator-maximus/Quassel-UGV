@@ -116,6 +116,10 @@ can:
 sensor_hub:
   transport: wifi          # Produktion: zwei persistente HTTP-Streams, kein CAN
   wifi_url: http://schloss.fdog.de:8081/api/telemetry
+  # Zugangsdaten des SensorHub-Webservers. Das Passwort kommt aus der
+  # Umgebungsvariable SENSOR_HUB_TELEMETRY_PASSWORD. Passt es nicht, bleibt die
+  # Pose aus und der Watchdog pausiert nach ~1 s den Fahrantrieb.
+  auth_username: ugv
   poll_interval_s: 0.2
   request_timeout_s: 1.5
   pause_timeout_s: 1.0
@@ -180,14 +184,29 @@ mapping:
   min_point_distance_m: 0.25        # Mindestabstand zwischen aufgezeichneten Punkten
 
 # Web-Interface-Konfiguration
+#
+# Achtung: Dieses Interface ist über die Portfreigabe aus dem Internet
+# erreichbar und kann Fahrantrieb und Mähdeck starten. Passwort und secret_key
+# stehen NICHT hier, sondern in der Umgebung des Dienstes:
+#
+#   UGV_WEB_PASSWORD    Pflicht, solange auth_enabled true ist
+#   UGV_WEB_SECRET_KEY  optional, sonst wird bei jedem Start einer erzeugt
+#
+# Siehe raspberry_pi/WEB_ZUGANGSSCHUTZ.md
 web:
   enabled: true
   host: 0.0.0.0
   port: 80
-  secret_key: ugv_motor_controller_2024
   template_folder: templates
   static_folder: static
   max_speed_percent: 100.0
+  auth_enabled: true       # false schaltet den Zugangsschutz ab (nur offline!)
+  auth_username: ugv
+  auth_realm: Quassel UGV
+  allowed_origins: []      # zusätzliche Herkünfte für schreibende Requests
+  auth_max_failures: 8     # danach sperrt die IP für auth_lockout_s
+  auth_lockout_s: 60.0
+
 
 # Logging-Konfiguration
 logging:

@@ -16,6 +16,10 @@ from motor_controller.simulation.path_simulator import (
     _SimulationMotor,
 )
 from motor_controller.web.web_server import WebServer
+from motor_controller.tests.web_test_support import (
+    authenticated_client,
+    web_config as build_web_config,
+)
 
 
 class PathSimulatorTests(unittest.TestCase):
@@ -344,11 +348,7 @@ class PathSimulatorTests(unittest.TestCase):
 
     def test_simulation_api_returns_renderable_trajectory_without_hardware(self):
         plan = self._plan([self._segment(0, [(0.0, 0.0), (3.0, 0.0)])])
-        web_config = SimpleNamespace(
-            template_folder=".",
-            static_folder=".",
-            secret_key="test",
-        )
+        web_config = build_web_config()
         dummy = SimpleNamespace()
         mapping = SimpleNamespace(
             plans=self.manager,
@@ -365,7 +365,7 @@ class PathSimulatorTests(unittest.TestCase):
             mapping_recorder=mapping,
         )
 
-        response = server.app.test_client().post(
+        response = authenticated_client(server).post(
             "/api/mapping/maps/Simulation/plan/simulate",
             json={
                 "plan": plan,
@@ -387,7 +387,7 @@ class PathSimulatorTests(unittest.TestCase):
 
     def test_simulation_api_rejects_parallel_run(self):
         plan = self._plan([self._segment(0, [(0.0, 0.0), (3.0, 0.0)])])
-        web_config = SimpleNamespace(template_folder=".", static_folder=".", secret_key="test")
+        web_config = build_web_config()
         dummy = SimpleNamespace()
         mapping = SimpleNamespace(
             plans=self.manager,
@@ -404,7 +404,7 @@ class PathSimulatorTests(unittest.TestCase):
         )
         server._simulation_lock.acquire()
         try:
-            response = server.app.test_client().post(
+            response = authenticated_client(server).post(
                 "/api/mapping/maps/Simulation/plan/simulate",
                 json={"plan": plan},
             )
@@ -416,7 +416,7 @@ class PathSimulatorTests(unittest.TestCase):
 
     def test_simulation_status_and_cancel_api(self):
         plan = self._plan([self._segment(0, [(0.0, 0.0), (3.0, 0.0)])])
-        web_config = SimpleNamespace(template_folder=".", static_folder=".", secret_key="test")
+        web_config = build_web_config()
         dummy = SimpleNamespace()
         server = WebServer(
             web_config,
@@ -438,10 +438,10 @@ class PathSimulatorTests(unittest.TestCase):
             "started_at": 1.0,
         })
 
-        status = server.app.test_client().get(
+        status = authenticated_client(server).get(
             "/api/mapping/maps/Simulation/plan/simulate/status"
         )
-        cancel = server.app.test_client().post(
+        cancel = authenticated_client(server).post(
             "/api/mapping/maps/Simulation/plan/simulate/cancel"
         )
 
@@ -454,7 +454,7 @@ class PathSimulatorTests(unittest.TestCase):
 
     def test_playback_api_compiles_executable_route_without_running_controller(self):
         plan = self._plan([self._segment(0, [(0.0, 0.0), (3.0, 0.0)])])
-        web_config = SimpleNamespace(template_folder=".", static_folder=".", secret_key="test")
+        web_config = build_web_config()
         dummy = SimpleNamespace()
         mapping = SimpleNamespace(
             plans=self.manager,
@@ -470,7 +470,7 @@ class PathSimulatorTests(unittest.TestCase):
             mapping_recorder=mapping,
         )
 
-        response = server.app.test_client().post(
+        response = authenticated_client(server).post(
             "/api/mapping/maps/Simulation/plan/playback",
             json={
                 "plan": plan,
@@ -494,7 +494,7 @@ class PathSimulatorTests(unittest.TestCase):
             self._segment(0, [(0.0, 0.0), (3.0, 0.0)]),
             self._segment(1, [(3.0, 1.0), (0.0, 1.0)], direction="reverse"),
         ])
-        web_config = SimpleNamespace(template_folder=".", static_folder=".", secret_key="test")
+        web_config = build_web_config()
         dummy = SimpleNamespace()
         server = WebServer(
             web_config,
@@ -509,7 +509,7 @@ class PathSimulatorTests(unittest.TestCase):
             ),
         )
 
-        response = server.app.test_client().post(
+        response = authenticated_client(server).post(
             "/api/mapping/maps/Simulation/plan/playback",
             json={
                 "plan": plan,
@@ -538,7 +538,7 @@ class PathSimulatorTests(unittest.TestCase):
             "coordinates": [],
             "length_m": 0.0,
         }]
-        web_config = SimpleNamespace(template_folder=".", static_folder=".", secret_key="test")
+        web_config = build_web_config()
         can = SimpleNamespace(get_sensor_data=lambda: self._pose(-2.0, 0.0, 90.0))
         server = WebServer(
             web_config,
@@ -553,7 +553,7 @@ class PathSimulatorTests(unittest.TestCase):
             ),
         )
 
-        response = server.app.test_client().post(
+        response = authenticated_client(server).post(
             "/api/mapping/maps/Simulation/plan/playback",
             json={
                 "plan": plan,

@@ -429,6 +429,10 @@
                     <span class="status-value" id="last-update">-</span>
                 </div>
                 <div class="status-item">
+                    <span class="status-label">NTRIP Daten:</span>
+                    <span class="status-value" id="ntrip-data-age">-</span>
+                </div>
+                <div class="status-item">
                     <span class="status-label">RTK Uptime:</span>
                     <span class="status-value" id="rtk-uptime">0s</span>
                 </div>
@@ -702,12 +706,26 @@
             // Bridge Status aktualisieren
             fetchJson(`${API_BASE}/bridge/status`)
                 .then(data => {
-                    // NTRIP verbunden
+                    // NTRIP verbunden. "STOCKT" = Socket offen, aber es kommen
+                    // keine Daten mehr - der Zustand, der RTK auf GPS FIX kippt.
                     const nrtipBadge = document.getElementById('ntrip-connected');
-                    if (data.ntrip.connected) {
+                    if (data.ntrip.connected && data.ntrip.stale) {
+                        nrtipBadge.innerHTML = '<span class="status-badge" style="background: #dd8800; color: #fff;">STOCKT</span>';
+                    } else if (data.ntrip.connected) {
                         nrtipBadge.innerHTML = '<span class="status-badge" style="background: #00aa00; color: #fff;">ONLINE</span>';
                     } else {
                         nrtipBadge.innerHTML = '<span class="status-badge badge-no-gps">OFFLINE</span>';
+                    }
+
+                    // Alter der zuletzt empfangenen NTRIP-Daten
+                    const dataAgeEl = document.getElementById('ntrip-data-age');
+                    const age = data.ntrip.seconds_since_data;
+                    if (age === null || age === undefined) {
+                        dataAgeEl.textContent = '-';
+                        dataAgeEl.style.color = '';
+                    } else {
+                        dataAgeEl.textContent = Math.floor(age) + 's';
+                        dataAgeEl.style.color = data.ntrip.stale ? '#dd8800' : '';
                     }
 
                     // RTK Uptime
@@ -728,6 +746,7 @@
                 .catch(error => {
                     console.warn('Bridge Status Update Fehler:', error);
                     document.getElementById('ntrip-connected').innerHTML = '<span class="status-badge badge-no-gps">OFFLINE</span>';
+                    document.getElementById('ntrip-data-age').textContent = '-';
                     document.getElementById('rtk-uptime').textContent = '0s';
                 });
             

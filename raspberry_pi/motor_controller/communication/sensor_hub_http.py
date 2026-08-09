@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fail-safe HTTP telemetry client for the Orange Pi SensorHub."""
 
+import base64
 import json
 import logging
 import math
@@ -40,6 +41,24 @@ class SensorHubHttpClient:
         self._request_url = self._configured_url
         self._host_header: Optional[str] = None
         self._stream_connections = 0
+        self._auth_header = self._build_auth_header()
+
+    def _build_auth_header(self) -> Dict[str, str]:
+        """Erzeugt den Basic-Auth-Header fuer den geschuetzten SensorHub.
+
+        Ohne konfigurierte Zugangsdaten bleibt der Header leer. Der SensorHub
+        antwortet dann mit 401, die Pose bleibt aus und der Watchdog pausiert
+        nach etwa einer Sekunde den Fahrantrieb - sichtbar, aber nicht
+        gefaehrlich.
+        """
+        username = str(getattr(self.config, 'auth_username', '') or '')
+        password = str(getattr(self.config, 'auth_password', '') or '')
+        if not username or not password:
+            return {}
+        token = base64.b64encode(
+            f"{username}:{password}".encode('utf-8')
+        ).decode('ascii')
+        return {'Authorization': f'Basic {token}'}
 
     def start(self) -> None:
         if self.running:
@@ -86,6 +105,7 @@ class SensorHubHttpClient:
                 headers={
                     'Accept': 'application/x-ndjson',
                     'Connection': 'keep-alive',
+                    **self._auth_header,
                     **({'Host': self._host_header} if self._host_header else {}),
                 },
             )
@@ -127,6 +147,7 @@ class SensorHubHttpClient:
                 headers={
                     'Accept': 'application/json',
                     'Connection': 'close',
+                    **self._auth_header,
                     **({'Host': self._host_header} if self._host_header else {}),
                 },
             )
@@ -195,16 +216,41 @@ class SensorHubHttpClient:
             error_count = self._error_count
             consecutive_errors = self._consecutive_errors
         if should_log:
-            self.logger.warning(
-                "SensorHub WiFi-Abruf fehlgeschlagen (%d Fehler gesamt): %s",
-                error_count,
-                exc,
-            )
+            if self._is_auth_error(exc):
+                # Diese Ursache ist von aussen nicht von einem Netzausfall zu
+                # unterscheiden, die Behebung aber voellig anders. Sie gehoert
+                # deshalb als eigene Meldung ins Log.
+                self.logger.error(
+                    "SensorHub weist die Anmeldung ab (%s). "
+                    "sensor_hub.auth_username und SENSOR_HUB_TELEMETRY_PASSWORD "
+                    "muessen zu WEB_AUTH_USERNAME/WEB_AUTH_PASSWORD des "
+                    "SensorHub passen. Ohne Pose bleibt der Fahrantrieb pausiert.",
+                    exc,
+                )
+            else:
+                self.logger.warning(
+                    "SensorHub WiFi-Abruf fehlgeschlagen (%d Fehler gesamt): %s",
+                    error_count,
+                    exc,
+                )
         # Nicht bei einem kurzen Netzruckler sofort wieder den langsamen
         # lokalen DNS-Resolver betreten. Erst zehn aufeinanderfolgende
         # HTTP-Fehler deuten auf eine geaenderte Zieladresse hin.
         if consecutive_errors >= 10 and consecutive_errors % 10 == 0:
             self._refresh_resolved_url()
+
+    @staticmethod
+    def _is_auth_error(exc: Exception) -> bool:
+        """Erkennt eine abgewiesene Anmeldung am HTTP-Status.
+
+        Der Stream prueft den Status selbst und wirft RuntimeError('HTTP 401'),
+        urlopen wirft bei 401/403 eine HTTPError mit .code.
+        """
+        code = getattr(exc, 'code', None)
+        if code in (401, 403, 429):
+            return True
+        text = str(exc)
+        return any(marker in text for marker in ('HTTP 401', 'HTTP 403', 'HTTP 429'))
 
     def _get_stream_url(self) -> str:
         parts = urlsplit(self._request_url)

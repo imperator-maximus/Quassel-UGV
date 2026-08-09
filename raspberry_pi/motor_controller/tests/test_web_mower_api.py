@@ -8,6 +8,11 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from motor_controller.web.web_server import WebServer
+from motor_controller.tests.web_test_support import (
+    auth_header,
+    authenticated_client,
+    web_config,
+)
 
 
 class FakeODriveMower:
@@ -64,19 +69,14 @@ class FakeODriveMower:
 
 class MowerApiSafetyTests(unittest.TestCase):
     def setUp(self):
-        config = SimpleNamespace(
-            template_folder='.',
-            static_folder='.',
-            secret_key='test',
-        )
         dummy = SimpleNamespace()
         # Der CAN-Stub muss Telemetrie liefern koennen: die Planausfuehrung
         # fragt darueber No-Go-Zonen und RTK ab.
         can = SimpleNamespace(get_sensor_data=lambda: {})
-        self.server = WebServer(config, dummy, dummy, can, dummy)
+        self.server = WebServer(web_config(), dummy, dummy, can, dummy)
         self.mower = FakeODriveMower()
         self.server.set_hardware_refs(None, None, None, self.mower)
-        self.client = self.server.app.test_client()
+        self.client = authenticated_client(self.server)
 
     def test_missing_json_cannot_toggle_or_start_mower(self):
         response = self.client.post('/api/mower/toggle')
@@ -516,6 +516,77 @@ class RtkRecoveryWaitTests(unittest.TestCase):
         # Der aufrufende Loop stoppt die Navigation selbst - hier darf kein
         # zweiter, widerspruechlicher Stopp-Grund gesetzt werden.
         self.assertEqual([], server.navigation.stop_reasons)
+
+
+class MowerApiAuthenticationTests(unittest.TestCase):
+    """Die Weboberflaeche haengt am Internet - ohne Anmeldung kein Zugriff."""
+
+    def setUp(self):
+        dummy = SimpleNamespace()
+        can = SimpleNamespace(get_sensor_data=lambda: {})
+        self.server = WebServer(web_config(), dummy, dummy, can, dummy)
+        self.mower = FakeODriveMower()
+        self.server.set_hardware_refs(None, None, None, self.mower)
+        self.client = self.server.app.test_client()
+
+    def test_unauthenticated_request_cannot_start_the_mower(self):
+        response = self.client.post(
+            '/api/mower/toggle',
+            json={'state': True},
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertIn('WWW-Authenticate', response.headers)
+        self.assertFalse(self.mower.running)
+        self.assertEqual([], self.mower.start_calls)
+
+    def test_wrong_password_cannot_start_the_mower(self):
+        response = self.client.post(
+            '/api/mower/toggle',
+            json={'state': True},
+            headers={'Authorization': auth_header(password='falsch')},
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertFalse(self.mower.running)
+        self.assertEqual([], self.mower.start_calls)
+
+    def test_status_is_not_readable_without_authentication(self):
+        """Auch die Statusabfrage verraet Position und Zustand des Fahrzeugs."""
+        self.assertEqual(self.client.get('/api/status').status_code, 401)
+
+    def test_foreign_website_cannot_start_the_mower(self):
+        """Der Browser sendet gespeicherte Zugangsdaten auch fuer fremde Seiten."""
+        response = self.client.post(
+            '/api/mower/toggle',
+            json={'state': True},
+            headers={
+                'Authorization': auth_header(),
+                'Origin': 'https://boese.example',
+                'Sec-Fetch-Site': 'cross-site',
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(self.mower.running)
+        self.assertEqual([], self.mower.start_calls)
+
+    def test_missing_password_fails_closed(self):
+        """Aktivierter Schutz ohne Passwort darf nicht zu freiem Zugang werden."""
+        dummy = SimpleNamespace()
+        can = SimpleNamespace(get_sensor_data=lambda: {})
+        server = WebServer(
+            web_config(auth_password=''), dummy, dummy, can, dummy,
+        )
+        mower = FakeODriveMower()
+        server.set_hardware_refs(None, None, None, mower)
+
+        response = server.app.test_client().post(
+            '/api/mower/toggle', json={'state': True},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(mower.running)
 
 
 if __name__ == '__main__':

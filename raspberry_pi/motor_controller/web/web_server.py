@@ -14,9 +14,10 @@ from typing import Optional
 from ..mapping.nogo_monitor import NoGoZoneMonitor
 from ..navigation.navigation_controller import NavigationController
 from ..simulation.path_simulator import MowingPathSimulator, SimulationParameters
+from .auth import LoginThrottle, WebAuthGuard
 
 try:
-    from flask import Flask, render_template, jsonify, request
+    from flask import Flask, render_template, jsonify, request, session
     from flask_socketio import SocketIO, emit
     FLASK_AVAILABLE = True
     SOCKETIO_AVAILABLE = True
@@ -37,7 +38,7 @@ class WebServer:
     def __init__(self, config, motor_control, joystick_handler, can_handler, gpio_controller, navigation_controller=None, mapping_recorder=None, safety_monitor=None):
         """
         Initialisiert Web-Server
-        
+
         Args:
             config: WebConfig-Instanz
             motor_control: MotorControl-Instanz
@@ -60,6 +61,7 @@ class WebServer:
         self.socketio_available = SOCKETIO_AVAILABLE
         self.app: Optional[Flask] = None
         self.socketio: Optional[SocketIO] = None
+        self.auth: Optional[WebAuthGuard] = None
         self.server_thread: Optional[threading.Thread] = None
         self.running = False
         
@@ -127,19 +129,43 @@ class WebServer:
                 static_folder=str(static_folder)
             )
             self.app.config['SECRET_KEY'] = self.config.secret_key
+            # Das Sitzungscookie gibt den WebSocket frei. 'Lax' verhindert, dass
+            # der Browser es an Verbindungen anhaengt, die eine fremde Seite
+            # aufbaut.
+            self.app.config['SESSION_COOKIE_HTTPONLY'] = True
+            self.app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+            self._init_auth()
+
+            allowed_origins = self._configured_origins()
 
             @self.app.after_request
             def add_cors_headers(response):
-                response.headers['Access-Control-Allow-Origin'] = '*'
-                response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-                response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+                # Die Oberflaeche laedt ausschliesslich relative Pfade und
+                # braucht keine CORS-Freigabe. Ein pauschales '*' wuerde jeder
+                # fremden Seite erlauben, Antworten dieses Servers zu lesen.
+                origin = request.headers.get('Origin')
+                if origin and WebAuthGuard._origin_host(origin) in allowed_origins:
+                    response.headers['Access-Control-Allow-Origin'] = origin
+                    response.headers['Access-Control-Allow-Credentials'] = 'true'
+                    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+                    response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+                    response.headers['Vary'] = 'Origin'
                 return response
+
+            @self.app.before_request
+            def enforce_authentication():
+                return self._enforce_authentication()
 
             # Socket.IO initialisieren
             if self.socketio_available:
                 self.socketio = SocketIO(
                     self.app,
-                    cors_allowed_origins="*",
+                    # None bedeutet: nur die eigene Herkunft. '*' haette jeder
+                    # fremden Seite einen Steuerkanal zum Fahrzeug geoeffnet.
+                    # Socket.IO vergleicht den vollstaendigen Origin-Wert, also
+                    # die Rohliste inklusive Schema.
+                    cors_allowed_origins=list(getattr(self.config, 'allowed_origins', []) or []) or None,
                     async_mode='threading',
                     logger=False,
                     engineio_logger=False,
@@ -158,6 +184,72 @@ class WebServer:
             self.logger.error(f"❌ Flask-Initialisierung fehlgeschlagen: {e}")
             self.flask_available = False
             self.socketio_available = False
+
+    def _configured_origins(self):
+        """Zusaetzlich erlaubte Origins, auf den blossen Host reduziert."""
+        raw = getattr(self.config, 'allowed_origins', None) or []
+        return WebAuthGuard._normalize_origins(raw)
+
+    def _init_auth(self):
+        """Baut den Zugangsschutz aus der Konfiguration auf."""
+        auth_enabled = bool(getattr(self.config, 'auth_enabled', True))
+        username = getattr(self.config, 'auth_username', '') or ''
+        password = getattr(self.config, 'auth_password', '') or ''
+
+        throttle = LoginThrottle(
+            max_failures=int(getattr(self.config, 'auth_max_failures', 8)),
+            lockout_s=float(getattr(self.config, 'auth_lockout_s', 60.0)),
+        )
+        self.auth = WebAuthGuard(
+            username=username,
+            password=password,
+            realm=getattr(self.config, 'auth_realm', 'Quassel UGV'),
+            allowed_origins=getattr(self.config, 'allowed_origins', None),
+            enabled=auth_enabled,
+            throttle=throttle,
+            logger=self.logger,
+        )
+
+        if not auth_enabled:
+            self.logger.warning(
+                "⚠️ Web-Zugangsschutz ist ABGESCHALTET - jeder mit Netzzugang "
+                "kann Fahrantrieb und Mähdeck steuern"
+            )
+        elif not self.auth.configured:
+            self.logger.critical(
+                "🔒 Kein Web-Passwort gesetzt (UGV_WEB_PASSWORD) - "
+                "der Server antwortet auf jede Anfrage mit 503"
+            )
+        else:
+            self.logger.info("🔒 Web-Zugangsschutz aktiv (Benutzer %s)", username)
+
+    def _enforce_authentication(self):
+        """before_request-Hook: laesst nur angemeldete Aufrufer durch."""
+        decision = self.auth.authorize(
+            method=request.method,
+            headers=request.headers,
+            host=request.host,
+            remote_addr=request.remote_addr or '',
+        )
+
+        if decision.allowed:
+            # Der WebSocket-Handshake traegt keinen Authorization-Header. Das
+            # Sitzungscookie ist der Nachweis, dass diese Sitzung sich bereits
+            # ueber HTTP angemeldet hat.
+            if self.auth.enabled:
+                session['authenticated'] = True
+                session.permanent = False
+            return None
+
+        response = jsonify({'error': decision.message})
+        response.status_code = decision.status
+        if decision.challenge:
+            response.headers['WWW-Authenticate'] = (
+                f'Basic realm="{self.auth.realm}", charset="UTF-8"'
+            )
+        if decision.retry_after:
+            response.headers['Retry-After'] = str(decision.retry_after)
+        return response
 
     @staticmethod
     def _resolve_web_path(path: str) -> Path:
@@ -1560,6 +1652,22 @@ class WebServer:
                 best = candidate
         return None if best is None else best[1]
 
+    def _socket_session_authenticated(self) -> bool:
+        """Prueft, ob der WebSocket-Handshake zu einer angemeldeten Sitzung gehoert."""
+        if not self.auth or not self.auth.enabled:
+            return True
+        if not self.auth.configured:
+            return False
+        if session.get('authenticated'):
+            return True
+        # Nicht-Browser-Clients koennen sich beim Handshake direkt ausweisen.
+        credentials = self.auth.parse_basic_auth(
+            request.headers.get('Authorization', '')
+        )
+        if credentials and self.auth.check_credentials(*credentials):
+            return True
+        return False
+
     def _setup_socketio_events(self):
         """Definiert Socket.IO Event-Handler"""
         if not self.socketio:
@@ -1567,10 +1675,24 @@ class WebServer:
 
         @self.socketio.on('connect')
         def handle_connect():
-            """Client verbunden"""
+            """Client verbunden.
+
+            Der Handshake laeuft am before_request-Hook vorbei, weil Socket.IO
+            ihn auf WSGI-Ebene abfaengt. Ohne diese Pruefung waere der
+            WebSocket ein unauthentifizierter Steuerkanal - ``joystick_update``
+            faehrt das Fahrzeug.
+            """
+            if not self._socket_session_authenticated():
+                self.logger.warning(
+                    "🔒 WebSocket-Verbindung ohne Anmeldung abgewiesen (%s)",
+                    request.remote_addr,
+                )
+                return False
+
             self.logger.info("🔌 WebSocket Client verbunden")
             # Initial Status senden
             self._emit_status_update()
+            return None
 
         @self.socketio.on('disconnect')
         def handle_disconnect():

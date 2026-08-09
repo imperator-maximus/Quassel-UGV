@@ -6,6 +6,7 @@ Zentrale Konfigurationsverwaltung mit YAML-Support
 
 import yaml
 import os
+import secrets
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
 
@@ -149,9 +150,17 @@ class CANConfig:
 
 @dataclass
 class SensorHubConfig:
-    """Transport der SensorHub-Telemetrie zum Hauptrechner."""
+    """Transport der SensorHub-Telemetrie zum Hauptrechner.
+
+    Ist der SensorHub durch Basic-Auth geschuetzt, muessen hier dieselben
+    Zugangsdaten stehen. Fehlen sie, bleibt die Pose aus und der Watchdog
+    pausiert nach etwa einer Sekunde den Fahrantrieb.
+    """
     transport: str = 'can'  # can, shadow oder wifi
     wifi_url: str = 'http://192.168.178.20/api/telemetry'
+    # Passwort gehoert in SENSOR_HUB_TELEMETRY_PASSWORD, nicht in die YAML.
+    auth_username: str = ''
+    auth_password: str = ''
     poll_interval_s: float = 0.2
     request_timeout_s: float = 1.5
     pause_timeout_s: float = 1.0
@@ -265,14 +274,33 @@ class MappingConfig:
 
 @dataclass
 class WebConfig:
-    """Web-Interface-Konfiguration"""
+    """Web-Interface-Konfiguration.
+
+    Das Interface haengt ueber eine Portfreigabe am Internet und kann Fahrantrieb
+    und Maehdeck ausloesen. ``auth_enabled`` ist deshalb standardmaessig aktiv;
+    ohne gesetztes Passwort antwortet der Server mit 503 statt ungeschuetzt zu
+    laufen.
+    """
     enabled: bool = False
     host: str = '0.0.0.0'
     port: int = 80
-    secret_key: str = 'ugv_motor_controller_2024'
+    secret_key: str = ''
     template_folder: str = 'templates'
     static_folder: str = 'static'
     max_speed_percent: float = 100.0
+
+    # Zugangsschutz. Passwort und secret_key gehoeren nicht in die YAML,
+    # sondern in UGV_WEB_PASSWORD bzw. UGV_WEB_SECRET_KEY.
+    auth_enabled: bool = True
+    auth_username: str = 'ugv'
+    auth_password: str = ''
+    auth_realm: str = 'Quassel UGV'
+    # Zusaetzliche Origins, die schreibende Requests stellen duerfen. Die
+    # eigene Adresse ist immer erlaubt und muss hier nicht stehen.
+    allowed_origins: List[str] = field(default_factory=list)
+    auth_max_failures: int = 8
+    auth_lockout_s: float = 60.0
+
 
 
 @dataclass
@@ -352,9 +380,44 @@ class Config:
         
         config.quiet = data.get('quiet', False)
         config.monitor = data.get('monitor', True)
-        
+
+        config.apply_environment()
+
         return config
-    
+
+    def apply_environment(self) -> None:
+        """Uebernimmt Zugangsdaten aus Umgebungsvariablen.
+
+        Passwoerter haben in der YAML nichts verloren: Die Datei wird kopiert,
+        gesichert und versehentlich committet. Umgebungsvariablen haben Vorrang
+        vor allem, was doch in der Datei steht.
+        """
+        web_password = os.getenv('UGV_WEB_PASSWORD')
+        if web_password:
+            self.web.auth_password = web_password
+
+        web_user = os.getenv('UGV_WEB_USERNAME')
+        if web_user:
+            self.web.auth_username = web_user
+
+        secret_key = os.getenv('UGV_WEB_SECRET_KEY')
+        if secret_key:
+            self.web.secret_key = secret_key
+        if not self.web.secret_key:
+            # Ohne gesetzten Schluessel bei jedem Start einen neuen erzeugen.
+            # Das entwertet alte Sitzungscookies nach einem Neustart und ist
+            # allemal besser als ein Wert, der im Repository nachlesbar ist.
+            self.web.secret_key = secrets.token_urlsafe(32)
+
+        hub_password = os.getenv('SENSOR_HUB_TELEMETRY_PASSWORD')
+        if hub_password:
+            self.sensor_hub.auth_password = hub_password
+
+        hub_user = os.getenv('SENSOR_HUB_TELEMETRY_USER')
+        if hub_user:
+            self.sensor_hub.auth_username = hub_user
+
+
     def to_yaml(self, filepath: str):
         """Speichert Konfiguration als YAML-Datei"""
         data = {
@@ -448,6 +511,7 @@ class Config:
             'sensor_hub': {
                 'transport': self.sensor_hub.transport,
                 'wifi_url': self.sensor_hub.wifi_url,
+                'auth_username': self.sensor_hub.auth_username,
                 'poll_interval_s': self.sensor_hub.poll_interval_s,
                 'request_timeout_s': self.sensor_hub.request_timeout_s,
                 'pause_timeout_s': self.sensor_hub.pause_timeout_s,
@@ -480,14 +544,22 @@ class Config:
                 'maps_dir': self.mapping.maps_dir,
                 'min_point_distance_m': self.mapping.min_point_distance_m
             },
+            # secret_key, auth_password und die SensorHub-Zugangsdaten werden
+            # bewusst nicht geschrieben: to_yaml() erzeugt sonst eine Datei mit
+            # Klartext-Geheimnissen. Sie kommen aus der Umgebung.
             'web': {
                 'enabled': self.web.enabled,
                 'host': self.web.host,
                 'port': self.web.port,
-                'secret_key': self.web.secret_key,
                 'template_folder': self.web.template_folder,
                 'static_folder': self.web.static_folder,
-                'max_speed_percent': self.web.max_speed_percent
+                'max_speed_percent': self.web.max_speed_percent,
+                'auth_enabled': self.web.auth_enabled,
+                'auth_username': self.web.auth_username,
+                'auth_realm': self.web.auth_realm,
+                'allowed_origins': list(self.web.allowed_origins),
+                'auth_max_failures': self.web.auth_max_failures,
+                'auth_lockout_s': self.web.auth_lockout_s
             },
             'logging': {
                 'level': self.logging.level,
@@ -506,4 +578,6 @@ class Config:
     @classmethod
     def default(cls) -> 'Config':
         """Erstellt Default-Konfiguration"""
-        return cls()
+        config = cls()
+        config.apply_environment()
+        return config

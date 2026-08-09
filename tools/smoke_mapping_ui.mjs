@@ -3,8 +3,21 @@ import { chromium } from "playwright";
 const baseUrl = process.env.UGV_BASE_URL || "http://raspberrycan";
 const headless = process.env.UGV_HEADLESS !== "0";
 
+// Die Oberflaeche verlangt eine Anmeldung (siehe raspberry_pi/WEB_ZUGANGSSCHUTZ.md).
+// Ohne Zugangsdaten liefert schon der erste Aufruf HTTP 401.
+const username = process.env.UGV_WEB_USERNAME || "ugv";
+const password = process.env.UGV_WEB_PASSWORD;
+if (!password) {
+  throw new Error(
+    "UGV_WEB_PASSWORD ist nicht gesetzt - die Oberflaeche weist den Aufruf mit HTTP 401 ab"
+  );
+}
+
 const browser = await chromium.launch({ headless });
-const page = await browser.newPage();
+const context = await browser.newContext({
+  httpCredentials: { username, password },
+});
+const page = await context.newPage();
 const browserErrors = [];
 const failedRequests = [];
 

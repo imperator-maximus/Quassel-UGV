@@ -1,6 +1,9 @@
 param(
     [string]$HostName = "raspberrycan",
     [string]$User = "nicolay",
+    # Steht das Fahrzeug nicht im LAN, laeuft der Zugang ueber die Portfreigabe
+    # des Routers - dort liegt SSH nicht auf 22.
+    [int]$Port = 22,
     [switch]$SkipTests
 )
 
@@ -8,6 +11,8 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $remote = "$User@$HostName"
+$sshPort = @("-p", "$Port")
+$scpPort = @("-P", "$Port")
 $remoteTmp = "/tmp/ugv_deploy_motor_controller"
 $remoteStaticTmp = "/tmp/ugv_deploy_static"
 $remoteApp = "/home/$User/motor_controller"
@@ -47,25 +52,25 @@ if (-not $SkipTests) {
 }
 
 Invoke-Step "Prepare remote staging directory" {
-    ssh -4 $remote "rm -rf $remoteTmp $remoteStaticTmp && mkdir -p $remoteTmp $remoteStaticTmp"
+    ssh -4 @sshPort $remote "rm -rf $remoteTmp $remoteStaticTmp && mkdir -p $remoteTmp $remoteStaticTmp"
 }
 
 Invoke-Step "Upload motor-controller package, template, and static assets" {
-    scp -4 -r "raspberry_pi/motor_controller/." "${remote}:$remoteTmp/"
+    scp -4 @scpPort -r "raspberry_pi/motor_controller/." "${remote}:$remoteTmp/"
     if ($LASTEXITCODE -ne 0) { throw "Motor-controller upload failed" }
-    scp -4 "raspberry_pi/templates/index.html" "${remote}:$remoteTmp/index.html"
+    scp -4 @scpPort "raspberry_pi/templates/index.html" "${remote}:$remoteTmp/index.html"
     if ($LASTEXITCODE -ne 0) { throw "Template upload failed" }
-    scp -4 -r "raspberry_pi/static/." "${remote}:$remoteStaticTmp/"
+    scp -4 @scpPort -r "raspberry_pi/static/." "${remote}:$remoteStaticTmp/"
     if ($LASTEXITCODE -ne 0) { throw "Static asset upload failed" }
-    scp -4 "raspberry_pi/can-interface.service" "${remote}:$remoteCanServiceTmp"
+    scp -4 @scpPort "raspberry_pi/can-interface.service" "${remote}:$remoteCanServiceTmp"
     if ($LASTEXITCODE -ne 0) { throw "CAN service upload failed" }
-    scp -4 "raspberry_pi/motor-controller-v2.service" "${remote}:$remoteMotorServiceTmp"
+    scp -4 @scpPort "raspberry_pi/motor-controller-v2.service" "${remote}:$remoteMotorServiceTmp"
     if ($LASTEXITCODE -ne 0) { throw "Motor service upload failed" }
-    scp -4 "scripts/configure_odrive_watchdog.py" "${remote}:$remoteODriveWatchdogTmp"
+    scp -4 @scpPort "scripts/configure_odrive_watchdog.py" "${remote}:$remoteODriveWatchdogTmp"
     if ($LASTEXITCODE -ne 0) { throw "ODrive watchdog script upload failed" }
-    scp -4 "scripts/configure_odrive_undervoltage.py" "${remote}:$remoteODriveUndervoltageTmp"
+    scp -4 @scpPort "scripts/configure_odrive_undervoltage.py" "${remote}:$remoteODriveUndervoltageTmp"
     if ($LASTEXITCODE -ne 0) { throw "ODrive undervoltage script upload failed" }
-    scp -4 "scripts/configure_odrive_dc_current_limit.py" "${remote}:$remoteODriveDcLimitTmp"
+    scp -4 @scpPort "scripts/configure_odrive_dc_current_limit.py" "${remote}:$remoteODriveDcLimitTmp"
 }
 
 $deployCommand = @"
@@ -130,8 +135,25 @@ else
   ! systemctl is-active --quiet can-interface.service
 fi
 grep -A3 '^can:' $remoteApp/config.yaml
-curl -fsS -o /dev/null -w 'root=%{http_code}\n' http://localhost/
-curl -fsS -o /dev/null -w 'status=%{http_code}\n' http://localhost/api/status
+# Die Oberflaeche verlangt eine Anmeldung. Die Zugangsdaten stehen in der
+# EnvironmentFile des Dienstes und bleiben damit auf dem Geraet - sie duerfen
+# weder in diesem Skript noch in der Prozessliste auftauchen.
+# Die Datei gehoert root und hat Modus 600 - der Deploy-Benutzer kommt nur
+# ueber sudo heran. Ohne sudo blieben die Variablen leer und die Pruefung
+# liefe unangemeldet in ein 401.
+web_user=`$(sudo sed -n 's/^UGV_WEB_USERNAME=//p' /etc/ugv-web.env 2>/dev/null | tail -1)
+web_pass=`$(sudo sed -n 's/^UGV_WEB_PASSWORD=//p' /etc/ugv-web.env 2>/dev/null | tail -1)
+if [ -n "`$web_pass" ]; then
+  curl -fsS -u "`$web_user:`$web_pass" -o /dev/null -w 'root=%{http_code}\n' http://localhost/
+  curl -fsS -u "`$web_user:`$web_pass" -o /dev/null -w 'status=%{http_code}\n' http://localhost/api/status
+  unauth=`$(curl -s -o /dev/null -w '%{http_code}' http://localhost/api/status)
+  echo "ohne Anmeldung=`$unauth (401 erwartet)"
+  [ "`$unauth" = 401 ] || { echo 'FEHLER: Oberflaeche antwortet ohne Anmeldung' >&2; exit 1; }
+else
+  echo 'WARNUNG: /etc/ugv-web.env fehlt oder ist leer - Weboberflaeche antwortet mit 503' >&2
+  curl -fsS -o /dev/null -w 'root=%{http_code}\n' http://localhost/
+  curl -fsS -o /dev/null -w 'status=%{http_code}\n' http://localhost/api/status
+fi
 echo backup=`$backup
 "@
 
@@ -141,11 +163,11 @@ echo backup=`$backup
 $deployCommand = $deployCommand -replace "`r`n", "`n"
 $remoteScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($deployCommand))
 Invoke-Step "Install, verify, and restart on remote" {
-    ssh -4 $remote "echo $remoteScript | base64 -d | bash"
+    ssh -4 @sshPort $remote "echo $remoteScript | base64 -d | bash"
 }
 
 Invoke-Step "Check recent service errors" {
-    ssh -4 $remote "journalctl -u motor-controller-v2.service --since '2 minutes ago' --no-pager -p err..alert || true"
+    ssh -4 @sshPort $remote "journalctl -u motor-controller-v2.service --since '2 minutes ago' --no-pager -p err..alert || true"
 }
 
 Write-Host ""

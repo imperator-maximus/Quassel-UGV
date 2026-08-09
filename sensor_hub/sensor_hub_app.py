@@ -24,6 +24,7 @@ from can_protocol import CANProtocol
 from telemetry_payload import build_status_payload, build_telemetry_payload, serialize_can_payload
 from vehicle_geometry import build_local_footprint, build_visual_markers_local, correct_to_vehicle_center, load_vehicle_geometry, select_heading_for_visualization
 from imu_heading_calibration import ImuHeadingOffsetEstimator
+from web_auth import LoginThrottle, WebAuthGuard
 
 # Logging konfigurieren
 logging.basicConfig(
@@ -80,7 +81,9 @@ class SensorHubApp:
         self.vehicle_footprint_local = []
         self.vehicle_markers_local = {}
         self.imu_heading_estimator = None
+        self.auth = None
         self._load_vehicle_geometry()
+        self._init_auth()
         self._setup_routes()
         self._init_sensors()
         self._init_can_bus()
@@ -605,9 +608,65 @@ class SensorHubApp:
         except Exception as e:
             logger.error(f"❌ Restart fehlgeschlagen: {e}")
 
+    def _init_auth(self):
+        """Baut den Zugangsschutz auf und haengt ihn vor jede Route.
+
+        Der Telemetriestrom des Raspberry laeuft ueber dieselben Routen. Passt
+        das Passwort dort nicht, bleibt die Pose aus und der Fahrantrieb
+        pausiert - der Fehler ist damit auffaellig, aber ungefaehrlich.
+        """
+        self.auth = WebAuthGuard(
+            username=config.WEB_AUTH_USERNAME,
+            password=config.WEB_AUTH_PASSWORD,
+            realm=config.WEB_AUTH_REALM,
+            enabled=config.WEB_AUTH_ENABLED,
+            throttle=LoginThrottle(
+                max_failures=config.WEB_AUTH_MAX_FAILURES,
+                lockout_s=config.WEB_AUTH_LOCKOUT_S,
+            ),
+            logger=logger,
+        )
+
+        if not config.WEB_AUTH_ENABLED:
+            logger.warning(
+                "⚠️ SensorHub-Zugangsschutz ist ABGESCHALTET - die Position "
+                "des Fahrzeugs liest jeder, der die Adresse kennt"
+            )
+        elif not self.auth.configured:
+            logger.critical(
+                "🔒 Kein WEB_AUTH_PASSWORD in der .env gesetzt - "
+                "der SensorHub antwortet auf jede Anfrage mit 503"
+            )
+        else:
+            logger.info(
+                "🔒 SensorHub-Zugangsschutz aktiv (Benutzer %s)",
+                config.WEB_AUTH_USERNAME,
+            )
+
+        @self.app.before_request
+        def enforce_authentication():
+            decision = self.auth.authorize(
+                method=request.method,
+                headers=request.headers,
+                host=request.host,
+                remote_addr=request.remote_addr or '',
+            )
+            if decision.allowed:
+                return None
+
+            response = jsonify({'error': decision.message})
+            response.status_code = decision.status
+            if decision.challenge:
+                response.headers['WWW-Authenticate'] = (
+                    f'Basic realm="{self.auth.realm}", charset="UTF-8"'
+                )
+            if decision.retry_after:
+                response.headers['Retry-After'] = str(decision.retry_after)
+            return response
+
     def _setup_routes(self):
         """Konfiguriert Flask Routes"""
-        
+
         @self.app.route('/')
         def index():
             """Hauptseite"""

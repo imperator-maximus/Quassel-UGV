@@ -20,6 +20,28 @@ Der SensorHub-Basisendpunkt ist
 `/api/telemetry/stream`. Zwei unabhängige TCP-Verbindungen verhindern, dass
 das Stocken eines einzelnen Streams die Navigation pausiert.
 
+## Zugangsschutz der Weboberflächen
+
+Steuerungsoberfläche und SensorHub sind über Portfreigaben aus dem Internet
+erreichbar: extern `8080` → `raspberrycan:80`, extern `8081` → `orangeugv:80`.
+Die Ports 80 und 443 zeigen auf ein anderes Gerät im Netz, nicht auf das UGV.
+
+Beide UGV-Endpunkte verlangen eine Anmeldung per HTTP-Basic-Auth; die
+Passwörter stehen in `/etc/ugv-web.env` (Modus 600) bzw. `/opt/sensor_hub/.env`,
+nie in der Konfigurationsdatei. Ohne gesetztes Passwort antworten sie mit 503
+statt ungeschützt zu laufen.
+
+Beim Ausrollen gilt: **Raspberry zuerst, dann SensorHub.** Umgekehrt entsteht
+ein Fenster, in dem der SensorHub den Raspberry mit 401 abweist und der
+Fahrantrieb pausiert.
+
+Der Raspberry ist selbst Client des SensorHub: `sensor_hub.auth_username` und
+`SENSOR_HUB_TELEMETRY_PASSWORD` müssen zu den Zugangsdaten des SensorHub
+passen, sonst bleibt die Pose aus und der Watchdog pausiert den Fahrantrieb.
+
+Die Verbindung ist unverschlüsselt; das Passwort ist unterwegs mitlesbar.
+Einzelheiten und die Nachrüstung von TLS: `raspberry_pi/WEB_ZUGANGSSCHUTZ.md`.
+
 ## CAN-Status
 
 - Haupt-UGV: `can.enabled: false`

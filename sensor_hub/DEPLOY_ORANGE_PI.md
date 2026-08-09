@@ -31,8 +31,23 @@ sudo mkdir -p /opt/sensor_hub
 sudo cp -a /home/imperator/sensor_hub/. /opt/sensor_hub/
 sudo chown -R imperator:imperator /opt/sensor_hub
 cd /opt/sensor_hub
-python3 -m py_compile config.py can_protocol.py telemetry_payload.py sensor_hub_app.py
+python3 -m py_compile config.py can_protocol.py telemetry_payload.py sensor_hub_app.py web_auth.py
 ```
+
+## 2a. Zugangsdaten setzen
+
+Der Webserver ist aus dem Internet erreichbar und verlangt eine Anmeldung.
+Ohne gesetztes Passwort antwortet er auf jede Anfrage mit 503.
+
+```bash
+sudo -u imperator cp /opt/sensor_hub/.env.example /opt/sensor_hub/.env
+sudo -u imperator nano /opt/sensor_hub/.env    # WEB_AUTH_PASSWORD eintragen
+sudo chmod 600 /opt/sensor_hub/.env
+```
+
+Denselben Wert braucht der Raspberry in `SENSOR_HUB_TELEMETRY_PASSWORD`, sonst
+bleibt seine Pose aus und der Fahrantrieb pausiert. Siehe
+`raspberry_pi/WEB_ZUGANGSSCHUTZ.md`.
 
 ## 3. systemd-Service installieren
 

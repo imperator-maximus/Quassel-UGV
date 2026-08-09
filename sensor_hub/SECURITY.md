@@ -22,11 +22,46 @@ NTRIP_PASSWORD = os.getenv('NTRIP_PASSWORD', '')
 
 Die `.env` Datei enthält sensitive Daten:
 - NTRIP Benutzername und Passwort
+- Zugangsdaten des Webservers (`WEB_AUTH_USERNAME`, `WEB_AUTH_PASSWORD`)
 - API-Keys
 - Datenbank-Credentials
 - Andere sensitive Konfiguration
 
 **Diese Datei wird NICHT in Git committed!**
+
+### 2a. Zugangsschutz des Webservers
+
+Der SensorHub ist über eine Portfreigabe aus dem Internet erreichbar und
+liefert die metergenaue Position des Fahrzeugs. Er verlangt deshalb eine
+Anmeldung per HTTP-Basic-Auth:
+
+```
+WEB_AUTH_ENABLED=1
+WEB_AUTH_USERNAME=ugv
+WEB_AUTH_PASSWORD=hier-ein-langes-passwort
+```
+
+`WEB_AUTH_PASSWORD` akzeptiert Klartext oder einen Werkzeug-Hash:
+
+```bash
+python3 -c "from werkzeug.security import generate_password_hash; print(generate_password_hash(input('Passwort: ')))"
+```
+
+Ohne gesetztes Passwort antwortet der Server auf jede Anfrage mit 503 - eine
+aktivierte, aber unvollständige Konfiguration führt nie zu freiem Zugang.
+
+**Achtung:** Der Raspberry-Hauptrechner ruft die Telemetrie über dieselben
+Routen ab. Er braucht dieselben Zugangsdaten in
+`SENSOR_HUB_TELEMETRY_PASSWORD`, sonst bleibt die Pose aus und der Fahrantrieb
+pausiert. Einzelheiten in `raspberry_pi/WEB_ZUGANGSSCHUTZ.md`.
+
+**Reihenfolge:** Der SensorHub wird als **zweites** ausgerollt, nach dem
+Raspberry. Ein SensorHub, der schon Anmeldung verlangt, während der Raspberry
+noch alten Code fährt, weist dessen Telemetrieabruf mit 401 ab und legt den
+Fahrantrieb still. Umgekehrt ist es unkritisch.
+
+Basic-Auth ohne TLS überträgt das Passwort mitlesbar. Es hält Portscanner und
+Gelegenheitsfunde ab, nicht jemanden, der den Datenverkehr beobachtet.
 
 ### 3. Setup auf neuem System
 

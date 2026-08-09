@@ -99,15 +99,25 @@ can:
 sensor_hub:
   transport: wifi
   wifi_url: http://schloss.fdog.de:8081/api/telemetry
+  auth_username: ugv          # Passwort: SENSOR_HUB_TELEMETRY_PASSWORD
   poll_interval_s: 0.2
   request_timeout_s: 1.5
   pause_timeout_s: 1.0
   telemetry_timeout_s: 30.0
 
+web:
+  enabled: true
+  auth_enabled: true          # Passwort: UGV_WEB_PASSWORD
+  auth_username: ugv
+
 logging:
   level: INFO
   console: true
 ```
+
+Die Weboberfläche und der SensorHub sind aus dem Internet erreichbar und
+verlangen eine Anmeldung. Passwörter stehen in der Dienst-Umgebung, nicht in
+dieser Datei - siehe [WEB_ZUGANGSSCHUTZ.md](../WEB_ZUGANGSSCHUTZ.md).
 
 ## 🔌 API
 
