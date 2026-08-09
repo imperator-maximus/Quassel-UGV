@@ -28,17 +28,18 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 # Gemessen am 08.08. mit dem gespeicherten Plan und einer Aufstellung, wie sie
 # real gefahren wird: Fahrzeug 5 m vor dem Anfang der ersten Bahn, Nase entlang
 # dieser Bahn.
-EXPECTED_SEGMENTS = 93
-EXPECTED_LENGTH_M = 2241.4
+EXPECTED_SEGMENTS = 96
+EXPECTED_LENGTH_M = 2243.6
 # Das eigentlich Schuetzenswerte ist nicht die Gesamtzahl, sondern was gemaeht
-# wird. Die bleibt fest, auch wenn Verbindungsstuecke wegfallen.
-EXPECTED_MOW_LANES = 76
-EXPECTED_MOW_LENGTH_M = 2150.5
-# 09.08.: von 98/2245,0 auf 93/2241,4. Fuenf Verbindungsstuecke unter 1,5 m
-# werden nicht mehr als eigene Bahn gefahren, sondern von der folgenden Bahn
-# aufgenommen - sie lagen quer genug, dass der Regler sie am Winkel sperrte
-# (real 47,2 Grad auf einem 0,97-m-Stueck), obwohl die Nase auf beiden
-# Nachbarbahnen korrekt lag. Gemaeht wird exakt dasselbe: 76 Bahnen, 2150,5 m.
+# wird - deshalb steht das hier daneben und wird mitgeprueft.
+EXPECTED_MOW_LANES = 75
+EXPECTED_MOW_LENGTH_M = 2149.9
+# 09.08.: von 98/2245,0 auf 96/2243,6. Eine Restbahn von 0,64 m wird nicht
+# mehr als eigene Bahn gefahren - unter MIN_DRIVEN_LANE_M hat ein Bahnstueck
+# keine belastbare Richtung, und der Regler sperrte real vier solche Zwerge in
+# Folge (0,61 bis 0,89 m, 50 bis 75 Grad Kursfehler). Es bleiben 0,6 m von
+# 2150 m ungemaeht, zwischen Nachbarbahnen, deren Deck breiter ist als ihr
+# Abstand.
 
 
 class WieseRouteRegressionTests(unittest.TestCase):
@@ -108,15 +109,20 @@ class WieseRouteRegressionTests(unittest.TestCase):
             delta=0.5,
         )
 
-    def test_a_short_hop_between_lanes_is_not_its_own_track(self):
-        """Ein Huepfer quer unter der Reglertoleranz gehoert in die Bahn.
+    def test_no_segment_starts_at_an_angle_the_controller_blocks(self):
+        """Keine einzige Stelle, an der der Regler die Fahrt abbricht.
 
-        Real am 09.08., 11:48: ein 0,97 m langer Uebergang zeigte 316 Grad,
-        waehrend die Nase mit 268,7 Grad korrekt auf beiden Nachbarbahnen lag.
-        47,2 Grad Differenz, Regler gesperrt, Mahd zu Ende. Bei so kurzen
-        Stuecken ist die Richtung Rauschen; ausgleichen muss der Regler nur
-        den Queranteil, und der lag bei 0,72 m - klar unter seiner Grenze
-        von 1,0 m.
+        Zwei reale Abbrueche vom 09.08. treffen sich hier. Um 11:48 zeigte ein
+        0,97 m langer Uebergang 316 Grad, waehrend die Nase mit 268,7 Grad
+        korrekt auf beiden Nachbarbahnen lag - 47,2 Grad, gesperrt. Um 12:55
+        begann eine Bahn mit 0,56 m Querversatz, weil der Huepfer davor
+        weggelassen worden war; rueckwaerts baut das Fahrzeug so viel nicht
+        mehr ab (gemessen: 0,56 m am Anfang, 0,74 m am Ende), die naechste
+        Bahn begann mit 1,42 m und brach ab.
+
+        Beides loest derselbe Zug: der Uebergang zielt nicht mehr auf den
+        Bahnanfang, sondern schert flach auf die Bahnlinie ein und laeuft
+        gerade hinein. Kein schraeger Kurzhuepfer, kein Versatz am Bahnanfang.
         """
         pose = self._aligned_start_pose()
         manager = MowingPlanManager(str(FIXTURES), lambda: pose)
@@ -141,16 +147,8 @@ class WieseRouteRegressionTests(unittest.TestCase):
                                 round(segment["length_m"], 2), round(error, 1)))
 
         self.assertEqual(
-            [], [item for item in blocked if item[1] == "transition"],
-            "Kein Uebergang darf den Regler noch am Winkel sperren",
-        )
-        # Bekannt und noch offen: ein 0,64 m langes Maehstueck mit 45,4 Grad -
-        # dieselbe Klasse (unter einem Meter ist die Richtung Rauschen), aber
-        # eine Bahn statt eines Uebergangs. Steht hier, damit es sichtbar
-        # bleibt und auffaellt, wenn es sich bewegt.
-        self.assertEqual(
-            [(92, "mow", 0.64, 45.4)], blocked,
-            "Andere Sperrstellen als die bekannte kurze Bahn",
+            [], blocked,
+            "Der Regler wuerde die Fahrt an diesen Stellen abbrechen",
         )
 
     def test_aligned_start_is_approached_forwards(self):
@@ -696,3 +694,56 @@ class ResumeOnAContourRingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EveryLaneCanBeAStartTests(unittest.TestCase):
+    """Ein Marker auf irgendeiner Bahn muss ein gueltiger Start sein.
+
+    Am 09.08. blockierte Play mit "Gewaehlte Abfahrposition liegt nicht auf
+    dem gewaehlten Pfad". Ursache waren zwei eigene Regeln, die Bahnen aus
+    dem Plan nehmen: die eine wirft Zwergbahnen weg, die andere ueberspringt
+    kurze Bahnen, die quer liegen. Traf es die *erste* Bahn, suchte die
+    naechste den Marker bei sich und fand ihn nicht - aus einem Winkelfehler
+    wurde ein kompletter Startabbruch, also schlimmer als das Problem.
+
+    Die erste Bahn ist deshalb von beiden Regeln ausgenommen.
+    """
+
+    def _plan(self, name):
+        return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+
+    def _start_on(self, plan, segment):
+        coords = MowingPlanManager._coords(segment)
+        middle = coords[len(coords) // 2]
+        pose = {
+            "timestamp": time.time(),
+            "gps": {"lat": middle[1] + 0.00002, "lon": middle[0],
+                    "satellites": 28},
+            "heading": 90.0, "heading_source": "dual_gnss",
+            "rtk_status": "RTK FIXED",
+        }
+        manager = MowingPlanManager(str(FIXTURES), lambda: pose)
+        manager.executable_segments(
+            plan,
+            start_segment_index=segment.get("segment_index"),
+            start_coordinate=list(middle),
+            start_pose=pose,
+        )
+
+    def test_no_lane_is_rejected_as_a_start_position(self):
+        for name in ("Wiese.plan.json", "Brunnen.plan.json"):
+            plan = self._plan(name)
+            for segment in plan["sequence"]:
+                if len(segment.get("coordinates") or []) < 2:
+                    continue
+                length = MowingPlanManager._polyline_length_m(
+                    MowingPlanManager._coords(segment)
+                )
+                with self.subTest(plan=name, lane=segment.get("segment_index"),
+                                  length=round(length, 2)):
+                    try:
+                        self._start_on(plan, segment)
+                    except ValueError as exc:
+                        # Ein Weg, der durch eine Sperrzone fuehrt, ist ein
+                        # echter Grund - der gewaehlte Punkt selbst nie.
+                        self.assertNotIn("Abfahrposition", str(exc))

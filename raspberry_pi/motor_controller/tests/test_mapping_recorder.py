@@ -1913,8 +1913,12 @@ class MappingRecorderTests(unittest.TestCase):
             "rest_index": 0,
             "rest_group": 0,
             "direction": "reverse" if reverse else "forward",
-            "coordinates": [[10.00002, 52.0], [10.00003, 52.0]],
-            "length_m": 3.0,
+            # Koordinaten und ``length_m`` mussten zusammenpassen: 0.00001 Grad
+            # sind hier 0,68 m, die Bahn behauptete aber 3 m. Seit Zwergbahnen
+            # unter MIN_DRIVEN_LANE_M nicht mehr als eigene Bahn ausgegeben
+            # werden, faellt so eine Fixture durchs Raster - zu Recht.
+            "coordinates": [[10.00002, 52.0], [10.00006, 52.0]],
+            "length_m": 2.7,
         }
         transition = {
             "type": "transition",

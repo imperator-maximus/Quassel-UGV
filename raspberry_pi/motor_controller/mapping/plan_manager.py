@@ -2,6 +2,7 @@
 
 import json
 import hashlib
+import logging
 import math
 import time
 from datetime import datetime, timezone
@@ -17,6 +18,22 @@ class MowingPlanManager:
 
     SCHEMA = "raspberrycan.mowing_plan.v1"
     MIN_PLANNED_REST_LANE_M = 2.0
+    # Kuerzeste Bahn, die noch als eigene Bahn gefahren wird. Gemessen an den
+    # realen Abbruechen vom 09.08.: 0,61 m ergab 75,2 Grad, 0,75 m ergab
+    # 62,7 Grad, 0,89 m ergab 50,9 Grad, 1,04 m noch 42,7 Grad - und erst ab
+    # 1,43 m war der Kursfehler null. 1,20 m trennt die unbrauchbaren von den
+    # brauchbaren, ohne die guten mitzunehmen.
+    MIN_DRIVEN_LANE_M = 1.20
+    # Bis hierhin wird eine Bahn lieber uebersprungen als mit einem Manoever
+    # erzwungen. Drei Meter Bahn rechtfertigen keine zwanzig Meter Rangieren -
+    # und die Nachbarbahnen ueberlappen ohnehin.
+    SKIPPABLE_LANE_M = 3.0
+    # Ausprobiert und verworfen: am Routenanfang grosszuegiger auslassen
+    # (6 m statt 3 m). Klingt harmlos - dort ist noch nichts gefahren -, macht
+    # es aber schlimmer, weil nach mehreren ausgelassenen Bahnen das Fahrzeug
+    # irgendwo steht, wo die folgenden nicht mehr passen: 16 Sperrstellen
+    # statt 1 (gemessen 09.08.). Dasselbe bei 3,5 m durchgehend: 20 statt 3.
+    # Diese Kette vertraegt keine grosszuegigeren Schwellen.
     TRANSFER_REVERSE_THRESHOLD_DEG = 100.0
     # The rest-lane spacing is smaller than the vehicle and the navigation
     # acceptance radius. Treating this tiny lateral connector as a separate
@@ -36,13 +53,37 @@ class MowingPlanManager:
     # track_cross_track_limit_m (1.0 m).
     ABSORBED_REST_LANE_TRANSFER_M = 0.60
     # Zweites Kriterium neben der reinen Laenge: wie weit der Huepfer quer zur
-    # naechsten Bahn liegt. Nur das muss der Regler beim Aufnehmen ausgleichen,
-    # und er darf es bis navigation.track_cross_track_limit_m (1,0 m). 0,75 m
-    # laesst Reserve. Die Laengengrenze bleibt daneben bestehen, damit aus
-    # einem echten Standortwechsel nicht stillschweigend eine Bahn mit langem
-    # Vorlauf wird.
-    ABSORBED_REST_LANE_CROSS_M = 0.75
+    # naechsten Bahn liegt - denn genau das bleibt als Querversatz stehen,
+    # wenn er nicht gefahren wird.
+    #
+    # Die Zahl stammt aus dem Fahrtprotokoll vom 09.08., nicht aus der
+    # Reglergrenze. Gemessen ueber drei aufeinanderfolgende Bahnen:
+    #     Start 0,27 m rueckwaerts -> Ende 0,07 m   (baut ab)
+    #     Start 0,72 m vorwaerts   -> Ende 0,12 m   (baut ab)
+    #     Start 0,56 m rueckwaerts -> Ende 0,74 m   (waechst!)
+    # Rueckwaerts baut der Regler ab etwa einem halben Meter nichts mehr ab.
+    # Der Versatz wurde von Bahn zu Bahn weitergereicht - 0,12 auf 0,56 auf
+    # 0,74 - bis die naechste mit 1,42 m begann und abbrach. 0,30 m liegt im
+    # Bereich, der nachweislich zulaeuft.
+    ABSORBED_REST_LANE_CROSS_M = 0.30
     ABSORBED_REST_LANE_STEP_M = 1.50
+    # Einscheren auf die Bahnlinie: flacher Winkel, damit der Regler den
+    # Uebergang aufnimmt und die Bahn danach ohne Versatz beginnt. 20 Grad
+    # liegt weit unter der Sperre von 45 und ist der Winkel, bei dem das
+    # Fahrzeug im Protokoll sauber folgt.
+    # Bis hierhin gilt ein Schritt zwischen zwei Bahnen als Huepfer, dessen
+    # Richtung nichts bedeutet. Real gesperrt wurden 0,97 m und 1,19 m; die
+    # naechstgroesseren echten Standortwechsel im Brunnen-Plan liegen bei
+    # ueber 5 m, dazwischen ist Luft.
+    SIDEWAYS_LANE_HOP_M = 2.50
+    # Und "quer" heisst: mehr als das neben beiden Bahnrichtungen. Ein Schritt
+    # entlang der Bahn ist harmlos, der wird normal gefahren.
+    SIDEWAYS_LANE_HOP_ANGLE_DEG = 25.0
+    JOIN_LANE_ANGLE_DEG = 20.0
+    MIN_JOIN_LANE_RUN_M = 1.50
+    # Laenger als das ist kein Einscheren mehr, sondern ein Umweg durch die
+    # Nachbarbahnen.
+    MAX_JOIN_LANE_RUN_M = 6.0
     # Wie gross die Luecke zwischen Anfang und Ende eines Rings hoechstens
     # sein darf, damit sie als Teil des Rings geschlossen wird. Sie entsteht
     # beim Zuschneiden auf die Fahrzeugposition und ist real wenige Dezimeter
@@ -305,6 +346,41 @@ class MowingPlanManager:
             ]
             if not sequence:
                 raise ValueError("Startsegment liegt außerhalb des Plans")
+        # Zwergbahnen gar nicht erst als eigene Bahn ausgeben. Unter einem
+        # guten Meter hat ein Bahnstueck keine belastbare Richtung mehr, der
+        # Regler verlangt sie aber trotzdem und sperrt: real am 09.08. vier
+        # Abbrueche in Folge auf Bahnen von 0,61 bis 0,89 m Laenge, mit 50 bis
+        # 75 Grad Kursfehler. Nur Restbahnen - ein Konturring ist nie ein
+        # Fragment. Was liegen bleibt, sind 3,7 m von 2260 m (0,16 %),
+        # zwischen Nachbarbahnen, deren Maehdeck breiter ist als ihr Abstand.
+        #
+        # Die erste Bahn bleibt immer stehen, auch wenn sie ein Zwerg ist:
+        # auf ihr liegt der vom Benutzer gewaehlte Startpunkt. Ohne diese
+        # Ausnahme fand er seine Bahn nicht mehr und Play brach ab mit
+        # "Gewaehlte Abfahrposition liegt nicht auf dem gewaehlten Pfad"
+        # (real 09.08.) - schlimmer als der Winkelfehler, den die Regel
+        # verhindern sollte.
+        drivable = [
+            item for item in sequence
+            if item.get("type") != "rest_lane"
+            or self._polyline_length_m(self._coords(item)) >= self.MIN_DRIVEN_LANE_M
+        ]
+        if drivable and drivable[0] is not sequence[0]:
+            # Der gewaehlte Startpunkt liegt auf einer Zwergbahn. Sie zu
+            # behalten hilft nicht: real am 09.08. war die gewaehlte Bahn 67
+            # nur 0,73 m lang und lief 111 Grad quer zum stehenden Fahrzeug -
+            # eindrehen laesst sich das auf 73 Zentimetern nicht. Also
+            # beginnt der Plan bei der naechsten richtigen Bahn, und der
+            # Marker wird fallengelassen: er gehoert zu einer Bahn, die nicht
+            # gefahren wird.
+            logging.getLogger(__name__).info(
+                "Startbahn %r ist nur %.2f m lang - Plan beginnt bei Bahn %r",
+                sequence[0].get("segment_index"),
+                self._polyline_length_m(self._coords(sequence[0])),
+                drivable[0].get("segment_index"),
+            )
+            start_coordinate = None
+        sequence = drivable
         if max_source_segments is not None:
             try:
                 source_limit = int(max_source_segments)
@@ -442,6 +518,9 @@ class MowingPlanManager:
                     if trimmed is not None:
                         coords = trimmed
             start = coords[0]
+            emitted_before = len(executable)
+            end_before = current_end
+            heading_before = current_heading_deg
             if current_end is None:
                 already_on_track = (
                     start_coord is not None
@@ -534,10 +613,48 @@ class MowingPlanManager:
                     # stand das Fahrzeug aber 85,6° quer zur Restbahn - und
                     # dort sperrte der Regler. Geprüft wurde nur die Einfahrt.
                     manoeuvre = None
-                    if self._blocks_on_heading(
-                        transfer, current_heading_deg
-                    ) or self._leaves_vehicle_across_lane(
-                        transfer, segment, coords, current_heading_deg
+                    # Ein kurzer Huepfer zwischen zwei Bahnen wird immer
+                    # eingeschert - unabhaengig vom Kurs, den die Route an
+                    # dieser Stelle vorhersagt. Genau hier weicht der
+                    # modellierte Kurs vom echten ab: das Stueck ist zu kurz,
+                    # um eine belastbare Richtung zu haben. Am 09.08. lief
+                    # deshalb ein 1,19-m-Uebergang durch die Vorabpruefung und
+                    # wurde beim Fahren mit 47,2 Grad gesperrt - zweimal, mit
+                    # denselben Zahlen. Vorhergesagt braucht es dafuer nichts:
+                    # dass die Richtung eines Meterstuecks nicht zur Bahn
+                    # passt, steht schon im Plan.
+                    if self._is_sideways_lane_hop(
+                        transfer, previous_segment, segment, coords
+                    ):
+                        joined = self._joined_transfer(
+                            current_end, coords, runtime_router,
+                            current_heading_deg,
+                        )
+                        if joined is not None and not self._blocks_on_heading(
+                            joined, current_heading_deg
+                        ):
+                            manoeuvre = [joined]
+                    if manoeuvre is None and (
+                        self._blocks_on_heading(
+                            transfer, current_heading_deg
+                        ) or self._leaves_vehicle_across_lane(
+                            transfer, segment, coords, current_heading_deg
+                        )
+                    ):
+                        # Sonst dasselbe Mittel, aber am Kurs entschieden.
+                        joined = self._joined_transfer(
+                            current_end, coords, runtime_router,
+                            current_heading_deg,
+                        )
+                        if joined is not None and not self._blocks_on_heading(
+                            joined, current_heading_deg
+                        ):
+                            manoeuvre = [joined]
+                    if manoeuvre is None and (
+                        self._blocks_on_heading(transfer, current_heading_deg)
+                        or self._leaves_vehicle_across_lane(
+                            transfer, segment, coords, current_heading_deg
+                        )
                     ):
                         manoeuvre = self._turn_in_transfer(
                             current_end, current_heading_deg, coords, runtime_router
@@ -563,6 +680,35 @@ class MowingPlanManager:
                             item,
                             current_heading_deg,
                         )
+
+            # Eine kurze Bahn, die das Fahrzeug von hier aus nicht aufnehmen
+            # kann, wird uebersprungen statt unfahrbar ausgegeben. Geprueft
+            # wird erst hier, weil der Uebergang davor den Kurs noch dreht.
+            # Laenger als SKIPPABLE_LANE_M lohnt ein Manoever; darunter kostet
+            # es mehr Weg, als die Bahn lang ist. Real am 09.08.: eine
+            # 1,41-m-Bahn nach einem 17-m-Umweg um die Sperrzone, 68,4 Grad
+            # quer - der Regler haette dort gestoppt und die restlichen
+            # 2000 m waeren liegengeblieben.
+            if (
+                # Die erste Bahn nur dann, wenn kein Marker daran haengt:
+                # uebersprungen suchte ihn sonst die naechste Bahn bei sich
+                # und fand ihn nicht - Play brach ab mit "Gewaehlte
+                # Abfahrposition liegt nicht auf dem gewaehlten Pfad"
+                # (real 09.08.).
+                (current_end is not None or selected_start is None)
+                and segment.get("type") == "rest_lane"
+                and self._polyline_length_m(coords) <= self.SKIPPABLE_LANE_M
+                and self._lane_entry_error(coords, current_heading_deg)
+                > self.RING_START_HEADING_LIMIT_DEG
+            ):
+                # Auch den Weg dorthin zuruecknehmen: ein Uebergang zu einer
+                # Bahn, die gar nicht gemaeht wird, ist reine Fahrerei. Ohne
+                # das standen vier 0,70-m-Uebergaenge zu uebersprungenen
+                # Bahnen in der Route (gemessen 09.08.).
+                del executable[emitted_before:]
+                current_end = end_before
+                current_heading_deg = heading_before
+                continue
 
             track = self._track_segment(
                 segment,
@@ -680,6 +826,26 @@ class MowingPlanManager:
             nose = (nose + 180.0) % 360.0
         return cls._angle_error_deg(nose, heading_deg) > cls.RING_START_HEADING_LIMIT_DEG
 
+    def _lane_entry_error(
+        self,
+        lane_coords: List[List[float]],
+        heading_deg: Optional[float],
+    ) -> float:
+        """Wie schief die Nase zu dieser Bahn steht - guenstigere Seite zaehlt.
+
+        Eine Restbahn darf in beide Richtungen gefahren werden; entscheidend
+        ist die, zu der weniger gedreht werden muss.
+        """
+        if heading_deg is None or len(lane_coords) < 2:
+            return 0.0
+        tangent = self._segment_entry_heading(lane_coords, "forward")
+        if tangent is None:
+            return 0.0
+        return min(
+            self._angle_error_deg(tangent, heading_deg),
+            self._angle_error_deg((tangent + 180.0) % 360.0, heading_deg),
+        )
+
     def _leaves_vehicle_across_lane(
         self,
         transfer: Dict[str, Any],
@@ -723,6 +889,128 @@ class MowingPlanManager:
                 self._angle_error_deg((tangent + 180.0) % 360.0, arrival),
             )
         return error
+
+    def _is_sideways_lane_hop(
+        self,
+        transfer: Dict[str, Any],
+        previous_segment: Optional[Dict[str, Any]],
+        next_segment: Optional[Dict[str, Any]],
+        lane_coords: List[List[float]],
+    ) -> bool:
+        """Kurzer Schritt zwischen zwei Bahnen, der quer zu ihnen zeigt.
+
+        Er ueberbrueckt Bahnabstand und Endenversatz zugleich und zeigt
+        dadurch in eine Richtung, die zu keiner der beiden Bahnen gehoert.
+        Ihn als eigene Bahn zu fahren geht schief, sobald der reale Kurs auch
+        nur wenig vom vorhergesagten abweicht - und bei einem Meter Laenge
+        weicht er immer ab. Gemessen 09.08.: 1,19 m Uebergang, 47,2 Grad,
+        zweimal gesperrt, waehrend die Nase auf beiden Nachbarbahnen sauber
+        lag.
+
+        Bewusst ohne jeden Kursvergleich: die Entscheidung faellt allein aus
+        der Geometrie des Plans und ist damit unabhaengig davon, wie gut die
+        Kursvorhersage an dieser Stelle ist.
+        """
+        if (previous_segment or {}).get("type") != "rest_lane":
+            return False
+        if (next_segment or {}).get("type") != "rest_lane":
+            return False
+        if len(lane_coords) < 2:
+            return False
+        if transfer.get("length_m", 0.0) > self.SIDEWAYS_LANE_HOP_M:
+            return False
+        coords = transfer.get("coordinates") or []
+        if len(coords) < 2:
+            return False
+        step = self._edge_bearing_deg(coords[0], coords[-1])
+        tangent = self._segment_entry_heading(lane_coords, "forward")
+        if step is None or tangent is None:
+            return False
+        # Quer heisst: weder in noch gegen die Bahnrichtung.
+        across = min(
+            self._angle_error_deg(step, tangent),
+            self._angle_error_deg(step, (tangent + 180.0) % 360.0),
+        )
+        return across > self.SIDEWAYS_LANE_HOP_ANGLE_DEG
+
+    def _joined_transfer(
+        self,
+        from_coord: List[float],
+        lane_coords: List[List[float]],
+        runtime_router,
+        start_heading_deg: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Uebergang, der auf die Bahnlinie einschert statt quer anzukommen.
+
+        Ein kurzer Huepfer von einer Bahn zur naechsten laeuft diagonal: er
+        ueberbrueckt den Bahnabstand und den Versatz der Bahnenden zugleich.
+        Als eigene Bahn gefahren zeigt er dadurch in eine Richtung, die mit
+        keiner der beiden Bahnen etwas zu tun hat - real am 09.08. 47,2 Grad
+        auf 0,97 m, vom Regler gesperrt. Weggelassen bleibt stattdessen der
+        Querversatz stehen, und den baut das Fahrzeug rueckwaerts ab einem
+        halben Meter nicht mehr ab (gemessen 09.08.: 0,56 m am Bahnanfang,
+        0,74 m am Ende, danach 1,42 m und Abbruch).
+
+        Beides vermeidet dieser Weg: der Uebergang zielt nicht auf den
+        Bahnanfang, sondern auf einen Punkt auf der *Verlaengerung* der Bahn
+        davor. Von dort laeuft er gerade in den Bahnanfang. Das Fahrzeug
+        schert flach ein und beginnt die Bahn auf der Linie - ohne Versatz und
+        ohne Knick. Die Verlaengerung liegt im schon gemaehten Bereich neben
+        der Bahn, kostet also nichts.
+        """
+        if runtime_router is None or len(lane_coords) < 2:
+            return None
+        tangent = self._segment_entry_heading(lane_coords, "forward")
+        if tangent is None:
+            return None
+        lateral = self._distance_to_polyline_m(from_coord, lane_coords)
+        if lateral <= 0.05:
+            return None
+        # Flach einscheren: der Anlauf ist so lang, dass der Winkel zur Bahn
+        # unter JOIN_LANE_ANGLE_DEG bleibt.
+        run_m = max(
+            self.MIN_JOIN_LANE_RUN_M,
+            lateral / math.tan(math.radians(self.JOIN_LANE_ANGLE_DEG)),
+        )
+        if run_m > self.MAX_JOIN_LANE_RUN_M:
+            return None
+        entry = self._offset_coord(
+            lane_coords[0], (tangent + 180.0) % 360.0, run_m
+        )
+        coords = [list(from_coord), entry, list(lane_coords[0])]
+        if self._coord_distance_m(coords[0], coords[1]) < 0.05:
+            return None
+        # Das Eck am Einscherpunkt ausrunden. Als scharfer Knick gefahren
+        # faellt der Regler dort in den Ausrichtmodus und kriecht: der
+        # Simulator kam 2,97 von 4,76 m weit und lief in die
+        # Zeitueberschreitung (09.08.). Mit einem Bogen, dessen Radius die
+        # Messtabelle traegt, laeuft er durch.
+        if start_heading_deg is not None:
+            smooth = self._merge_onto_lane_coords(
+                from_coord, start_heading_deg, lane_coords[0], tangent
+            )
+            if smooth is not None and runtime_router.is_polyline_safe(smooth):
+                coords = smooth
+        if not runtime_router.is_polyline_safe(coords):
+            return None
+        joined = {
+            "type": "transition",
+            "source_index": None,
+            "mode": "track",
+            "direction": "forward",
+            "route_kind": "join_lane",
+            "coordinates": coords,
+            "length_m": round(self._polyline_length_m(coords), 2),
+        }
+        joined = self._select_transfer_direction(joined, start_heading_deg)
+        if joined.get("direction") == "reverse":
+            # Rueckwaerts eingeschert bricht der Regler am Knick ab: der
+            # Simulator kam 4,06 von 4,52 m weit und stieg mit
+            # cross_track_stop aus (09.08.). Kommt das Fahrzeug von einer
+            # rueckwaerts gemaehten Bahn, bleibt es beim geraden Uebergang -
+            # lieber die alte Loesung als eine neue, die nicht faehrt.
+            return None
+        return joined
 
     def _arc_transfer(
         self,
