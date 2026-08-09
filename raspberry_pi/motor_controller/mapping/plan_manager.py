@@ -179,6 +179,11 @@ class MowingPlanManager:
     # anfasst; gemessen am Brunnen spart die Umkehrung 12,1 m (5,2 statt
     # 17,3 m Anfahrt) und liegt damit weit ueber dieser Schwelle.
     BLOCK_REVERSAL_GAIN_M = 2.0
+    # Wie viele Zuege ein Rangiermanoever hoechstens hat. Jeder Zug dreht
+    # APPROACH_TURN_ARCS[0] weit, also 45 Grad - vier Zuege drehen das
+    # Fahrzeug um, sechs reichen fuer jede Lage. Mehr waere kein Rangieren
+    # mehr, sondern Suchen.
+    MAX_SHUNT_LEGS = 6
     # Ab wie vielen Bahnen ein Stueck Plan als eigener Block gilt. Zwei
     # genuegen: weniger ist keine Reihenfolge, die man umdrehen koennte.
     MIN_REORDERED_BLOCK_LANES = 2
@@ -577,6 +582,17 @@ class MowingPlanManager:
                                 coords, segment.get("direction")
                             ),
                         )
+                        # Hier waere der Platz, auch die Anfahrt rangieren zu
+                        # lassen. Ausprobiert und wieder entfernt: der
+                        # Anfahrbogen drueckt den Kursfehler vorher schon
+                        # unter die Sperre, also sprang das Rangieren in
+                        # keinem konstruierbaren Fall an. Und wo es ansprang -
+                        # Fahrzeug auf der falschen Seite des Brunnens -,
+                        # scheiterte es an der Ankunft: der geroutete Weg um
+                        # die Sperrzone kommt am Bahnanfang mit einem Kurs an,
+                        # der nicht zur Bahn passt. Dafuer braeuchte es drei
+                        # Stufen (rangieren, routen, einschwenken) und eine
+                        # eigene Runde am Pruefstand.
                         executable.append(positioning)
                         current_heading_deg = self._segment_end_heading(
                             positioning,
@@ -677,6 +693,21 @@ class MowingPlanManager:
                             # der Bogen, der auch die Anfahrt zum Planbeginn
                             # baut: der braucht die Bahn nicht als Platz.
                             manoeuvre = self._arc_transfer(
+                                current_end,
+                                current_heading_deg,
+                                segment,
+                                coords,
+                                runtime_router,
+                            )
+                        if manoeuvre is None:
+                            # Alle drei davor drehen am Ziel und brauchen dort
+                            # Platz. Steht das Fahrzeug eng, hat keine davon
+                            # welchen - real am Brunnen 0,43 m vom Rand, 57
+                            # Grad zwischen Nase und Weg, und der Uebergang
+                            # ging mit sichtbarem Kursfehler raus. Dabei ist
+                            # hinter dem Fahrzeug alles gemaeht. Zuletzt also
+                            # rangieren: vor und zurueck, bis die Nase passt.
+                            manoeuvre = self._shunt_transfer(
                                 current_end,
                                 current_heading_deg,
                                 segment,
@@ -1250,6 +1281,253 @@ class MowingPlanManager:
                     "coordinates": coords,
                     "length_m": round(self._polyline_length_m(coords), 2),
                 }]
+        return None
+
+    @classmethod
+    def _shunt_leg_coords(
+        cls,
+        from_coord: List[float],
+        heading_deg: float,
+        turn_deg: float,
+        radius_m: float,
+        rotate_left: bool,
+        reverse: bool,
+    ) -> Tuple[List[List[float]], float]:
+        """Ein Zug eines Rangiermanoevers: ein Kreisbogen vor oder zurueck.
+
+        Rueckwaerts dreht dieselbe Lenkung andersherum. Soll sich die Nase
+        weiter in dieselbe Richtung drehen, muss der Wendekreismittelpunkt
+        beim Rueckstoss also auf der anderen Seite liegen - genau das ist der
+        Trick der Dreipunktwende: vor und zurueck drehen gleichsinnig, die
+        Verschiebungen heben sich groesstenteils auf, und das Fahrzeug dreht
+        sich fast auf der Stelle, ohne je auf der Stelle zu drehen.
+
+        Der zurueckgegebene Streckenzug laeuft immer in Fahrtrichtung des
+        Zuges. Bei einem Rueckwaertszug zeigt die Nase also entgegen dem
+        Streckenzug; das Segment traegt dafuer ``direction: reverse``, und der
+        Regler rechnet es genauso.
+        """
+        latitude = math.radians(float(from_coord[1]))
+        lat_scale = 111320.0
+        lon_scale = 111320.0 * max(0.01, math.cos(latitude))
+
+        def unit(bearing_deg):
+            angle = math.radians(bearing_deg)
+            return (math.sin(angle), math.cos(angle))
+
+        # Vorzeichen der Kursaenderung: links herum heisst fallende Peilung.
+        rotation = -1.0 if rotate_left else 1.0
+        # Seite des Wendekreises. Vorwaerts liegt er auf der Drehseite,
+        # rueckwaerts gegenueber.
+        side = rotation if not reverse else -rotation
+        heading = float(heading_deg) % 360.0
+        spoke = unit(heading + side * 90.0)
+        centre = (spoke[0] * radius_m, spoke[1] * radius_m)
+
+        def position(bearing_deg):
+            back = unit(bearing_deg + side * 90.0 + 180.0)
+            return (centre[0] + back[0] * radius_m, centre[1] + back[1] * radius_m)
+
+        steps = max(1, int(math.ceil(turn_deg / cls.MAX_TURN_STEP_DEG)))
+        points = [(0.0, 0.0)]
+        for index in range(1, steps + 1):
+            points.append(position(heading + rotation * turn_deg * index / steps))
+        coords = [
+            [
+                float(from_coord[0]) + east / lon_scale,
+                float(from_coord[1]) + north / lat_scale,
+            ]
+            for east, north in points
+        ]
+        deduplicated = [coords[0]]
+        for coord in coords[1:]:
+            if cls._coord_distance_m(deduplicated[-1], coord) > 0.02:
+                deduplicated.append(coord)
+        if len(deduplicated) < 2:
+            return [], heading
+        return deduplicated, (heading + rotation * turn_deg) % 360.0
+
+    def _shunt_transfer(
+        self,
+        from_coord: List[float],
+        start_heading_deg: Optional[float],
+        segment: Dict[str, Any],
+        lane_coords: List[List[float]],
+        runtime_router,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Rangieren, statt den Kursfehler zu melden.
+
+        Letzte Stufe der Manoeverleiter. Die drei davor drehen alle *am Ziel*:
+        Einscheren braucht einen flachen Anlauf, das Eindrehmanoever Tiefe in
+        der Zielbahn, der Bogen einen Radius, der neben die Bahn passt. Steht
+        das Fahrzeug eng - am Brunnen 0,43 m vom Rand, mit 57 Grad zwischen
+        Nase und Weg -, hat keine davon Platz, und der Uebergang wurde mit
+        sichtbarem Kursfehler ausgegeben.
+
+        Dabei ist ringsum Platz: die Flaeche hinter dem Fahrzeug ist gemaeht,
+        und das Fahrzeug faehrt rueckwaerts genauso wie vorwaerts. Genutzt hat
+        das bisher nichts davon. Hier wird es genutzt: abwechselnd vor und
+        zurueck, jeder Zug ein Bogen von APPROACH_TURN_ARCS[0] - 45 Grad auf
+        4 m Radius, die engste Kombination, die der Regler nachweislich faehrt
+        -, bis die Nase so steht, dass die vorhandene Anfahrt zur Bahn passt.
+
+        Gedreht wird nie auf der Stelle: das kann dieses Fahrzeug nicht (der
+        Gegenlauf-Pivot laesst es unter Last stehen, real >4 min). Jeder Zug
+        ist ein normaler Bogen in Fahrtrichtung, und jeder wird einzeln gegen
+        Rand und Sperrzonen geprueft - rangiert wird nur ueber Flaeche, die
+        das Fahrzeug auch befahren darf.
+
+        Gibt ``None`` zurueck, wenn auch das nicht reicht. Dann bleibt es beim
+        geraden Uebergang, und der Kursfehler steht wie bisher im Plan.
+        """
+        if start_heading_deg is None or runtime_router is None or len(lane_coords) < 2:
+            return None
+        tangent = self._segment_entry_heading(lane_coords, "forward")
+        if tangent is None:
+            return None
+        targets = [tangent]
+        if segment.get("type") == "rest_lane" and self.reverse_track_supported:
+            targets.append((tangent + 180.0) % 360.0)
+
+        radius_m, turn_deg = self.APPROACH_TURN_ARCS[0]
+        best = None
+        for target in targets:
+            for rotate_left in (True, False):
+                for first_reverse in (False, True):
+                    legs: List[Dict[str, Any]] = []
+                    position = list(from_coord)
+                    heading = float(start_heading_deg)
+                    reverse = first_reverse
+                    for _ in range(self.MAX_SHUNT_LEGS):
+                        coords, turned = self._shunt_leg_coords(
+                            position, heading, turn_deg, radius_m,
+                            rotate_left, reverse,
+                        )
+                        if len(coords) < 2 or not runtime_router.is_polyline_safe(coords):
+                            break
+                        leg = {
+                            "type": "transition",
+                            "source_index": None,
+                            "mode": "track",
+                            "direction": "reverse" if reverse else "forward",
+                            "route_kind": "shunt_turn",
+                            "coordinates": coords,
+                            "length_m": round(self._polyline_length_m(coords), 2),
+                        }
+                        if self._blocks_on_heading(leg, heading):
+                            break
+                        legs.append(leg)
+                        position = list(coords[-1])
+                        heading = turned
+                        reverse = not reverse
+                        finish = self._shunt_finish(
+                            position, heading, lane_coords[0], target, runtime_router
+                        )
+                        if finish is None:
+                            continue
+                        # Nicht beim ersten brauchbaren Manoever aufhoeren.
+                        # Ein Zug weniger ist kuerzer, laesst die Nase aber
+                        # schiefer stehen - und daran kriecht der Regler fest:
+                        # nach einem Zug blieben 29,6 Grad am Einlauf, und die
+                        # Simulation kam auf den letzten 30 cm nicht mehr an
+                        # (gemessen 09.08.). Entschieden wird deshalb nach dem
+                        # groessten Kursfehler im ganzen Manoever, und erst bei
+                        # gleichem Fehler nach der Laenge. Ein Zug mehr kostet
+                        # 3,13 m - das ist es wert.
+                        candidate = legs + [finish]
+                        rank = (
+                            round(self._manoeuvre_heading_error(
+                                candidate, float(start_heading_deg), target
+                            ), 1),
+                            round(sum(item["length_m"] for item in candidate), 2),
+                        )
+                        if best is None or rank < best[0]:
+                            best = (rank, [dict(item) for item in candidate])
+        return None if best is None else best[1]
+
+    def _manoeuvre_heading_error(
+        self,
+        manoeuvre: List[Dict[str, Any]],
+        start_heading_deg: float,
+        arrival_heading_deg: float,
+    ) -> float:
+        """Groesster Kursfehler, den dieses Manoever irgendwo verlangt.
+
+        Gemessen wird an jedem Segmentanfang gegen den Kurs, mit dem das
+        Fahrzeug dort ankommt, und am Ende gegen die Bahnrichtung. Der Regler
+        sieht genau diese Winkel - der laengste davon entscheidet, ob das
+        Manoever fahrbar ist.
+        """
+        heading = float(start_heading_deg)
+        worst = 0.0
+        for item in manoeuvre:
+            coords = item.get("coordinates") or []
+            if len(coords) < 2:
+                continue
+            nose = self._edge_bearing_deg(coords[0], coords[1])
+            if nose is None:
+                continue
+            if item.get("direction") == "reverse":
+                nose = (nose + 180.0) % 360.0
+            worst = max(worst, self._angle_error_deg(nose, heading))
+            heading = self._segment_end_heading(item, heading)
+        if heading is not None:
+            worst = max(worst, self._angle_error_deg(heading, arrival_heading_deg))
+        return worst
+
+    def _shunt_finish(
+        self,
+        from_coord: List[float],
+        heading_deg: float,
+        to_coord: List[float],
+        arrival_heading_deg: float,
+        runtime_router,
+    ) -> Optional[Dict[str, Any]]:
+        """Der letzte Zug: von der ausgerichteten Nase auf den Bahnanfang.
+
+        Erst die Gerade - steht die Nase nach dem Rangieren richtig, ist sie
+        der kuerzeste Weg und macht keinen Knick. Sonst der vorhandene
+        Anfahrbogen, derselbe, der auch zum Planbeginn fuehrt.
+
+        Ausprobiert und wieder entfernt: zusaetzlich den gerouteten Weg als
+        Abschluss anbieten, fuer den Fall, dass zwischen Rangierplatz und
+        Bahnanfang eine Sperrzone liegt. Er wurde 24-mal angeboten und gewann
+        kein einziges Mal - ein Weg um eine Sperrzone kommt am Bahnanfang mit
+        einem Kurs an, der nicht zur Bahn passt, und faellt hier durch die
+        Ankunftspruefung. Das braeuchte eine dritte Stufe, die danach noch
+        einschwenkt.
+        """
+        for coords in (
+            [list(from_coord), list(to_coord)],
+            self._approach_arc_coords(
+                from_coord, heading_deg, to_coord, arrival_heading_deg
+            ),
+        ):
+            if coords is None or len(coords) < 2:
+                continue
+            if self._coord_distance_m(coords[0], coords[-1]) < 0.05:
+                continue
+            entry = self._edge_bearing_deg(coords[0], coords[1])
+            arrival = self._edge_bearing_deg(coords[-2], coords[-1])
+            if entry is None or arrival is None:
+                continue
+            if self._angle_error_deg(entry, heading_deg) > self.RING_START_HEADING_LIMIT_DEG:
+                continue
+            if self._angle_error_deg(arrival, arrival_heading_deg) > (
+                self.RING_START_HEADING_LIMIT_DEG
+            ):
+                continue
+            if not runtime_router.is_polyline_safe(coords):
+                continue
+            return {
+                "type": "transition",
+                "source_index": None,
+                "mode": "track",
+                "direction": "forward",
+                "route_kind": "shunt_approach",
+                "coordinates": coords,
+                "length_m": round(self._polyline_length_m(coords), 2),
+            }
         return None
 
     def _turn_in_transfer(

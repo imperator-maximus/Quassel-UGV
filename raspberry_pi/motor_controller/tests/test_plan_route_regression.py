@@ -749,6 +749,157 @@ class EveryLaneCanBeAStartTests(unittest.TestCase):
                         self.assertNotIn("Abfahrposition", str(exc))
 
 
+class ShuntingTests(unittest.TestCase):
+    """Rangieren statt aufgeben - vor und zurueck, bis die Nase passt.
+
+    Die drei aelteren Manoever drehen alle *am Ziel* und brauchen dort Platz:
+    Einscheren einen flachen Anlauf, das Eindrehmanoever Tiefe in der
+    Zielbahn, der Bogen einen Radius neben der Bahn. Steht das Fahrzeug eng,
+    hat keines davon welchen - real am Brunnen 0,43 m vom Rand, 57 Grad
+    zwischen Nase und Weg -, und der Uebergang ging mit sichtbarem Kursfehler
+    raus, obwohl ringsum gemaehte Flaeche liegt.
+    """
+
+    START = [11.0784415, 53.3326482]
+
+    def test_every_leg_starts_where_the_nose_already_points(self):
+        """Auch der Rueckwaertszug: dort zeigt die Nase entgegen dem Weg."""
+        radius, turn = MowingPlanManager.APPROACH_TURN_ARCS[0]
+        half_step = MowingPlanManager.MAX_TURN_STEP_DEG / 2.0 + 0.1
+        for heading in range(0, 360, 15):
+            for rotate_left in (True, False):
+                for reverse in (False, True):
+                    coords, _turned = MowingPlanManager._shunt_leg_coords(
+                        self.START, float(heading), turn, radius,
+                        rotate_left, reverse,
+                    )
+                    nose = MowingPlanManager._edge_bearing_deg(coords[0], coords[1])
+                    if reverse:
+                        nose = (nose + 180.0) % 360.0
+                    with self.subTest(heading=heading, left=rotate_left,
+                                      reverse=reverse):
+                        self.assertLessEqual(
+                            MowingPlanManager._angle_error_deg(nose, float(heading)),
+                            half_step,
+                        )
+
+    def test_forward_and_reverse_legs_turn_the_same_way(self):
+        """Der Kern der Dreipunktwende.
+
+        Rueckwaerts dreht dieselbe Lenkung andersherum - deshalb muss der
+        Wendekreis beim Rueckstoss auf der anderen Seite liegen. Stimmt das
+        nicht, dreht sich das Manoever wieder heraus statt weiter hinein.
+        """
+        radius, turn = MowingPlanManager.APPROACH_TURN_ARCS[0]
+        for rotate_left in (True, False):
+            heading = 90.0
+            position = list(self.START)
+            reverse = False
+            for _ in range(4):
+                coords, heading = MowingPlanManager._shunt_leg_coords(
+                    position, heading, turn, radius, rotate_left, reverse
+                )
+                position = list(coords[-1])
+                reverse = not reverse
+            turned = (90.0 - heading) % 360.0 if rotate_left else (heading - 90.0) % 360.0
+            with self.subTest(left=rotate_left):
+                self.assertAlmostEqual(4.0 * turn, turned, delta=0.5)
+
+    def test_shunting_turns_around_almost_on_the_spot(self):
+        """Vier Zuege drehen um, ohne davonzufahren.
+
+        Das ist der Sinn der Uebung: dieses Fahrzeug dreht nicht auf der
+        Stelle - der Gegenlauf-Pivot laesst es unter Last stehen (real >4 min)
+        -, aber es kommt einer Standwende sehr nahe, wenn es dabei vor und
+        zurueck faehrt.
+        """
+        radius, turn = MowingPlanManager.APPROACH_TURN_ARCS[0]
+        heading = 90.0
+        position = list(self.START)
+        reverse = False
+        driven = 0.0
+        for _ in range(4):
+            coords, heading = MowingPlanManager._shunt_leg_coords(
+                position, heading, turn, radius, rotate_left=True, reverse=reverse
+            )
+            driven += MowingPlanManager._polyline_length_m(coords)
+            position = list(coords[-1])
+            reverse = not reverse
+
+        self.assertAlmostEqual(270.0, heading, delta=1.0)
+        self.assertLess(
+            MowingPlanManager._coord_distance_m(self.START, position), 4.0,
+            "Das Manoever darf nicht davonfahren, es soll umdrehen",
+        )
+        self.assertLess(driven, 4.0 * math.radians(turn) * radius + 0.5)
+
+    def test_shunting_needs_a_router_and_never_invents_free_space(self):
+        """Rangiert wird nur ueber Flaeche, die befahren werden darf."""
+        manager = MowingPlanManager(str(FIXTURES))
+        lane = [[11.0783643, 53.3326702], [11.0782986, 53.3326670]]
+
+        class RefusesEverything:
+            def is_polyline_safe(self, coords, confine_to_mow_area=True):
+                return False
+
+        self.assertIsNone(
+            manager._shunt_transfer(
+                self.START, 258.0, {"type": "rest_lane"}, lane, RefusesEverything()
+            )
+        )
+        self.assertIsNone(
+            manager._shunt_transfer(
+                self.START, 258.0, {"type": "rest_lane"}, lane, None
+            )
+        )
+
+    def test_the_real_well_crossing_is_shunted_instead_of_reported(self):
+        """Der Fall vom 09.08.: Abfahrposition 95,1 % im Schieberegler.
+
+        Das Fahrzeug beendet Restbahn 46 mit der Nase nach Westsuedwest,
+        0,43 m vom Brunnen, und der Weg zu den Bahnen links verlangt sofort
+        Nordwest - 57 bis 61 Grad daneben. Der Regler sperrte nach 0,03 m.
+        """
+        plan = json.loads((FIXTURES / "Brunnen.plan.json").read_text(encoding="utf-8"))
+        marker = [11.078454134932192, 53.332649749254266]
+        stand = MowingPlanManager._offset_coord(marker, 45.0, 7.4)
+        pose = {
+            "timestamp": time.time(),
+            "gps": {"lat": stand[1], "lon": stand[0], "satellites": 27},
+            "heading": 225.0,
+            "heading_source": "dual_gnss",
+            "rtk_status": "RTK FIXED",
+        }
+        manager = MowingPlanManager(str(FIXTURES), lambda: pose)
+
+        route = manager.executable_segments(
+            plan, start_segment_index=65,
+            start_coordinate=list(marker), start_pose=pose,
+        )
+        headings = manager.segment_start_headings(route, start_pose=pose)
+
+        self.assertTrue(
+            [item for item in route
+             if str(item.get("route_kind", "")).startswith("shunt")],
+            "Ohne Rangieren gibt es hier keinen fahrbaren Uebergang",
+        )
+        blocked = []
+        for index, (segment, heading) in enumerate(zip(route, headings)):
+            coords = segment.get("coordinates") or []
+            if heading is None or len(coords) < 2 or segment.get("mode") == "goto":
+                continue
+            nose = MowingPlanManager._edge_bearing_deg(coords[0], coords[1])
+            if nose is None:
+                continue
+            if segment.get("direction") == "reverse":
+                nose = (nose + 180.0) % 360.0
+            error = MowingPlanManager._angle_error_deg(nose, heading)
+            if error >= 45.0:
+                blocked.append((index, segment.get("route_kind"), round(error, 1)))
+
+        self.assertEqual([], blocked)
+
+
 class RollingTurnNeverJumpsTests(unittest.TestCase):
     """Der rollende Bogen haengt seinen Wegpunkt nie mit einem Sprung an.
 
