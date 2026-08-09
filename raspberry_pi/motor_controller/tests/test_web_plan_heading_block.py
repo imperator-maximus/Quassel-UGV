@@ -287,6 +287,108 @@ class ResumeCheckTargetsTheResumePointTests(unittest.TestCase):
         self.assertIn('resume: useResume === true', check_call)
 
 
+class StopReasonSurvivesARestartTests(unittest.TestCase):
+    """Ein Sicherheitsstopp beendet den Prozess - der Grund darf nicht mitgehen.
+
+    Real am 08.08., 21:06 und 21:18: der ODrive antwortete 5 s nicht auf USB,
+    der Sicherheitswaechter stoppte, der Prozess beendete sich mit Status 70
+    und systemd startete ihn neu. Danach stand das Fahrzeug, der Maeher war
+    aus - und die Oberflaeche zeigte nichts an, weil der Planstatus nur im
+    Prozess lebte. Der Wiederaufsetzpunkt lag die ganze Zeit auf der Platte.
+    """
+
+    def setUp(self):
+        import json
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.plans_dir = Path(self.tmp.name)
+        self.json = json
+
+        config = SimpleNamespace(
+            template_folder='.', static_folder='.', secret_key='test'
+        )
+        dummy = SimpleNamespace()
+        self.server = WebServer(config, dummy, dummy, dummy, dummy)
+        self.server.mapping = SimpleNamespace(
+            plans=SimpleNamespace(
+                plans_dir=self.plans_dir,
+                _sanitize_name=lambda name: name,
+            )
+        )
+
+    def _write_resume(self, reason, timestamp=1786000000.0):
+        (self.plans_dir / 'Brunnen.resume.json').write_text(
+            self.json.dumps({
+                'schema': 'raspberrycan.mowing_resume.v2',
+                'map_name': 'Brunnen',
+                'reason': reason,
+                'timestamp': timestamp,
+                'active_index': 3,
+                'source_segment_index': 10,
+            }),
+            encoding='utf-8',
+        )
+
+    def test_a_safety_stop_is_reported_after_the_restart(self):
+        self._write_resume('safety_stop')
+
+        status = self.server.get_plan_execution_status()
+
+        self.assertEqual('service_restart', status['state'])
+        self.assertIn('safety_stop', status['last_error'])
+        self.assertIn('Bahn 10', status['last_error'])
+        self.assertEqual(3, status['active_index'])
+
+    def test_the_resume_button_comes_back_after_the_restart(self):
+        self._write_resume('safety_stop')
+
+        self.assertTrue(
+            self.server.get_plan_execution_status()['resume_available'],
+            'Ohne resume_available fehlt in der Oberflaeche der Knopf',
+        )
+
+    def test_a_deliberate_pause_is_not_reported_as_a_fault(self):
+        self._write_resume('paused')
+
+        status = self.server.get_plan_execution_status()
+
+        self.assertEqual('paused', status['state'])
+        self.assertIsNone(status['last_error'])
+        self.assertTrue(status['resume_available'])
+
+    def test_without_a_resume_point_nothing_is_invented(self):
+        status = self.server.get_plan_execution_status()
+
+        self.assertEqual('idle', status['state'])
+        self.assertIsNone(status['last_error'])
+
+    def test_a_broken_resume_file_never_breaks_the_status(self):
+        """Der Statusabruf haengt an jeder Anzeige - er darf nie scheitern."""
+        (self.plans_dir / 'Brunnen.resume.json').write_text(
+            '{kaputt', encoding='utf-8'
+        )
+
+        status = self.server.get_plan_execution_status()
+
+        self.assertEqual('idle', status['state'])
+
+    def test_a_mapping_without_a_plans_dir_is_survived(self):
+        self.server.mapping = SimpleNamespace(plans=SimpleNamespace())
+
+        self.assertEqual('idle', self.server.get_plan_execution_status()['state'])
+
+    def test_a_running_plan_is_not_overwritten(self):
+        """Der Nachtrag gilt nur beim Start, nicht mitten in der Fahrt."""
+        self._write_resume('safety_stop')
+        self.server._active_plan_map_name = 'Brunnen'
+        self.server._plan_status.update(running=True, state='running')
+
+        status = self.server.get_plan_execution_status()
+
+        self.assertEqual('running', status['state'])
+        self.assertIsNone(status['last_error'])
 class PlanAlertVisibilityTests(unittest.TestCase):
     """Ein gestoppter Plan muss ohne Suchen sichtbar sein.
 

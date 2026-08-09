@@ -100,6 +100,13 @@ class WebServer:
             'last_error': None,
             'current_segment': None,
         }
+        # Ein Sicherheitsstopp beendet den Prozess, damit systemd ihn sauber
+        # neu startet. Der Planstatus lebt aber nur im Prozess - nach dem
+        # Neustart stand der Benutzer vor einem stummen System: Fahrzeug
+        # steht, Maeher aus, keine Meldung (real 08.08., 21:06 und 21:18, je
+        # ODrive-USB-Haenger). Beim ersten Statusabruf wird deshalb aus dem
+        # gespeicherten Wiederaufsetzpunkt nachgetragen, was zuletzt war.
+        self._stop_reason_restored = False
         
         if self.flask_available:
             self._init_flask()
@@ -1297,7 +1304,72 @@ class WebServer:
         if clear_resume and self._active_plan_map_name:
             self._delete_resume_state(self._active_plan_map_name)
 
+    def _restore_last_stop_reason(self):
+        """Nach einem Neustart nachtragen, warum die Fahrt zuletzt endete.
+
+        Der Wiederaufsetzpunkt liegt auf der Platte und wird erst geloescht,
+        wenn ein Plan sauber zu Ende oder bewusst beendet wird. Existiert er
+        beim Start noch, ist eine Fahrt offen - und der Grund darin ist das
+        Einzige, was den Absturz ueberlebt hat.
+
+        Das setzt auch ``_active_plan_map_name``, denn ohne den meldet
+        ``get_plan_execution_status`` kein ``resume_available``, und dann
+        fehlt in der Oberflaeche der Knopf zum Fortsetzen - obwohl der
+        Wiederaufsetzpunkt daliegt (real 08.08.).
+        """
+        if self._stop_reason_restored:
+            return
+        self._stop_reason_restored = True
+        if not self.mapping or self._active_plan_map_name:
+            return
+        # Das hier ist eine Zusatzinformation. Der Statusabruf haengt an jeder
+        # Anzeige und an der Sicherheitsanzeige - er darf daran nie scheitern.
+        try:
+            plans_dir = self.mapping.plans.plans_dir
+            candidates = sorted(
+                plans_dir.glob('*.resume.json'),
+                key=lambda path: path.stat().st_mtime,
+            )
+            if not candidates:
+                return
+            resume = json.loads(candidates[-1].read_text(encoding='utf-8'))
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning('Wiederaufsetzpunkt nicht lesbar: %s', exc)
+            return
+        if not isinstance(resume, dict):
+            return
+        map_name = resume.get('map_name')
+        if not map_name:
+            return
+
+        reason = str(resume.get('reason') or 'unbekannt')
+        stopped_at = resume.get('timestamp')
+        when = (
+            time.strftime('%H:%M', time.localtime(stopped_at))
+            if isinstance(stopped_at, (int, float)) and stopped_at > 0 else '?'
+        )
+        lane = resume.get('source_segment_index')
+        where = '' if lane is None else f', Bahn {lane}'
+        # Ein bewusst pausierter Plan ist keine Stoerung - der behaelt seinen
+        # Zustand und bleibt ohne Fehlertext, sonst schlaegt die Oberflaeche
+        # Alarm, wo nichts passiert ist.
+        with self._plan_lock:
+            self._active_plan_map_name = map_name
+            if reason == 'paused':
+                self._plan_status['state'] = 'paused'
+            else:
+                self._plan_status['state'] = 'service_restart'
+                self._plan_status['last_error'] = (
+                    f'Dienst wurde neu gestartet; davor endete die Fahrt um '
+                    f'{when} Uhr mit "{reason}"{where}. Fortsetzen ist moeglich.'
+                )
+            self._plan_status['active_index'] = resume.get('active_index') or 0
+        self.logger.warning(
+            'Offener Plan nach Neustart gefunden: map=%s reason=%s Bahn=%r um %s',
+            map_name, reason, lane, when,
+        )
     def get_plan_execution_status(self):
+        self._restore_last_stop_reason()
         with self._plan_lock:
             status = dict(self._plan_status)
             if isinstance(status.get('current_segment'), dict):
