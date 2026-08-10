@@ -4,11 +4,16 @@ Photos of the production vehicle, taken on 2026-08-10 in the manor park at
 Lübtheen. All descriptions below are limited to what is actually visible in the
 photo; no dimensions or mounting positions are inferred from the pictures.
 
+Every picture below is shown as a **1600 px web version** from `web/`
+(EXIF stripped, ~0.4 MB each) and links to the **full-resolution original**
+(4096 px, 4–7 MB) in this directory. Use the originals for print or detail
+work, the web versions everywhere a page has to load quickly.
+
 ---
 
 ## `main.jpg` — Title image: front view in the park
 
-![Front view of the Quassel UGV](main.jpg)
+[![Front view of the Quassel UGV](web/main.jpg)](main.jpg)
 
 The vehicle seen head-on from a low angle on the lawn, with the manor house and
 the round ornamental basin behind it. The dark green body carries two gold
@@ -24,6 +29,8 @@ repository title image.
 
 ## `IMG20260810194808.jpg` — Side view with raised mast
 
+[![Side view with raised mast](web/IMG20260810194808.jpg)](IMG20260810194808.jpg)
+
 Portrait shot from the rear left on the lawn next to a cobbled path. The full
 height of the mast is visible: a polished tube, braced diagonally against the
 body, carrying the grey sensor enclosure with two lenses in its front face, a
@@ -36,6 +43,8 @@ overview of the overall proportions of chassis, drive and mast.
 
 ## `IMG20260810194830.jpg` — Top view of the body cover
 
+[![Top view of the body cover](web/IMG20260810194830.jpg)](IMG20260810194830.jpg)
+
 Close-up looking down at the upper deck. The green cover panel with the gold
 centre stripe, the aluminium edge rails and the recessed pull handle are
 clearly visible, as are the cable ties along the rear edge and the clamped
@@ -47,6 +56,8 @@ cover, its mechanical fixings and the cable routing.
 
 ## `IMG20260810195032.jpg` — Wide shot: vehicle in front of the manor
 
+[![Wide shot of the vehicle in front of the manor](web/IMG20260810195032.jpg)](IMG20260810195032.jpg)
+
 Wide landscape view of the whole scene. The neo-Gothic manor with its central
 tower and clock forms the background, the empty round basin the middle ground,
 and the UGV stands small and centred on the cobbled apron at the rim of the
@@ -56,6 +67,8 @@ than the vehicle itself.
 ---
 
 ## `IMG20260810195101.jpg` — Wide shot: vehicle at the basin, headlights on
+
+[![Vehicle at the basin with headlights on](web/IMG20260810195101.jpg)](IMG20260810195101.jpg)
 
 Same viewpoint as the previous shot but closer and with the headlights lit. The
 vehicle sits at the edge of the basin on the cobbled ring, mast up. The lawn in
@@ -67,6 +80,8 @@ and no-go zones must keep the vehicle away from.
 
 ## `IMG20260810195126.jpg` — Vehicle on the lawn in front of the basin
 
+[![Vehicle on the lawn in front of the basin](web/IMG20260810195126.jpg)](IMG20260810195126.jpg)
+
 Landscape shot from further forward. The UGV stands free on the grass ahead of
 the basin, seen from the front left with both headlights on, mast raised and
 sensor enclosure at the top. The manor, the basin and the ring of clipped
@@ -76,6 +91,8 @@ in its operating context.
 ---
 
 ## `IMG20260810195204.jpg` — Rear three-quarter view on the open lawn
+
+[![Rear three-quarter view on the open lawn](web/IMG20260810195204.jpg)](IMG20260810195204.jpg)
 
 The vehicle photographed from the rear right on an open patch of lawn in front
 of a treeline, without the manor in the background. The mast with the grey
@@ -88,9 +105,26 @@ harness. The best photograph for showing the drive and equipment layout.
 
 ## `IMG20260810195217.jpg` — Close front view with mowing deck
 
+[![Close front view with the mowing deck](web/IMG20260810195217.jpg)](IMG20260810195217.jpg)
+
 Front three-quarter view from close range at ground level. The front panel with
 both lit headlights, the gold stripes and the `Q` marque fills the frame; ahead
 of it the mowing deck with its front skid bar and the knobbly tyres of the
 front axle. The mast and its sensor head rise out of the top edge of the frame.
 The manor and the basin remain visible in the background. Suitable as an
 alternative title image.
+
+---
+
+## Regenerating the web versions
+
+The files in `web/` are generated from the originals with ImageMagick; the
+command scales the long edge to 1600 px, drops all metadata (including the
+camera's GPS tags) and writes progressive JPEGs at quality 82:
+
+```bash
+cd images && mkdir -p web
+for f in *.jpg; do
+  magick "$f" -auto-orient -resize "1600x1600>" -strip -interlace Plane -quality 82 "web/$f"
+done
+```

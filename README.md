@@ -1,6 +1,6 @@
 # 🚁 Quassel UGV - RTK-GPS + WitMotion Sensor Hub + WebApp
 
-![Quassel UGV in the manor park](images/main.jpg)
+[![Quassel UGV in the manor park](images/web/main.jpg)](images/main.jpg)
 
 > Start here for the current vehicle: **[`CURRENT_PRODUCTION.md`](CURRENT_PRODUCTION.md)**
 >
