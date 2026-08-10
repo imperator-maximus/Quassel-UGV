@@ -1,6 +1,10 @@
 # 🚁 Quassel UGV - RTK-GPS + WitMotion Sensor Hub + WebApp
 
+![Quassel UGV in the manor park](images/main.jpg)
+
 > Start here for the current vehicle: **[`CURRENT_PRODUCTION.md`](CURRENT_PRODUCTION.md)**
+>
+> More photos with descriptions: **[`images/README.md`](images/README.md)**
 
 A professional autonomous UGV system with an Orange-Pi-based sensor hub, RTK-GPS positioning, WitMotion IMU orientation, redundant WiFi telemetry, direct ODrive USB control, and a real-time web interface.
 
