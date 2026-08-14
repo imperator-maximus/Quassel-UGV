@@ -100,6 +100,21 @@ odrive_mower:
   runtime_min_rpm: 150.0           # Nur "dreht ueberhaupt", nicht Solldrehzahl
   runtime_rpm_fault_duration_s: 1.5
 
+# Junctek KG110F Coulombzaehler ueber Bluetooth LE.
+# Der Zaehler sendet von sich aus etwa einmal pro Sekunde; es wird nur
+# zugehoert, nie geschrieben. Damit bleibt der gemeinsame Funkchip des Pi 3
+# fuer den SensorHub-Pose-Stream frei.
+battery:
+  enabled: false
+  address: ''                # BLE-MAC, z.B. E4:66:E5:60:FB:1C
+  capacity_ah: 50.0          # Muss dem AH.Preset am Geraet entsprechen
+  warn_percent: 30.0         # Nur Warnung im Web-UI
+  mow_stop_percent: 25.0     # Maehdeck aus - der groesste Verbraucher zuerst
+  drive_stop_percent: 20.0   # Fahrt beenden
+  # Ein Ladezustand bewegt sich ueber Minuten. Ein kurzer Funkausfall darf
+  # den Wert deshalb nicht verwerfen und schon gar nicht das Fahrzeug stoppen.
+  stale_timeout_s: 120.0
+
 # Classical-CAN-2.0-Konfiguration; CAN FD wird nicht verwendet.
 # Haupt-UGV und ehemaliger UGV-Teststand: einheitlich 250 kbit/s.
 can:

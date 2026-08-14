@@ -20,6 +20,7 @@ from .hardware.pwm_controller import PWMController
 from .hardware.odrive_mower import ODriveMowerController
 from .hardware.odrive_usb_mower import ODriveUSBMowerController
 from .hardware.safety_monitor import SafetyMonitor
+from .hardware.battery_monitor import BatteryMonitor
 from .communication.can_handler import CANHandler
 from .communication.push_notifier import PushNotifier
 from .communication.sensor_hub_http import SensorHubHttpClient
@@ -57,6 +58,7 @@ class MotorControllerApp:
         self.can: CANHandler = None
         self.sensor_hub_http: SensorHubHttpClient = None
         self.odrive_mower: ODriveMowerController = None
+        self.battery: BatteryMonitor = None
         self.motor: MotorControl = None
         self.joystick: JoystickHandler = None
         self.navigation: NavigationController = None
@@ -198,7 +200,10 @@ class MotorControllerApp:
                     )
                 else:
                     raise ValueError("odrive_mower.transport muss 'can' oder 'usb' sein")
-            
+
+            # Batterieueberwachung
+            self.battery = BatteryMonitor(self.config.battery, self.logger)
+
             # Motor-Control
             self.logger.info("Initialisiere Motor-Control...")
             self.motor = MotorControl(self.pwm, self.config)
@@ -255,6 +260,7 @@ class MotorControllerApp:
                     self.mapping,
                     self.safety,
                     notifier=self.notifier,
+                    battery=self.battery,
                 )
                 # Hardware-Referenzen setzen
                 self.web.set_hardware_refs(
@@ -543,7 +549,9 @@ class MotorControllerApp:
                 self.sensor_hub_http.start()
             if self.odrive_mower:
                 self.odrive_mower.start_monitor()
-            
+            if self.battery:
+                self.battery.start()
+
             # Safety-Watchdog starten
             if self.safety:
                 self.safety.start_watchdog()
@@ -685,6 +693,10 @@ class MotorControllerApp:
             if self.odrive_mower:
                 self.logger.info("Stoppe ODrive-Maehdeck...")
                 self.odrive_mower.cleanup()
+
+            if self.battery:
+                self.logger.info("Stoppe Batterieueberwachung...")
+                self.battery.stop()
             
             # CAN-Reader stoppen
             if self.can:

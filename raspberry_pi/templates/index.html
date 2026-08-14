@@ -1119,6 +1119,10 @@
                 <div class="status-dot" id="safetyStatus"></div>
                 <span id="safetyStatusText">Safety</span>
             </div>
+            <div class="status-indicator" id="batteryIndicator">
+                <div class="status-dot" id="batteryStatus"></div>
+                <span id="batteryStatusText">Batterie …</span>
+            </div>
             <div class="status-indicator">
                 <div class="status-dot" id="pwmStatus"></div>
                 <span>PWM Output</span>
@@ -1537,6 +1541,75 @@
         }
 
         // UI Status aktualisieren
+        // Der Ladezustand kommt vom Junctek-Coulombzaehler ueber BLE. Faellt die
+        // Funkstrecke aus, bleibt der letzte Wert stehen und wird als veraltet
+        // markiert - er springt nicht auf null, weil sich ein Ladezustand ueber
+        // Minuten bewegt und nicht ueber Sekunden.
+        function updateBatteryStatus(battery) {
+            const dot = document.getElementById('batteryStatus');
+            const text = document.getElementById('batteryStatusText');
+            const indicator = document.getElementById('batteryIndicator');
+            if (!dot || !text || !indicator) {
+                return;
+            }
+
+            if (!battery.enabled) {
+                dot.className = 'status-dot inactive';
+                text.textContent = 'Batterie aus';
+                indicator.title = 'Batterieueberwachung ist deaktiviert';
+                return;
+            }
+
+            const soc = battery.soc_percent;
+            const level = battery.level || 'unknown';
+            const dotClass = {
+                ok: 'active',
+                warn: 'warning',
+                low: 'warning',
+                critical: 'fault',
+                unknown: 'inactive'
+            }[level] || 'inactive';
+            dot.className = `status-dot ${dotClass}`;
+
+            if (soc == null) {
+                text.textContent = battery.connected ? 'Batterie …' : 'Batterie offline';
+            } else {
+                const stale = battery.fresh ? '' : ' ⏱';
+                const volts = battery.voltage_v == null ? '' : ` · ${battery.voltage_v.toFixed(2)} V`;
+                text.textContent = `${soc.toFixed(0)} %${volts}${stale}`;
+            }
+
+            const lines = [];
+            lines.push(battery.connected ? 'Verbunden' : 'Nicht verbunden');
+            if (battery.remaining_ah != null) {
+                lines.push(`Rest ${battery.remaining_ah.toFixed(3)} Ah von ${battery.capacity_ah} Ah`);
+            }
+            if (battery.current_a != null) {
+                lines.push(`Strom ${battery.current_a.toFixed(2)} A`);
+            }
+            if (battery.power_w != null) {
+                lines.push(`Leistung ${battery.power_w.toFixed(2)} W`);
+            }
+            if (battery.time_left_min != null) {
+                const hours = Math.floor(battery.time_left_min / 60);
+                const minutes = battery.time_left_min % 60;
+                lines.push(`Restlaufzeit ${hours} h ${minutes} min`);
+            }
+            if (battery.discharged_ah != null) {
+                lines.push(`Entnommen ${battery.discharged_ah.toFixed(3)} Ah`);
+            }
+            if (battery.age_s != null) {
+                lines.push(`Letzter Messwert vor ${battery.age_s.toFixed(1)} s`);
+            }
+            if (!battery.fresh && battery.age_s != null) {
+                lines.push('⏱ Wert veraltet - Funkstrecke gestoert');
+            }
+            if (battery.last_error) {
+                lines.push(`Fehler: ${battery.last_error}`);
+            }
+            indicator.title = lines.join('\n');
+        }
+
         function updateStatus(data) {
             canEnabled = data.can_enabled;
 
@@ -1581,6 +1654,7 @@
                 : (motionHeld
                     ? `${safetyStatus.motion_hold_reason || 'Fahrpause'} – wartet auf SensorHub`
                     : 'Sicherheitsüberwachung aktiv');
+            updateBatteryStatus(data.battery_status || {});
             document.getElementById('pwmStatus').className =
                 'status-dot ' + (data.pwm_enabled ? 'active' : 'inactive');
             document.getElementById('monitorStatus').className =

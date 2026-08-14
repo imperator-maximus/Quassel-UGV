@@ -74,7 +74,7 @@ class WebServer:
         'watchdog': 'Navigations-Watchdog',
     }
 
-    def __init__(self, config, motor_control, joystick_handler, can_handler, gpio_controller, navigation_controller=None, mapping_recorder=None, safety_monitor=None, notifier=None):
+    def __init__(self, config, motor_control, joystick_handler, can_handler, gpio_controller, navigation_controller=None, mapping_recorder=None, safety_monitor=None, notifier=None, battery=None):
         """
         Initialisiert Web-Server
 
@@ -85,6 +85,7 @@ class WebServer:
             can_handler: CANHandler-Instanz
             gpio_controller: GPIOController-Instanz
             notifier: optionaler PushNotifier fuer Stoerungsmeldungen
+            battery: optionaler BatteryMonitor fuer den Ladezustand
         """
         self.logger = logging.getLogger(__name__)
         self.config = config
@@ -96,6 +97,7 @@ class WebServer:
         self.mapping = mapping_recorder
         self.safety = safety_monitor
         self.notifier = notifier
+        self.battery = battery
 
         # Flask-App
         self.flask_available = FLASK_AVAILABLE
@@ -326,6 +328,9 @@ class WebServer:
                 'plan_execution_status': self.get_plan_execution_status(),
                 'mapping_status': self.mapping.get_status() if self.mapping else {'state': 'disabled'},
                 'safety_status': self.safety.get_status() if self.safety else {},
+                'battery_status': (
+                    self.battery.get_status() if self.battery else {'enabled': False}
+                ),
                 'notification_status': (
                     self.notifier.get_status() if self.notifier else {'enabled': False}
                 ),
@@ -2097,6 +2102,9 @@ class WebServer:
             'plan_execution_status': self.get_plan_execution_status(),
             'mapping_status': self.mapping.get_status() if self.mapping else {'state': 'disabled'},
             'safety_status': self.safety.get_status() if self.safety else {},
+            'battery_status': (
+                self.battery.get_status() if self.battery else {'enabled': False}
+            ),
             'light_state': self.light_state,
             'light_enabled': self.light_config.enabled if self.light_config else False,
             **self._mower_api_status(),

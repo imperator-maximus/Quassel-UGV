@@ -69,6 +69,31 @@ class MowerConfig:
 
 
 @dataclass
+class BatteryConfig:
+    """Junctek KG110F Coulomb-Zähler über BLE.
+
+    Der Zähler sendet von sich aus, deshalb wird nur zugehört. Die Schwellen
+    sind gestaffelt: erst warnen, dann das Mähdeck als größten Verbraucher
+    abschalten, erst zuletzt die Fahrt beenden.
+    """
+    enabled: bool = False
+    address: str = ''
+    notify_uuid: str = '0000ffe1-0000-1000-8000-00805f9b34fb'
+    capacity_ah: float = 50.0
+    warn_percent: float = 30.0
+    mow_stop_percent: float = 25.0
+    drive_stop_percent: float = 20.0
+    rearm_hysteresis_percent: float = 3.0
+    # Der Ladezustand bewegt sich über Minuten, nicht Sekunden. Ein Ausfall
+    # von einer Minute ist deshalb kein Grund, den Wert zu verwerfen.
+    stale_timeout_s: float = 120.0
+    scan_timeout_s: float = 25.0
+    connect_timeout_s: float = 30.0
+    reconnect_delay_s: float = 5.0
+    reconnect_max_delay_s: float = 60.0
+
+
+@dataclass
 class ODriveMowerConfig:
     """ODrive/ODESC-Mähdeck über CAN oder direkte USB-Verbindungen."""
     enabled: bool = False
@@ -370,6 +395,7 @@ class Config:
     light: LightConfig = field(default_factory=LightConfig)
     mower: MowerConfig = field(default_factory=MowerConfig)
     odrive_mower: ODriveMowerConfig = field(default_factory=ODriveMowerConfig)
+    battery: BatteryConfig = field(default_factory=BatteryConfig)
     can: CANConfig = field(default_factory=CANConfig)
     sensor_hub: SensorHubConfig = field(default_factory=SensorHubConfig)
     navigation: NavigationConfig = field(default_factory=NavigationConfig)
@@ -414,6 +440,8 @@ class Config:
             if 'usb_axes' in odrive_data and odrive_data['usb_axes'] is None:
                 odrive_data['usb_axes'] = []
             config.odrive_mower = ODriveMowerConfig(**odrive_data)
+        if 'battery' in data:
+            config.battery = BatteryConfig(**data['battery'])
         if 'can' in data:
             config.can = CANConfig(**data['can'])
         if 'sensor_hub' in data:
@@ -564,6 +592,21 @@ class Config:
                 'current_trip_duration_s': self.odrive_mower.current_trip_duration_s,
                 'current_critical_trip_a': self.odrive_mower.current_critical_trip_a,
                 'current_critical_trip_duration_s': self.odrive_mower.current_critical_trip_duration_s
+            },
+            'battery': {
+                'enabled': self.battery.enabled,
+                'address': self.battery.address,
+                'notify_uuid': self.battery.notify_uuid,
+                'capacity_ah': self.battery.capacity_ah,
+                'warn_percent': self.battery.warn_percent,
+                'mow_stop_percent': self.battery.mow_stop_percent,
+                'drive_stop_percent': self.battery.drive_stop_percent,
+                'rearm_hysteresis_percent': self.battery.rearm_hysteresis_percent,
+                'stale_timeout_s': self.battery.stale_timeout_s,
+                'scan_timeout_s': self.battery.scan_timeout_s,
+                'connect_timeout_s': self.battery.connect_timeout_s,
+                'reconnect_delay_s': self.battery.reconnect_delay_s,
+                'reconnect_max_delay_s': self.battery.reconnect_max_delay_s
             },
             'can': {
                 'enabled': self.can.enabled,
