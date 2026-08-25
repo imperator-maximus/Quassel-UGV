@@ -183,6 +183,12 @@ class SensorHubConfig:
     """
     transport: str = 'can'  # can, shadow oder wifi
     wifi_url: str = 'http://192.168.178.20/api/telemetry'
+    # Mehrere Adressen fuer denselben SensorHub, in der Reihenfolge, in der
+    # sie probiert werden. Das Fahrzeug kann in zwei Netzen stehen: am
+    # Mobilfunkrouter erreicht es den SensorHub direkt, faellt der aus und
+    # beide buchen sich wieder ins alte WLAN ein, nur ueber den NAT-Hairpin.
+    # Leer heisst: es bleibt bei ``wifi_url``.
+    wifi_urls: List[str] = field(default_factory=list)
     # Passwort gehoert in SENSOR_HUB_TELEMETRY_PASSWORD, nicht in die YAML.
     auth_username: str = ''
     auth_password: str = ''

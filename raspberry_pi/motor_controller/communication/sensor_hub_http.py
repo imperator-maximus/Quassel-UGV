@@ -9,13 +9,18 @@ import ipaddress
 import socket
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
 class SensorHubHttpClient:
     """Polls compact SensorHub telemetry without blocking control threads."""
+
+    # So viele Fehler in Folge, bevor auf die naechste Adresse gewechselt wird.
+    # Kurze Netzruckler sollen keinen Wechsel ausloesen; ein Netzwechsel des
+    # Fahrzeugs soll sich aber in Sekunden von selbst finden.
+    CANDIDATE_SWITCH_AFTER_ERRORS = 5
 
     def __init__(self, config, telemetry_callback: Callable[[Dict[str, Any]], None]):
         self.logger = logging.getLogger(__name__)
@@ -37,11 +42,43 @@ class SensorHubHttpClient:
         self._last_error_log_monotonic = 0.0
         # Rate-Limit fuer Fehler-Logs: max. eine Meldung alle 5 s
         self._error_log_interval_s = 5.0
-        self._configured_url = str(self.config.wifi_url)
-        self._request_url = self._configured_url
+        # Mehrere Adressen, weil das Fahrzeug in zwei Netzen stehen kann.
+        # Am Mobilfunkrouter erreicht der Raspberry den SensorHub direkt im
+        # selben WLAN; faellt der Router aus und beide buchen sich wieder ins
+        # alte Netz ein, geht es nur ueber den NAT-Hairpin nach draussen und
+        # zurueck. Mit einer einzigen Adresse muesste bei jedem Wechsel die
+        # Konfiguration angefasst werden - ausgerechnet in dem Moment, in dem
+        # niemand daran denkt und der Fahrantrieb pausiert.
+        self._candidates: List[str] = self._build_candidates()
+        self._candidate_index = 0
+        self._last_rotation_error_count = 0
+        self._request_url = self._candidates[0]
         self._host_header: Optional[str] = None
         self._stream_connections = 0
         self._auth_header = self._build_auth_header()
+
+    def _build_candidates(self) -> List[str]:
+        """Adressen in der Reihenfolge, in der sie probiert werden.
+
+        ``wifi_urls`` hat Vorrang; fehlt es, bleibt es beim einzelnen
+        ``wifi_url``. Damit aendert sich ohne Konfiguration nichts.
+        """
+        raw = list(getattr(self.config, 'wifi_urls', None) or [])
+        if not raw:
+            raw = [getattr(self.config, 'wifi_url', '')]
+        candidates: List[str] = []
+        for entry in raw:
+            url = str(entry or '').strip()
+            if url and url not in candidates:
+                candidates.append(url)
+        if not candidates:
+            raise ValueError('sensor_hub: weder wifi_urls noch wifi_url gesetzt')
+        return candidates
+
+    @property
+    def _configured_url(self) -> str:
+        """Die gerade benutzte Adresse."""
+        return self._candidates[self._candidate_index]
 
     def _build_auth_header(self) -> Dict[str, str]:
         """Erzeugt den Basic-Auth-Header fuer den geschuetzten SensorHub.
@@ -71,7 +108,10 @@ class SensorHubHttpClient:
         ]
         for thread in self._threads:
             thread.start()
-        self.logger.info("SensorHub WiFi-Empfang gestartet: %s", self.config.wifi_url)
+        self.logger.info(
+            "SensorHub WiFi-Empfang gestartet: %s",
+            ', '.join(self._candidates),
+        )
 
     def stop(self) -> None:
         self.running = False
@@ -233,11 +273,33 @@ class SensorHubHttpClient:
                     error_count,
                     exc,
                 )
-        # Nicht bei einem kurzen Netzruckler sofort wieder den langsamen
-        # lokalen DNS-Resolver betreten. Erst zehn aufeinanderfolgende
-        # HTTP-Fehler deuten auf eine geaenderte Zieladresse hin.
-        if consecutive_errors >= 10 and consecutive_errors % 10 == 0:
+        # Nicht bei einem kurzen Netzruckler sofort die Adresse wechseln oder
+        # den langsamen lokalen DNS-Resolver betreten. Erst eine Serie von
+        # Fehlern deutet darauf hin, dass diese Adresse im aktuellen Netz
+        # nicht die richtige ist.
+        if (
+            consecutive_errors >= self.CANDIDATE_SWITCH_AFTER_ERRORS
+            and consecutive_errors % self.CANDIDATE_SWITCH_AFTER_ERRORS == 0
+        ):
+            self._advance_candidate(consecutive_errors)
             self._refresh_resolved_url()
+
+    def _advance_candidate(self, consecutive_errors: int) -> bool:
+        """Schaltet auf die naechste Adresse weiter."""
+        if len(self._candidates) < 2:
+            return False
+        with self._lock:
+            if self._last_rotation_error_count == consecutive_errors:
+                return False
+            self._last_rotation_error_count = consecutive_errors
+            self._candidate_index = (
+                (self._candidate_index + 1) % len(self._candidates)
+            )
+            next_url = self._candidates[self._candidate_index]
+        self.logger.warning(
+            "SensorHub nicht erreichbar - wechsle auf %s", next_url
+        )
+        return True
 
     @staticmethod
     def _is_auth_error(exc: Exception) -> bool:
@@ -335,6 +397,7 @@ class SensorHubHttpClient:
                 'online': age is not None and age <= timeout_s,
                 'age_s': None if age is None else round(age, 3),
                 'url': self._configured_url,
+                'urls': list(self._candidates),
                 'resolved_url': self._request_url,
                 'last_error': self._last_error,
                 'last_http_status': self._last_http_status,
