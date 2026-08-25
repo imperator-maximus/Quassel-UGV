@@ -1,0 +1,57 @@
+[Unit]
+# Rueckwaertstunnel zum Rechner im Schloss.
+#
+# Die SIM des Fahrzeugs hat keine oeffentliche IP - Mobilfunk liegt hinter
+# Carrier-Grade-NAT, eingehende Verbindungen sind damit unmoeglich. Also dreht
+# der Weg sich um: Das Fahrzeug baut die Verbindung hinaus auf und haelt sie
+# offen. Ausgehend darf es immer.
+#
+# Zwei Ports gehen durch denselben Tunnel. Der Webport allein waere zu wenig:
+# Sobald das Fahrzeug am Mobilfunkrouter haengt, ist die SSH-Freigabe der
+# FRITZ!Box aufs Fahrzeug tot, und ohne zweiten Kanal bliebe fuer die Wartung
+# nur noch die Weboberflaeche.
+#
+# Beide Enden binden auf 127.0.0.1 des Zielrechners. Damit haengt kein Port
+# des Fahrzeugs ungefragt im fremden LAN; was nach aussen soll, veroeffentlicht
+# dort der Reverse Proxy gezielt per HTTPS.
+Description=Rueckwaertstunnel zum Schloss (Weboberflaeche und SSH)
+After=network-online.target
+Wants=network-online.target
+# Kein Aufgeben nach zu vielen Neustarts: Faellt die Gegenseite fuer Stunden
+# aus, soll das Fahrzeug beim ersten erreichbaren Moment wieder da sein.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=nicolay
+EnvironmentFile=/etc/ugv-tunnel.env
+
+# -N: keine Sitzung, nur Weiterleitungen. Damit greift auf der Gegenseite auch
+#     ein erzwungener Befehl im authorized_keys-Eintrag nicht ins Leere.
+# -C: Kompression. Der Statusstrom ist JSON und laesst sich gut packen - ueber
+#     die SIM-Karte zaehlt jedes Byte.
+# ExitOnForwardFailure: Ohne das haelt ssh die Verbindung auch dann, wenn der
+#     Port auf der Gegenseite belegt ist. Der Dienst saehe gesund aus und waere
+#     unerreichbar. Lieber sofort scheitern und neu starten.
+# ServerAlive*: Ein stiller Abriss faellt sonst erst auf, wenn jemand zugreifen
+#     will. Nach 3x30 s gibt ssh auf und systemd baut neu auf.
+ExecStart=/usr/bin/ssh -NT -C \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o TCPKeepAlive=yes \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile=/home/nicolay/.ssh/known_hosts \
+    -i /home/nicolay/.ssh/ugv_tunnel_ed25519 \
+    -p ${TUNNEL_PORT} \
+    -R 127.0.0.1:${TUNNEL_WEB_PORT}:127.0.0.1:80 \
+    -R 127.0.0.1:${TUNNEL_SSH_PORT}:127.0.0.1:22 \
+    ${TUNNEL_USER}@${TUNNEL_HOST}
+
+# Der Tunnel darf nie endgueltig aufgeben; die Grenze dafuer steht in [Unit].
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

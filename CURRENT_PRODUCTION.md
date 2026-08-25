@@ -42,6 +42,35 @@ passen, sonst bleibt die Pose aus und der Watchdog pausiert den Fahrantrieb.
 Die Verbindung ist unverschlüsselt; das Passwort ist unterwegs mitlesbar.
 Einzelheiten und die Nachrüstung von TLS: `raspberry_pi/WEB_ZUGANGSSCHUTZ.md`.
 
+## Fernzugriff über den Rückwärtstunnel
+
+Die SIM-Karte des Fahrzeugs hat keine öffentliche IP – Mobilfunk liegt hinter
+Carrier-Grade-NAT, eingehende Verbindungen sind damit unmöglich. Der Weg dreht
+sich deshalb um: Das Fahrzeug baut die Verbindung **hinaus** zur Synology im
+Schloss auf und hält sie offen (`raspberry_pi/ugv-reverse-tunnel.service`,
+Ziel in `/etc/ugv-tunnel.env`, Vorlage `raspberry_pi/ugv-tunnel.env.example`).
+
+| Auf der Synology | führt zu |
+|---|---|
+| `127.0.0.1:18080` | Weboberfläche des Fahrzeugs, Port 80 |
+| `127.0.0.1:12222` | SSH des Fahrzeugs, Port 22 |
+
+Beide Enden binden auf `127.0.0.1`; was nach außen soll, veröffentlicht dort
+der DSM-Reverse-Proxy gezielt per HTTPS. Der SSH-Kanal ist kein Beiwerk: Sobald
+das Fahrzeug am Mobilfunkrouter hängt, ist die SSH-Portfreigabe der FRITZ!Box
+auf das Fahrzeug tot, und ohne diesen zweiten Kanal bliebe für die Wartung nur
+die Weboberfläche. Wartungszugang von außen:
+
+    ssh -J ugvtunnel@schloss.fdog.de:2224 -p 12222 nicolay@127.0.0.1
+
+**DSM erlaubt Portweiterleitung nicht von sich aus.** Der ausgelieferte
+`sshd_config` setzt `AllowTcpForwarding no` und macht nur für `root` und
+`admin` eine Ausnahme; ohne einen eigenen `Match User`-Block scheitert der
+Tunnel mit `remote port forwarding failed`. Der Block wird über eine Aufgabe im
+DSM-Aufgabenplaner nach jedem Neustart wiederhergestellt, weil ein DSM-Update
+die Datei ersetzen kann. Nach größeren DSM-Updates gehört deshalb geprüft, ob
+der Tunnel noch steht.
+
 ## Datenverbrauch der Weboberfläche
 
 Das Fahrzeug hängt an einer SIM-Karte, deshalb ist der Statusstrom zur
