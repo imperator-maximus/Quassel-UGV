@@ -7,6 +7,10 @@ pure logic, so the whole wire format is covered without any hardware.
 
 import time
 import unittest
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from motor_controller.config import BatteryConfig
 from motor_controller.hardware.battery_monitor import (
