@@ -15,6 +15,7 @@ from ..mapping.nogo_monitor import NoGoZoneMonitor
 from ..navigation.navigation_controller import NavigationController
 from ..simulation.path_simulator import MowingPathSimulator, SimulationParameters
 from .auth import LoginThrottle, WebAuthGuard
+from . import status_delta
 
 try:
     from flask import Flask, render_template, jsonify, request, session
@@ -150,6 +151,14 @@ class WebServer:
         # ODrive-USB-Haenger). Beim ersten Statusabruf wird deshalb aus dem
         # gespeicherten Wiederaufsetzpunkt nachgetragen, was zuletzt war.
         self._stop_reason_restored = False
+
+        # Statusuebertragung als Differenz. Der Grundstand ist der zuletzt
+        # gesendete Status; die laufende Nummer laesst den Browser merken,
+        # wenn ihm eine Differenz fehlt, und einen vollen Stand nachfordern.
+        self._status_lock = threading.Lock()
+        self._status_baseline: Optional[dict] = None
+        self._status_seq = 0
+        self._status_clients = 0
         
         if self.flask_available:
             self._init_flask()
@@ -184,6 +193,10 @@ class WebServer:
             # aufbaut.
             self.app.config['SESSION_COOKIE_HTTPONLY'] = True
             self.app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+            # Die statischen Dateien tragen einen Versionsstempel im Pfad
+            # (?v=...). Damit darf der Browser sie lange behalten, statt sie
+            # bei jedem Aufruf des Fahrzeugs neu ueber die SIM-Karte zu holen.
+            self.app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 30 * 24 * 3600
 
             self._init_auth()
 
@@ -202,6 +215,10 @@ class WebServer:
                     response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
                     response.headers['Vary'] = 'Origin'
                 return response
+
+            @self.app.after_request
+            def compress_response(response):
+                return self._compress_response(response)
 
             @self.app.before_request
             def enforce_authentication():
@@ -234,6 +251,50 @@ class WebServer:
             self.logger.error(f"❌ Flask-Initialisierung fehlgeschlagen: {e}")
             self.flask_available = False
             self.socketio_available = False
+
+    # HTML, JavaScript und JSON sind Text und lassen sich auf etwa ein Fuenftel
+    # zusammendrucken. Ueber die SIM-Karte ist das bei 90 kB Oberflaeche je
+    # Seitenaufruf der Unterschied zwischen spuerbar und egal. Komprimiert wird
+    # erst ab einer Mindestgroesse - bei kurzen Antworten kostet der
+    # gzip-Rahmen mehr, als er spart.
+    COMPRESSIBLE_TYPES = (
+        'text/', 'application/json', 'application/javascript', 'image/svg+xml',
+    )
+
+    def _compress_response(self, response):
+        try:
+            if response.direct_passthrough or response.status_code >= 300:
+                return response
+            if response.headers.get('Content-Encoding'):
+                return response
+            content_type = (response.headers.get('Content-Type') or '').lower()
+            if not content_type.startswith(self.COMPRESSIBLE_TYPES):
+                return response
+
+            response.headers['Vary'] = ', '.join(
+                filter(None, [response.headers.get('Vary'), 'Accept-Encoding'])
+            )
+            accepted = (request.headers.get('Accept-Encoding') or '').lower()
+            if 'gzip' not in accepted:
+                return response
+
+            minimum = int(getattr(self.config, 'compress_min_bytes', 1024) or 0)
+            data = response.get_data()
+            if len(data) < minimum:
+                return response
+
+            import gzip
+            # mtime=0: Ohne festen Zeitstempel unterscheidet sich das Ergebnis
+            # bei jedem Aufruf, und der ETag der Antwort waere wertlos.
+            packed = gzip.compress(data, compresslevel=6, mtime=0)
+            if len(packed) >= len(data):
+                return response
+            response.set_data(packed)
+            response.headers['Content-Encoding'] = 'gzip'
+            response.headers['Content-Length'] = str(len(packed))
+        except Exception as e:  # Komprimierung ist Beiwerk, nie ein Ausfallgrund
+            self.logger.debug(f"Komprimierung uebersprungen: {e}")
+        return response
 
     def _configured_origins(self):
         """Zusaetzlich erlaubte Origins, auf den blossen Host reduziert."""
@@ -313,7 +374,13 @@ class WebServer:
         
         @self.app.route('/')
         def index():
-            return render_template('index.html')
+            # Die Oberflaeche ist 90 kB gross und aendert sich nur beim
+            # Ausrollen. Mit ETag beantwortet der Server den zweiten Aufruf mit
+            # 304 und uebertraegt gar nichts mehr.
+            response = self.app.make_response(render_template('index.html'))
+            response.headers['Cache-Control'] = 'no-cache'
+            response.add_etag()
+            return response.make_conditional(request)
         
         @self.app.route('/api/status')
         def api_status():
@@ -1895,31 +1962,46 @@ class WebServer:
                 return False
 
             self.logger.info("🔌 WebSocket Client verbunden")
-            # Initial Status senden
-            self._emit_status_update()
+            with self._status_lock:
+                self._status_clients += 1
+            # Der neue Client kennt noch keinen Stand und bekommt deshalb den
+            # vollen - aber nur er, nicht alle.
+            self._emit_full_status(to=request.sid)
             return None
 
         @self.socketio.on('disconnect')
         def handle_disconnect():
             """Client getrennt"""
             self.logger.info("🔌 WebSocket Client getrennt")
+            with self._status_lock:
+                self._status_clients = max(0, self._status_clients - 1)
             # Joystick deaktivieren bei Disconnect
             self.joystick.disable()
 
+        @self.socketio.on('request_status_full')
+        def handle_request_status_full():
+            """Der Browser hat eine Differenz verpasst und holt den vollen Stand."""
+            if not self._socket_session_authenticated():
+                return
+            self._emit_full_status(to=request.sid)
+
         @self.socketio.on('joystick_update')
         def handle_joystick_update(data):
-            """Joystick-Position Update"""
+            """Joystick-Position Update.
+
+            Die Antwort auf jeden Stossbefehl war frueher eine PWM-Sendung an
+            alle Clients - bei 50 Eingaben je Sekunde ein zweiter Datenstrom
+            neben dem Status. Die PWM-Werte stehen ohnehin im Status, der
+            waehrend der Fahrt im schnellen Takt laeuft.
+            """
             x = data.get('x', 0.0)
             y = data.get('y', 0.0)
             self.joystick.update(x, y)
-            # PWM-Werte zurücksenden
-            self._emit_pwm_update()
 
         @self.socketio.on('joystick_release')
         def handle_joystick_release():
             """Joystick losgelassen"""
             self.joystick.disable()
-            self._emit_pwm_update()
 
         @self.socketio.on('max_speed_update')
         def handle_max_speed_update(data):
@@ -2084,11 +2166,8 @@ class WebServer:
             )
         return status
 
-    def _emit_status_update(self):
-        """Sendet Status-Update an alle Clients"""
-        if not self.socketio:
-            return
-
+    def _build_status_payload(self):
+        """Stellt den vollstaendigen Status zusammen, gerundet auf Anzeigemass."""
         status = {
             'can_enabled': self.can_enabled,
             'pwm_enabled': True,
@@ -2111,21 +2190,83 @@ class WebServer:
             'current_pwm': self.motor.get_status().get('current_pwm', {'left': 1500, 'right': 1500}),
             'max_speed_percent': self.joystick.get_status().get('max_speed', 100)
         }
+        return status_delta.quantize(status)
 
-        self.socketio.emit('status_update', status)
-
-    def _emit_pwm_update(self):
-        """Sendet PWM-Update an alle Clients"""
+    # Ohne Zuhoerer ist jede Sendung reines Datenvolumen. Der Status wird
+    # deshalb nur erzeugt, solange mindestens eine Oberflaeche offen ist.
+    def _emit_status_update(self):
+        """Sendet die Aenderung gegenueber der letzten Sendung an alle Clients."""
         if not self.socketio:
             return
 
-        motor_status = self.motor.get_status()
-        current_pwm = motor_status.get('current_pwm', {'left': 1500, 'right': 1500})
+        status = self._build_status_payload()
+        with self._status_lock:
+            baseline = self._status_baseline
+            patch = status_delta.diff(baseline, status)
+            if baseline is not None and not patch:
+                # Nichts geaendert: Die Verbindung haelt der Socket.IO-Ping
+                # offen, dafuer braucht es keine leere Nutzlast.
+                return
+            self._status_baseline = status
+            self._status_seq += 1
+            seq = self._status_seq
 
-        self.socketio.emit('pwm_update', {
-            'left': int(current_pwm['left']),
-            'right': int(current_pwm['right'])
-        })
+        if baseline is None:
+            # Erster Stand ueberhaupt. Es gibt noch niemanden, der eine
+            # Differenz anwenden koennte - der volle Stand geht beim Verbinden
+            # gezielt an den einzelnen Client.
+            return
+        self.socketio.emit('status_delta', {'seq': seq, 'patch': patch})
+
+    def _emit_full_status(self, to=None):
+        """Sendet den vollen Stand - beim Verbinden und wenn eine Differenz fehlt.
+
+        Vorher wird der gemeinsame Grundstand aufgefrischt. Ohne das bekaeme
+        ein neuer Client den Stand, der beim Abmelden des letzten uebrig blieb,
+        und alle anderen wuerden auf einer anderen Nummer weiterrechnen.
+        """
+        if not self.socketio:
+            return
+
+        self._emit_status_update()
+        with self._status_lock:
+            status = self._status_baseline
+            seq = self._status_seq
+
+        self.socketio.emit('status_update', {'seq': seq, 'status': status}, to=to)
+
+    # Anzeigetakt. Steht das Fahrzeug, reicht ein Stand je Sekunde; sobald
+    # etwas laeuft, will der Bediener seine Eingabe sofort bestaetigt sehen.
+    # Beide Takte senden nur Differenzen, der schnelle kostet daher wenig.
+    def _status_interval(self) -> float:
+        idle = float(getattr(self.config, 'status_interval_idle_s', 1.0) or 1.0)
+        active = float(getattr(self.config, 'status_interval_active_s', 0.25) or 0.25)
+        return active if self._vehicle_is_busy() else idle
+
+    def _vehicle_is_busy(self) -> bool:
+        """Ist gerade etwas in Bewegung oder gestoert?"""
+        try:
+            if self.joystick.get_status().get('enabled'):
+                return True
+            if self._plan_status.get('running'):
+                return True
+            if self.navigation and self.navigation.get_status().get('running'):
+                return True
+            if self.mapping and self.mapping.get_status().get('recording'):
+                return True
+            if self.odrive_mower and self.odrive_mower.enabled:
+                mower = self.odrive_mower.get_status()
+                if mower.get('running') or mower.get('startup_status', {}).get('active'):
+                    return True
+            if self.safety:
+                safety = self.safety.get_status()
+                if safety.get('system_stop_latched') or safety.get('motion_hold_active'):
+                    return True
+        except Exception:
+            # Der Takt ist Kosmetik. Faellt die Ermittlung aus, wird eben
+            # langsamer gesendet - der Status selbst bleibt korrekt.
+            return False
+        return False
 
     def start(self):
         """Startet Web-Server"""
@@ -2153,15 +2294,18 @@ class WebServer:
         self.logger.info(f"✅ Web-Server gestartet auf {self.config.host}:{self.config.port}")
     
     def _status_update_loop(self):
-        """Sendet regelmäßig Status-Updates (100ms)"""
+        """Sendet regelmaessig die Statusaenderungen an offene Oberflaechen."""
         import time
         while self.running:
+            interval = 1.0
             try:
-                self._emit_status_update()
-                time.sleep(0.1)  # 100ms = 10 Hz
+                interval = self._status_interval()
+                if self._status_clients > 0:
+                    self._emit_status_update()
             except Exception as e:
                 self.logger.error(f"❌ Status-Update Fehler: {e}")
-                time.sleep(1.0)
+                interval = 1.0
+            time.sleep(interval)
 
     def _run_server(self):
         """Läuft Web-Server"""

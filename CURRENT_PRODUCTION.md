@@ -42,6 +42,29 @@ passen, sonst bleibt die Pose aus und der Watchdog pausiert den Fahrantrieb.
 Die Verbindung ist unverschlüsselt; das Passwort ist unterwegs mitlesbar.
 Einzelheiten und die Nachrüstung von TLS: `raspberry_pi/WEB_ZUGANGSSCHUTZ.md`.
 
+## Datenverbrauch der Weboberfläche
+
+Das Fahrzeug hängt an einer SIM-Karte, deshalb ist der Statusstrom zur
+Oberfläche auf Sparsamkeit ausgelegt:
+
+- Der Server schiebt nur die **Änderung** gegenüber der letzten Sendung
+  (`status_delta`); den vollen Stand (`status_update`) bekommt nur, wer sich
+  gerade verbunden hat oder eine Differenz verpasst hat. Statt gut 5,5 kB
+  gehen im Mittel rund 0,7 kB über die Leitung.
+- Gesendet wird nur, solange mindestens eine Oberfläche offen ist. Steht das
+  Fahrzeug, einmal je Sekunde; sobald es fährt, mäht, aufzeichnet oder
+  gestört ist, viermal (`web.status_interval_idle_s`/`_active_s`).
+- Zahlen werden vorher auf die angezeigte Genauigkeit gerundet, Alterswerte
+  auf ganze Sekunden. Sonst bestünde die Differenz nur aus Rauschen.
+- Der Browser hält keinen zweiten Abrufkanal mehr offen; `/api/status` bleibt
+  für Diagnose per curl und liefert dort die ungerundeten Werte.
+- Der Joystick sendet nur bei geänderter Auslenkung, dazu alle 200 ms ein
+  Lebenszeichen für den Fahr-Wachhund.
+- Socket.IO verbindet direkt per WebSocket; die HTTP-Polling-Phase entfällt.
+  Lässt ein Netz keinen WebSocket durch, fällt der Browser von selbst zurück.
+- Textantworten gehen gzip-komprimiert raus, die Oberfläche trägt ein ETag –
+  ein erneuter Aufruf kostet dann nichts mehr statt 90 kB.
+
 ## CAN-Status
 
 - Haupt-UGV: `can.enabled: false`

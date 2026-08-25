@@ -1404,8 +1404,54 @@
     </div>
 
     <script>
-        // Socket.IO Verbindung
-        const socket = io();
+        // Socket.IO Verbindung.
+        // Nur WebSocket: Der Standardweg beginnt mit HTTP-Long-Polling und
+        // steigt erst danach um. Jede Polling-Runde traegt eigene Kopfzeilen
+        // und die Anmeldung mit - ueber die SIM-Karte des Fahrzeugs bezahlter
+        // Leerlauf.
+        const socket = io({ transports: ['websocket'], upgrade: false });
+
+        // Sollte ein Netz auf dem Weg keinen WebSocket durchlassen, waere die
+        // Oberflaeche sonst tot - samt Joystick. Nach dem ersten Fehlschlag
+        // wird deshalb der alte Weg wieder zugelassen; teurer, aber verbunden.
+        let websocketOnly = true;
+        socket.on('connect_error', function() {
+            if (!websocketOnly) return;
+            websocketOnly = false;
+            socket.io.opts.transports = ['polling', 'websocket'];
+            socket.io.opts.upgrade = true;
+            console.warn('⚠️ WebSocket nicht moeglich - Rueckfall auf Polling');
+        });
+
+        // Der Server sendet nach dem ersten vollen Stand nur noch die
+        // Aenderungen. Der Browser haelt den Gesamtstand und setzt die
+        // Differenzen darauf. Die laufende Nummer deckt eine verpasste
+        // Differenz auf; dann wird der volle Stand nachgefordert.
+        let statusState = null;
+        let statusSeq = 0;
+        let statusResyncPending = false;
+
+        function applyStatusPatch(base, patch) {
+            const result = Object.assign({}, base);
+            for (const [key, value] of Object.entries(patch)) {
+                if (key === '__del__') {
+                    for (const removed of value) delete result[removed];
+                } else if (value && typeof value === 'object' && !Array.isArray(value)
+                           && result[key] && typeof result[key] === 'object'
+                           && !Array.isArray(result[key])) {
+                    result[key] = applyStatusPatch(result[key], value);
+                } else {
+                    result[key] = value;
+                }
+            }
+            return result;
+        }
+
+        function requestFullStatus() {
+            if (statusResyncPending) return;
+            statusResyncPending = true;
+            socket.emit('request_status_full');
+        }
         let canEnabled = true;
         let connectionStartTime = Date.now();
 
@@ -1442,6 +1488,12 @@
             document.getElementById('connectionStatus').className = 'connection-status connected';
             connectionStartTime = Date.now();
             updateConnectionTime();
+            // Nach einem Verbindungsabriss kennt das Fahrzeug den zuletzt
+            // gesendeten Wert nicht mehr.
+            lastSentJoystick = null;
+            statusState = null;
+            statusSeq = 0;
+            statusResyncPending = false;
         });
 
         socket.on('disconnect', function() {
@@ -1450,16 +1502,23 @@
             document.getElementById('connectionStatus').className = 'connection-status disconnected';
         });
 
-        socket.on('pwm_update', function(data) {
-            console.log('📡 PWM Update empfangen:', data);
-            // PWM-Werte in der UI aktualisieren
-            if (data.left) document.getElementById('leftPwm').textContent = data.left + 'μs';
-            if (data.right) document.getElementById('rightPwm').textContent = data.right + 'μs';
+        // Voller Stand: beim Verbinden und nach einer verpassten Differenz.
+        socket.on('status_update', function(message) {
+            statusState = message.status;
+            statusSeq = message.seq;
+            statusResyncPending = false;
+            updateStatus(statusState);
         });
 
-        // Status Updates vom Server
-        socket.on('status_update', function(data) {
-            updateStatus(data);
+        // Regelfall: nur die geaenderten Felder.
+        socket.on('status_delta', function(message) {
+            if (statusState === null || message.seq !== statusSeq + 1) {
+                requestFullStatus();
+                return;
+            }
+            statusState = applyStatusPatch(statusState, message.patch);
+            statusSeq = message.seq;
+            updateStatus(statusState);
         });
 
         // Connect Event - hier darf Max Speed aktualisiert werden
@@ -1528,16 +1587,14 @@
             });
         }
 
-        // Status vom Server abrufen
+        // Anzeige aus dem lokal gehaltenen Stand auffrischen.
+        // Frueher holte das jedes Mal den vollen Status per HTTP - inzwischen
+        // liegt derselbe Stand ohnehin schon im Browser, und der naechste
+        // Push ist hoechstens eine Sekunde entfernt.
         function fetchStatus() {
-            fetch('/api/status')
-                .then(response => response.json())
-                .then(data => {
-                    updateStatus(data);
-                })
-                .catch(error => {
-                    console.error('Fehler beim Status abrufen:', error);
-                });
+            if (statusState) {
+                updateStatus(statusState);
+            }
         }
 
         // UI Status aktualisieren
@@ -2185,9 +2242,12 @@
                 } else {
                     currentKnobPos.x = joystickCenter.x;
                     currentKnobPos.y = joystickCenter.y;
-                    updateJoystickValues();
+                    // Die Null muss ankommen, auch wenn sie sich vom letzten
+                    // gesendeten Wert kaum unterscheidet.
+                    updateJoystickValues(true);
                     drawJoystick();
                     socket.emit('joystick_release');
+                    lastSentJoystick = null;
                 }
             };
 
@@ -2204,7 +2264,18 @@
             }
         }
 
-        function updateJoystickValues() {
+        // Der Fahrbefehl geht nur raus, wenn er sich wirklich geaendert hat.
+        // Die Anzeige folgt weiter jeder Mausbewegung, die Leitung nicht:
+        // vorher schickte jede einzelne Zeigerbewegung einen eigenen Befehl,
+        // bei gehaltenem Stick also bis zu hundert gleiche Werte je Sekunde.
+        // Der Fahr-Wachhund im Fahrzeug verlangt spaetestens nach einer
+        // Sekunde ein Lebenszeichen, deshalb geht alle 200 ms auch ein
+        // unveraenderter Wert raus.
+        const joystickKeepaliveMs = 200;
+        const joystickSendEpsilon = 0.005;
+        let lastSentJoystick = null;
+
+        function updateJoystickValues(force = false) {
             // Konvertiere Pixel-Position zu -1.0 bis +1.0
             const x = (currentKnobPos.x - joystickCenter.x) / joystickRadius;
             const y = -(currentKnobPos.y - joystickCenter.y) / joystickRadius; // Y invertiert
@@ -2213,8 +2284,20 @@
             document.getElementById('joystickX').textContent = x.toFixed(3);
             document.getElementById('joystickY').textContent = y.toFixed(3);
 
-            // KEIN Throttling mehr - maximale Flüssigkeit!
-            socket.emit('joystick_update', { x: x, y: y });
+            const now = Date.now();
+            const changed = !lastSentJoystick
+                || Math.abs(x - lastSentJoystick.x) > joystickSendEpsilon
+                || Math.abs(y - lastSentJoystick.y) > joystickSendEpsilon;
+            const overdue = !lastSentJoystick
+                || (now - lastSentJoystick.t) >= joystickKeepaliveMs;
+            if (!force && !changed && !overdue) {
+                return;
+            }
+
+            const sentX = Number(x.toFixed(3));
+            const sentY = Number(y.toFixed(3));
+            socket.emit('joystick_update', { x: sentX, y: sentY });
+            lastSentJoystick = { x: sentX, y: sentY, t: now };
         }
 
         function startContinuousUpdates() {
@@ -2239,14 +2322,12 @@
             // Joystick initialisieren
             initJoystick();
 
-            // Status alle 2 Sekunden aktualisieren
-            setInterval(fetchStatus, 2000);
+            // Kein eigener Statusabruf mehr: Der Server schiebt Aenderungen
+            // ueber den WebSocket, ein zweiter Kanal daneben verdoppelte nur
+            // das Datenvolumen.
 
             // Verbindungszeit alle Sekunde aktualisieren
             setInterval(updateConnectionTime, 1000);
-
-            // Initialer Status-Abruf
-            setTimeout(fetchStatus, 500);
         });
 
         // Touch-Events für bessere Mobile-Erfahrung

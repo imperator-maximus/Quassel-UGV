@@ -331,6 +331,17 @@ class WebConfig:
     static_folder: str = 'static'
     max_speed_percent: float = 100.0
 
+    # Sendetakt des Statusstroms. Das Fahrzeug haengt an einer SIM-Karte, und
+    # der Status ist der groesste Dauerposten im Datenverbrauch. Im Stillstand
+    # genuegt ein Stand je Sekunde; sobald etwas faehrt, maeht oder gestoert
+    # ist, wird schneller gesendet, damit die Anzeige der Eingabe folgt.
+    # Gesendet wird ohnehin nur die Aenderung zum letzten Stand.
+    status_interval_idle_s: float = 1.0
+    status_interval_active_s: float = 0.25
+    # Textantworten ab dieser Groesse werden gzip-komprimiert. Die Oberflaeche
+    # allein sind 90 kB Quelltext, komprimiert etwa ein Fuenftel davon.
+    compress_min_bytes: int = 1024
+
     # Zugangsschutz. Passwort und secret_key gehoeren nicht in die YAML,
     # sondern in UGV_WEB_PASSWORD bzw. UGV_WEB_SECRET_KEY.
     auth_enabled: bool = True

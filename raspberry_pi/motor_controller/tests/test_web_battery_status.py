@@ -1,10 +1,14 @@
 """The battery reading must reach the browser on both status paths.
 
 The frontend is fed twice: once by GET /api/status when the page loads, and
-continuously by the ``status_update`` WebSocket broadcast. A field added to
-only one of them looks correct right after a reload and then falls back to
-"Batterie aus" on the first broadcast, which is exactly what happened when
-this was first deployed.
+continuously by the WebSocket status stream. A field added to only one of
+them looks correct right after a reload and then falls back to "Batterie aus"
+on the first broadcast, which is exactly what happened when this was first
+deployed.
+
+The stream sends the full status only to a client that just connected; after
+that it sends differences. These tests therefore ask for the full stand the
+way a fresh browser does.
 """
 
 import unittest
@@ -71,10 +75,11 @@ class BatteryStatusReachesTheBrowserTests(unittest.TestCase):
         server = build_server(FakeBattery(BATTERY_STATUS))
         server.socketio = RecordingSocketIO()
 
-        server._emit_status_update()
+        server._emit_full_status()
 
-        event, payload = server.socketio.emitted[-1]
+        event, message = server.socketio.emitted[-1]
         self.assertEqual(event, 'status_update')
+        payload = message['status']
         self.assertEqual(payload['battery_status']['soc_percent'], 98.4)
         self.assertTrue(payload['battery_status']['enabled'])
 
@@ -84,11 +89,11 @@ class BatteryStatusReachesTheBrowserTests(unittest.TestCase):
         client = authenticated_client(server)
 
         http_payload = client.get('/api/status').get_json()
-        server._emit_status_update()
-        _event, socket_payload = server.socketio.emitted[-1]
+        server._emit_full_status()
+        _event, message = server.socketio.emitted[-1]
 
         self.assertEqual(
-            http_payload['battery_status'], socket_payload['battery_status']
+            http_payload['battery_status'], message['status']['battery_status']
         )
 
     def test_without_a_monitor_both_paths_report_disabled(self):
@@ -97,11 +102,11 @@ class BatteryStatusReachesTheBrowserTests(unittest.TestCase):
         client = authenticated_client(server)
 
         http_payload = client.get('/api/status').get_json()
-        server._emit_status_update()
-        _event, socket_payload = server.socketio.emitted[-1]
+        server._emit_full_status()
+        _event, message = server.socketio.emitted[-1]
 
         self.assertEqual(http_payload['battery_status'], {'enabled': False})
-        self.assertEqual(socket_payload['battery_status'], {'enabled': False})
+        self.assertEqual(message['status']['battery_status'], {'enabled': False})
 
 
 if __name__ == '__main__':
