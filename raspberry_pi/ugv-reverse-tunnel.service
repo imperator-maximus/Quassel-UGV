@@ -35,7 +35,14 @@ EnvironmentFile=/etc/ugv-tunnel.env
 #     unerreichbar. Lieber sofort scheitern und neu starten.
 # ServerAlive*: Ein stiller Abriss faellt sonst erst auf, wenn jemand zugreifen
 #     will. Nach 3x30 s gibt ssh auf und systemd baut neu auf.
-ExecStart=/usr/bin/ssh -NT -C \
+# -4: Nur IPv4. Beim ersten Versuch am Mobilfunkrouter meldete ssh acht
+#     Minuten lang "Network is unreachable", obwohl der Pi eine IPv4-Adresse
+#     und eine Standardroute hatte; NetworkManager hatte kurz zuvor auch eine
+#     IPv6-Standardroute gesetzt. Welche der beiden Familien ssh genommen hat,
+#     steht nicht im Log - die Adressfamilie offen zu lassen ist aber genau
+#     die Unbestimmtheit, die man auf dem einzigen Weg zum Fahrzeug nicht
+#     brauchen kann. Das Projekt erzwingt aus demselben Grund ueberall IPv4.
+ExecStart=/usr/bin/ssh -4 -NT -C \
     -o ExitOnForwardFailure=yes \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
