@@ -1794,8 +1794,8 @@
                     const data = await response.json();
                     if (!response.ok || !data.success) {
                         const grund = data.error || 'Safety-Reset nicht möglich';
-                        if (/ODrive-Fehler aktiv/i.test(grund)) {
-                            return offerOdriveErrorClear(grund);
+                        if (isOdriveErrorRefusal(grund)) {
+                            return offerOdriveErrorClear(grund, retrySafetyReset);
                         }
                         throw new Error(grund);
                     }
@@ -1804,13 +1804,20 @@
                 .catch(error => alert('Safety-Reset fehlgeschlagen: ' + error.message));
         }
 
-        function offerOdriveErrorClear(grund) {
+        // Erkennt die Weigerung, egal an welchem Knopf sie auftaucht. Der
+        // Safety-Reset war nur die erste Stelle; der Maeher-Knopf laeuft in
+        // dieselbe Sackgasse, und dort steht man mit demselben Problem.
+        function isOdriveErrorRefusal(grund) {
+            return /ODrive-Fehler aktiv/i.test(grund || '');
+        }
+
+        function offerOdriveErrorClear(grund, danach) {
             const frage =
                 grund + '\n\n' +
-                'Diese Fehler löscht der Reset nicht von allein — sie liegen im ' +
+                'Diese Fehler löscht das Fahrzeug nicht von allein — sie liegen im ' +
                 'Arbeitsspeicher der ODrive-Boards und wären sonst nur durch ' +
                 'Trennen der Versorgung am Fahrzeug wegzubekommen.\n\n' +
-                'Fehler jetzt löschen und Reset wiederholen?';
+                'Fehler jetzt löschen und noch einmal versuchen?';
             if (!confirm(frage)) {
                 return;
             }
@@ -1825,8 +1832,15 @@
                         throw new Error(data.error || 'Fehler konnten nicht gelöscht werden');
                     }
                     console.log('🧹 ODrive-Fehler gelöscht:', data.cleared_text);
-                    return fetch('/api/safety/reset', { method: 'POST' });
+                    if (typeof danach === 'function') {
+                        danach();
+                    }
                 })
+                .catch(error => alert('Löschen fehlgeschlagen: ' + error.message));
+        }
+
+        function retrySafetyReset() {
+            fetch('/api/safety/reset', { method: 'POST' })
                 .then(async response => {
                     const data = await response.json();
                     if (!response.ok || !data.success) {
@@ -1834,7 +1848,7 @@
                     }
                     fetchStatus();
                 })
-                .catch(error => alert('Löschen fehlgeschlagen: ' + error.message));
+                .catch(error => alert('Safety-Reset fehlgeschlagen: ' + error.message));
         }
 
         function updateMappingStatus(status) {
@@ -1995,6 +2009,16 @@
                 } else {
                     const mowerError = data.error || data.mower_error || 'Unbekannter Fehler';
                     console.error('❌ Mäher-Toggle fehlgeschlagen:', mowerError);
+                    if (isOdriveErrorRefusal(mowerError)) {
+                        // Nach dem Loeschen denselben Knopf noch einmal, sonst
+                        // steht der Benutzer wieder vor derselben Meldung.
+                        // Erst nach dem .finally() dieses Aufrufs, sonst
+                        // blockt mowerRequestPending den zweiten Versuch.
+                        offerOdriveErrorClear(
+                            mowerError, () => setTimeout(toggleMowerPower, 200)
+                        );
+                        return;
+                    }
                     alert('Mäher-Toggle fehlgeschlagen: ' + mowerError);
                 }
             })
