@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from .odrive_mower import (
+    MOTOR_ERROR_DRV_FAULT,
     AXIS_STATE_IDLE,
     AXIS_ERROR_WATCHDOG_TIMER_EXPIRED,
     CMD_CLEAR_ERRORS,
@@ -434,6 +435,19 @@ class ODriveUSBMowerController(ODriveMowerController):
                     sample["detail"]["board"] = int(board.error)
                 except Exception:
                     sample["detail"]["board"] = None
+                if (sample["detail"].get("motor") or 0) & MOTOR_ERROR_DRV_FAULT:
+                    # Der Gate-Treiber fuehrt ein eigenes Fehlerregister. Ohne
+                    # das bleibt DRV_FAULT die Aussage "der Baustein meldet
+                    # einen Fehler" - Ueberstrom, Unterspannung und
+                    # Uebertemperatur sehen von aussen gleich aus.
+                    #
+                    # Ein Funktionsaufruf ueber Fibre ist teurer als eine
+                    # Eigenschaft, deshalb nur, wenn der Treiber wirklich
+                    # gemeldet hat.
+                    try:
+                        sample["detail"]["drv"] = int(axis.motor.get_drv_fault())
+                    except Exception:
+                        sample["detail"]["drv"] = None
             return sample
 
         sample = self._run_axis_operation(node_id, operation)

@@ -40,6 +40,25 @@ class FehlerKlartextTests(unittest.TestCase):
         self.assertIn('motor=0x00010000', text)
         self.assertIn('board=0x00000002', text)
 
+    def test_der_gate_treiber_wird_benannt(self):
+        """DRV_FAULT allein sagt nur, dass der Baustein gemeldet hat.
+        Ueberstrom, Unterspannung und Uebertemperatur sehen von aussen gleich
+        aus - erst sein eigenes Register unterscheidet sie."""
+        text = ODriveMowerController._format_error_detail(
+            {'motor': 0x08, 'drv': 0x0200}
+        )
+
+        self.assertIn('motor=0x00000008', text)
+        self.assertIn('drv=0x00000200', text)
+        self.assertIn('Gate-Versorgung_Unterspannung', text)
+
+    def test_die_rohzahl_steht_immer_dabei(self):
+        """Faellt eine Zuordnung falsch aus, darf die Angabe des Bausteins
+        trotzdem nicht verloren gehen."""
+        text = ODriveMowerController._format_error_detail({'drv': 0x8000})
+
+        self.assertIn('drv=0x00008000', text)
+
 
 class HeartbeatMitEinzelheitenTests(unittest.TestCase):
     def _controller(self):

@@ -26,6 +26,27 @@ AXIS_STATE_IDLE = 1
 AXIS_ERROR_WATCHDOG_TIMER_EXPIRED = 0x00000800
 
 
+# Der Motorfehler, bei dem sich das Nachfragen beim Gate-Treiber lohnt.
+MOTOR_ERROR_DRV_FAULT = 0x00000008
+
+# Statusbits des DRV8301, wie ODrive sie in get_drv_fault() zusammenfasst.
+# Die Rohzahl steht immer mit in der Meldung: Faellt eine Zuordnung hier
+# falsch aus, ist die Angabe des Bausteins trotzdem nicht verloren.
+DRV_FAULT_BITS = (
+    (0x0001, "FETLC_OC"),
+    (0x0002, "FETHC_OC"),
+    (0x0004, "FETLB_OC"),
+    (0x0008, "FETHB_OC"),
+    (0x0010, "FETLA_OC"),
+    (0x0020, "FETHA_OC"),
+    (0x0040, "Uebertemperatur-Warnung"),
+    (0x0080, "Uebertemperatur-Abschaltung"),
+    (0x0100, "PVDD_Unterspannung"),
+    (0x0200, "Gate-Versorgung_Unterspannung"),
+    (0x0400, "FAULT"),
+)
+
+
 class ODriveMowerController:
     """Keeps an ODrive axis running at a requested RPM until stopped."""
 
@@ -1025,11 +1046,20 @@ class ODriveMowerController:
         """
         if not detail:
             return ""
-        teile = [
-            f"{name}=0x{wert:08X}"
-            for name, wert in sorted(detail.items())
-            if wert
-        ]
+        teile = []
+        for name, wert in sorted(detail.items()):
+            if not wert:
+                continue
+            if name == "drv":
+                namen = [
+                    bezeichnung
+                    for bit, bezeichnung in DRV_FAULT_BITS
+                    if wert & bit
+                ]
+                klartext = f" [{', '.join(namen)}]" if namen else ""
+                teile.append(f"drv=0x{wert:08X}{klartext}")
+            else:
+                teile.append(f"{name}=0x{wert:08X}")
         return f" ({', '.join(teile)})" if teile else ""
 
     def on_heartbeat(
