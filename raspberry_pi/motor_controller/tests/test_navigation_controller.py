@@ -27,6 +27,11 @@ class NavConfig:
     track_cross_track_recover_s: float = 10.0
     track_cross_track_progress_m: float = 0.1
     track_heading_block_deg: float = 25.0
+    # Die Sperre zaehlt keine Posen mehr, sondern verlangt, dass der
+    # Fehler ueber eine Frist nicht kleiner wird. Hier kurz gehalten,
+    # damit die Tests nicht zehn Sekunden je Fall warten.
+    track_heading_recover_s: float = 1.0
+    track_heading_progress_deg: float = 2.0
     track_stall_timeout_s: float = 10.0
     track_stall_min_progress_m: float = 0.15
     min_inner_wheel_speed: float = 0.15
@@ -53,6 +58,19 @@ class FakeMotor:
 
 
 class NavigationControllerTests(unittest.TestCase):
+    def _pose_halten(self, controller, pose, sekunden=1.4, takt=0.2):
+        """Haelt dieselbe Pose ueber eine Zeitspanne.
+
+        Ein Fehler, der sich nicht aendert, wird auch nicht kleiner - genau
+        das laesst die Sperre nach ihrer Frist zuschlagen. Frueher genuegten
+        drei Posen; das waren drei Zehntelsekunden und damit kuerzer als jede
+        Drehung des Fahrzeugs.
+        """
+        ende = time.time() + sekunden
+        while time.time() < ende:
+            controller.on_pose_update(dict(pose))
+            time.sleep(takt)
+
     def test_pause_resume_preserves_track_progress_and_waypoints(self):
         motor = FakeMotor()
         controller = NavigationController(motor, NavConfig())
@@ -645,20 +663,17 @@ class NavigationControllerTests(unittest.TestCase):
             # Die Sperre verlangt mehrere aufeinanderfolgende Posen; das reale
             # Fahrzeug liefert sie mit 5 Hz. Ein einzelner Ausreisser darf eine
             # laufende Mahd nicht mehr stoppen.
-            for _ in range(3):
-                controller.on_pose_update({
-                    'latitude': 52.0,
-                    'longitude': 10.0,
-                    # Eastbound target, therefore a large +60 degree error.
-                    'heading_deg': 30.0,
-                })
+            # Eastbound target, therefore a large +60 degree error.
+            self._pose_halten(controller, {
+                'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 30.0,
+            })
             status = controller.get_status()
         finally:
             controller.shutdown()
 
         self.assertFalse(status['running'])
         self.assertEqual(status['state'], 'heading_block')
-        self.assertIn('Winkelfehler', status['last_error'])
+        self.assertIn('dreht nicht auf die Bahn ein', status['last_error'])
         self.assertEqual((0.0, 0.0, True), motor.commands[-1])
 
     def test_track_heading_block_threshold_is_a_single_cutoff(self):
@@ -674,8 +689,9 @@ class NavigationControllerTests(unittest.TestCase):
         ], mode='track')
         controller.start()
         try:
-            for _ in range(3):
-                controller.on_pose_update({'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 66.0})
+            self._pose_halten(controller, {
+                'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 66.0,
+            })
             below_threshold = controller.get_status()
         finally:
             controller.shutdown()
@@ -688,8 +704,9 @@ class NavigationControllerTests(unittest.TestCase):
         ], mode='track')
         controller2.start()
         try:
-            for _ in range(3):
-                controller2.on_pose_update({'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 64.0})
+            self._pose_halten(controller2, {
+                'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 64.0,
+            })
             above_threshold = controller2.get_status()
         finally:
             controller2.shutdown()
@@ -717,19 +734,18 @@ class NavigationControllerTests(unittest.TestCase):
         ], mode='track', direction='forward')
         controller.start()
         try:
-            for _ in range(3):
-                controller.on_pose_update({
-                    'latitude': 53.3325664,
-                    'longitude': 11.0785893,
-                    'heading_deg': 302.8,
-                })
+            self._pose_halten(controller, {
+                'latitude': 53.3325664,
+                'longitude': 11.0785893,
+                'heading_deg': 302.8,
+            })
             status = controller.get_status()
         finally:
             controller.shutdown()
 
         self.assertFalse(status['running'])
         self.assertEqual(status['state'], 'heading_block')
-        self.assertIn('Winkelfehler', status['last_error'])
+        self.assertIn('dreht nicht auf die Bahn ein', status['last_error'])
 
     def test_reverse_large_heading_error_blocks_too(self):
         """Die Blockgrenze gilt richtungsunabhaengig - auch der fuer reverse
@@ -745,19 +761,16 @@ class NavigationControllerTests(unittest.TestCase):
         try:
             # Eastbound reverse motion wants a west-facing body. The 60 degree
             # error mirrors the failed short Brunnen transition.
-            for _ in range(3):
-                controller.on_pose_update({
-                    'latitude': 52.0,
-                    'longitude': 10.0,
-                    'heading_deg': 210.0,
-                })
+            self._pose_halten(controller, {
+                'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 210.0,
+            })
             status = controller.get_status()
         finally:
             controller.shutdown()
 
         self.assertFalse(status['running'])
         self.assertEqual(status['state'], 'heading_block')
-        self.assertIn('Winkelfehler', status['last_error'])
+        self.assertIn('dreht nicht auf die Bahn ein', status['last_error'])
 
     def test_lateral_offset_at_the_lane_start_is_no_heading_error(self):
         """Regression fuer den Realstopp vom 07.08. mitten auf der Wiese.
@@ -826,7 +839,10 @@ class NavigationControllerTests(unittest.TestCase):
         self.assertTrue(after_recovery['running'])
         self.assertNotEqual('heading_block', after_recovery['state'])
 
-    def test_persistent_error_still_blocks_after_the_required_poses(self):
+    def test_dauerfehler_stoppt_erst_nach_der_frist(self):
+        """Ein Fehler, der nicht kleiner wird, stoppt weiterhin - aber erst
+        nach der Frist. Vorher blieben dafuer drei Posen, also drei
+        Zehntelsekunden; in der Zeit dreht sich kein Fahrzeug."""
         motor = FakeMotor()
         controller = NavigationController(motor, NavConfig())
         controller.set_waypoints([
@@ -835,18 +851,41 @@ class NavigationControllerTests(unittest.TestCase):
         ], mode='track')
         controller.start()
         try:
-            states = []
-            for _ in range(3):
-                controller.on_pose_update(
-                    {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 30.0}
-                )
-                states.append(controller.get_status()['state'])
+            pose = {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 30.0}
+            controller.on_pose_update(dict(pose))
+            sofort = controller.get_status()['state']
+            self._pose_halten(controller, pose)
+            spaeter = controller.get_status()['state']
         finally:
             controller.shutdown()
 
-        self.assertNotEqual('heading_block', states[0])
-        self.assertNotEqual('heading_block', states[1])
-        self.assertEqual('heading_block', states[2])
+        self.assertNotEqual('heading_block', sofort)
+        self.assertEqual('heading_block', spaeter)
+
+    def test_wer_sich_eindreht_bekommt_zeit(self):
+        """Der Fall, an dem die alte Sperre scheiterte: Das Fahrzeug steht
+        quer zur Bahn und dreht ein. Solange der Fehler kleiner wird, tut der
+        Regler genau seine Arbeit - auch laenger als die Frist."""
+        motor = FakeMotor()
+        controller = NavigationController(motor, NavConfig())
+        controller.set_waypoints([
+            {'latitude': 52.0, 'longitude': 10.0},
+            {'latitude': 52.0, 'longitude': 10.001},
+        ], mode='track')
+        controller.start()
+        try:
+            # 60° Fehler, der sich Schritt fuer Schritt abbaut.
+            for kurs in (30.0, 40.0, 50.0, 55.0, 60.0, 65.0):
+                controller.on_pose_update(
+                    {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': kurs}
+                )
+                time.sleep(0.3)
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertTrue(status['running'])
+        self.assertNotEqual('heading_block', status['state'])
 
     def _lane_north(self):
         return [
@@ -1362,12 +1401,15 @@ class TrackStartHeadingErrorTests(unittest.TestCase):
         )
         controller.start()
         try:
-            for _ in range(3):
+            # Die Sperre misst eine Frist ohne Annaeherung, keine Posenzahl.
+            ende = time.time() + 1.4
+            while time.time() < ende:
                 controller.on_pose_update({
                     'latitude': self.LANE[0][1],
                     'longitude': self.LANE[0][0],
                     'heading_deg': heading_deg,
                 })
+                time.sleep(0.2)
             return controller.get_status()
         finally:
             controller.shutdown()

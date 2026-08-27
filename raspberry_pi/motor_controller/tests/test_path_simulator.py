@@ -2,6 +2,7 @@ import math
 import threading
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,11 @@ class PathSimulatorTests(unittest.TestCase):
             goto_divergence_samples=5,
             track_cross_track_limit_m=1.0,
             track_heading_block_deg=25.0,
+            # Die Sperre zaehlt keine Posen mehr, sondern verlangt, dass
+            # der Fehler ueber eine Frist nicht kleiner wird. Hier kurz
+            # gehalten, damit die Tests nicht zehn Sekunden warten.
+            track_heading_recover_s=1.0,
+            track_heading_progress_deg=2.0,
             min_inner_wheel_speed=0.50,
         )
         self.pwm_config = SimpleNamespace(forward_factor=500.0, turn_factor=300.0)
@@ -146,13 +152,19 @@ class PathSimulatorTests(unittest.TestCase):
         self.assertEqual(["forward", "reverse"], [item["direction"] for item in result["segments"]])
         self.assertLess(self._distance_to_xy(result["final_pose"], 0.0, 0.35), 0.6)
 
-    def test_opposite_short_transition_is_reversed_but_blocks_on_heading(self):
+    def test_opposite_short_transition_is_reversed_and_driven(self):
         """The router still picks the direction that needs the smaller turn
-        (reverse here). The remaining 38 degree error exceeds this test's
-        track_heading_block_deg (25) - above the roll-alignment band the
-        controller still refuses to guess and blocks instead of driving
-        through it; see test_stalled_reverse_transition_blocks_instead_of_realigning
-        for why an even larger error is unsafe even for rolling."""
+        (reverse here). The remaining 38 degree error is above this test's
+        track_heading_block_deg (25), and until 2026-08-27 that alone ended
+        the run after three poses - a third of a second, less than any turn
+        this vehicle makes. The roll alignment right below the check never got
+        to work, and whole plans were refused before they started.
+
+        What decides now is whether the error shrinks. The simulated vehicle
+        turns onto the lane, so it drives. A vehicle that does not turn is
+        still stopped - see
+        test_stalled_reverse_transition_blocks_instead_of_realigning, which is
+        exactly that case."""
         first = self._segment(0, [(0.0, 0.0), (10.0, 0.0)])
         second = self._segment(1, [(8.0, 1.0), (0.0, 1.0)], direction="reverse")
         plan = self._plan([first, second])
@@ -164,11 +176,11 @@ class PathSimulatorTests(unittest.TestCase):
             parameters=self.params,
         )
 
-        self.assertFalse(result["safe"])
-        self.assertEqual("heading_block", result["state"])
+        self.assertTrue(result["safe"])
+        self.assertNotEqual("heading_block", result["state"])
         transition = next(item for item in result["segments"] if item["type"] == "transition")
         self.assertEqual("reverse", transition["direction"])
-        self.assertEqual("heading_block", transition["state"])
+        self.assertNotEqual("heading_block", transition["state"])
 
     def test_grass_model_does_not_invent_counter_rotation_motion(self):
         pose = self._pose(0.0, 0.0, 220.0)
@@ -216,16 +228,21 @@ class PathSimulatorTests(unittest.TestCase):
         try:
             navigation.set_waypoints(waypoints, mode="track", direction="reverse")
             self.assertTrue(navigation.start())
-            # Mehrere Posen: die Sperre verlangt einen anhaltenden Fehler.
-            for _ in range(3):
+            # Dieselbe Pose ueber eine Zeitspanne: Das reale Fahrzeug drehte
+            # sich ueber vier Minuten nicht: der Fehler wurde also nie kleiner.
+            # Genau daran erkennt ihn die Sperre seit dem 27.08. - vorher
+            # genuegten drei Posen, und das traf auch jede normale Anfahrt.
+            ende = time.time() + 1.4
+            while time.time() < ende:
                 navigation.on_pose_update(pose)
+                time.sleep(0.2)
             status = navigation.get_status()
         finally:
             navigation.shutdown()
 
         self.assertFalse(status["running"])
         self.assertEqual("heading_block", status["state"])
-        self.assertIn("Winkelfehler", status["last_error"])
+        self.assertIn("dreht nicht auf die Bahn ein", status["last_error"])
 
     def test_simulation_stops_when_driven_footprint_enters_sub_zone(self):
         plan = self._plan(

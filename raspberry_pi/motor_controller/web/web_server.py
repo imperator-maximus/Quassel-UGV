@@ -1318,16 +1318,24 @@ class WebServer:
         return prefix
 
     def _apply_heading_block_check(self, result, start_pose):
-        """Winkelsperren melden - als Warnung, solange noch etwas gemäht wird.
+        """Grosse Einlenkwinkel melden - als Hinweis, nicht als Ablehnung.
 
-        Ein harter Fehler pro Stelle würde einen Plan sperren, der weitgehend
-        fährt (Brunnen: mehrere solcher Stellen bei sonst intakter Route).
-        Blockiert dagegen schon die Anfahrt oder die erste Bahn, bringt der
-        Start nichts - dann ist die Ablehnung die ehrlichere Antwort.
+        Bis zum 27.08.2026 lehnte diese Pruefung einen Plan ab, wenn schon die
+        Anfahrt oder die erste Bahn ueber der Winkelsperre lag. Das war
+        folgerichtig, solange die Sperre im Regler nach drei Posen zuschlug -
+        der Start haette nichts gebracht. Genau diese drei Posen waren aber der
+        Fehler: ein Drittel einer Sekunde, kuerzer als jede Drehung, und das
+        Eindrehen kam nie zum Zug.
+
+        Der Regler entscheidet jetzt danach, ob der Winkel kleiner wird. Ein
+        grosser Winkel am Bahnanfang ist damit kein Grund mehr, gar nicht erst
+        loszufahren - er ist der Normalfall beim Einlenken. Gestoppt wird nur
+        noch, wer sich nicht eindreht, und das kann diese Pruefung aus
+        geplanten Kursen nicht vorhersagen.
         """
         if not result.get('success'):
             return
-        findings, first_mow_index = self._heading_block_findings(result, start_pose)
+        findings, _first_mow_index = self._heading_block_findings(result, start_pose)
         if not findings:
             return
         result['heading_blocks'] = findings
@@ -1336,16 +1344,10 @@ class WebServer:
             f"{finding['label']} {finding['heading_error_deg']:+.1f}°"
             for finding in findings
         )
-        if first_mow_index is None or findings[0]['route_index'] <= first_mow_index:
-            result['success'] = False
-            result.setdefault('errors', []).append(
-                f'Winkelsperre des Reglers ({limit:.0f}°) greift schon vor der ersten '
-                f'gemähten Bahn: {detail}'
-            )
-            return
         result.setdefault('warnings', []).append(
-            f'{len(findings)} Stelle(n) erreichen die Winkelsperre des Reglers '
-            f'({limit:.0f}°); dort stoppt die Fahrt: {detail} '
+            f'{len(findings)} Stelle(n) verlangen ein Einlenken ueber '
+            f'{limit:.0f}°: {detail}. Das Fahrzeug dreht dort ein; gestoppt '
+            f'wird nur, wenn der Winkel dabei nicht kleiner wird '
             f'(aus geplanten Kursen gerechnet, real weicht der Kurs ab)'
         )
 

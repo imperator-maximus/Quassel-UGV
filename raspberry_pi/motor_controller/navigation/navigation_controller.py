@@ -78,9 +78,10 @@ class NavigationController:
         self._track_progress_m = 0.0
         self._track_stall_reference_m = 0.0
         self._track_stall_reference_time = 0.0
-        # Aufeinanderfolgende Posen mit zu grossem Winkelfehler zur Bahn.
-        # Null heisst, dass der zuletzt ausgewertete Kurs in der Grenze lag.
-        self._heading_block_count = 0
+        # Beginn und kleinster bisher gesehener Winkelfehler, solange er
+        # ueber der Sperre liegt. None heisst, dass der Kurs in der Grenze lag.
+        self._heading_block_since = None
+        self._heading_block_best_deg = None
         # Beginn und bisher kleinster Abstand einer zu grossen
         # Querabweichung. None heisst, dass die Bahn gehalten wird.
         self._cross_track_since = None
@@ -164,7 +165,8 @@ class NavigationController:
             self._track_progress_m = 0.0
             self._track_stall_reference_m = 0.0
             self._track_stall_reference_time = 0.0
-            self._heading_block_count = 0
+            self._heading_block_since = None
+            self._heading_block_best_deg = None
             self._cross_track_since = None
             self._cross_track_best_m = None
             self._align_reference_error = None
@@ -191,7 +193,8 @@ class NavigationController:
             self._track_progress_m = 0.0
             self._track_stall_reference_m = 0.0
             self._track_stall_reference_time = 0.0
-            self._heading_block_count = 0
+            self._heading_block_since = None
+            self._heading_block_best_deg = None
             self._cross_track_since = None
             self._cross_track_best_m = None
             self._align_reference_error = None
@@ -225,7 +228,8 @@ class NavigationController:
                 self._track_progress_m = 0.0
                 self._track_stall_reference_m = 0.0
                 self._track_stall_reference_time = time.time()
-                self._heading_block_count = 0
+                self._heading_block_since = None
+                self._heading_block_best_deg = None
                 self._cross_track_since = None
                 self._cross_track_best_m = None
                 self._align_reference_error = None
@@ -364,7 +368,8 @@ class NavigationController:
                     'track_cross_track_max_m': float(getattr(self.config, 'track_cross_track_max_m', 8.0)),
                     'track_cross_track_recover_s': self._track_cross_track_recover_s(),
                     'track_heading_block_deg': self._track_heading_block_deg(),
-                    'track_heading_block_samples': self._track_heading_block_samples(),
+                    'track_heading_recover_s': self._track_heading_recover_s(),
+                    'track_heading_progress_deg': self._track_heading_progress_deg(),
                     'track_align_timeout_s': self._track_align_timeout_s(),
                     'track_alignment_enter_deg': self._track_alignment_enter_deg(),
                     'track_alignment_exit_deg': self._track_alignment_exit_deg(),
@@ -593,7 +598,9 @@ class NavigationController:
             self._set_error(message)
             return
         if cross_track_m > cross_track_limit:
-            now = time.monotonic()
+            # Eigene Uhr, bewusst nicht ``now``: Der Parameter traegt die
+            # Zeitbasis fuer alles Weitere in dieser Methode.
+            jetzt = time.monotonic()
             annaeherung_m = self._track_cross_track_progress_m()
             if (
                 self._cross_track_since is None
@@ -602,13 +609,13 @@ class NavigationController:
             ):
                 # Erste Ueberschreitung oder ein Stueck naeher als je zuvor:
                 # Uhr neu stellen. Wer sich naehert, bekommt weiter Zeit.
-                self._cross_track_since = now
+                self._cross_track_since = jetzt
                 self._cross_track_best_m = cross_track_m
-            elif now - self._cross_track_since >= self._track_cross_track_recover_s():
+            elif jetzt - self._cross_track_since >= self._track_cross_track_recover_s():
                 message = (
                     f'Navigation kommt der Bahn nicht naeher: {cross_track_m:.2f} m '
                     f'(Grenze {cross_track_limit:.2f} m, '
-                    f'{now - self._cross_track_since:.0f} s ohne Annaeherung)'
+                    f'{jetzt - self._cross_track_since:.0f} s ohne Annaeherung)'
                 )
                 self.stop(reason='cross_track_stop')
                 self._set_error(message)
@@ -633,20 +640,39 @@ class NavigationController:
             self._path_direction_deg(waypoints, segment_index, direction),
             heading,
         )
-        needed_samples = self._track_heading_block_samples()
+        # Gezaehlt wurde frueher in Posen: drei ueber der Grenze, und die Fahrt
+        # war beendet. Das sind rund drei Zehntelsekunden - in der Zeit dreht
+        # sich kein Fahrzeug um 60°, und das Eindrehen ein paar Zeilen weiter
+        # unten kam nie zum Zug. Am 27.08. verweigerte die Vorabpruefung
+        # deshalb ganze Plaene, deren Anfahrt voellig normal war.
+        #
+        # Entscheidend ist wie bei der Querabweichung nicht der Betrag,
+        # sondern ob er kleiner wird. Der urspruengliche Brunnen-Stall
+        # (-51.7° und weiter wachsend) stoppt damit weiterhin - er wurde ja
+        # gerade nicht kleiner.
         if abs(path_error) >= block_deg:
-            self._heading_block_count += 1
-            if self._heading_block_count >= needed_samples:
+            jetzt = time.monotonic()
+            annaeherung = self._track_heading_progress_deg()
+            if (
+                self._heading_block_since is None
+                or self._heading_block_best_deg is None
+                or abs(path_error) <= self._heading_block_best_deg - annaeherung
+            ):
+                self._heading_block_since = jetzt
+                self._heading_block_best_deg = abs(path_error)
+            elif jetzt - self._heading_block_since >= self._track_heading_recover_s():
                 message = (
-                    f'Winkelfehler zur Bahn zu groß: {path_error:.1f}° '
-                    f'(Grenze {block_deg:.1f}°, {self._heading_block_count} Posen) '
+                    f'Fahrzeug dreht nicht auf die Bahn ein: {path_error:.1f}° '
+                    f'(Grenze {block_deg:.1f}°, '
+                    f'{jetzt - self._heading_block_since:.0f} s ohne Annaeherung) '
                     f'– Bahn wird nicht automatisch angefahren'
                 )
                 self.stop(reason='heading_block')
                 self._set_error(message)
                 return
         else:
-            self._heading_block_count = 0
+            self._heading_block_since = None
+            self._heading_block_best_deg = None
 
         # Gleichzeitiges Drehen und Vorwaertsfahren konvergiert auf diesem
         # Fahrzeug nicht, sobald der Turn-Anteil saettigt (~15° bei
@@ -1059,6 +1085,19 @@ class NavigationController:
         ratio = max(0.01, float(self._turn_to_forward_ratio))
         return self._clamp(limit / ratio, limit, 1.0)
 
+    def _track_heading_recover_s(self) -> float:
+        """Wie lange ein zu grosser Winkelfehler bestehen darf, ohne kleiner
+        zu werden."""
+        return max(
+            1.0, float(getattr(self.config, 'track_heading_recover_s', 10.0))
+        )
+
+    def _track_heading_progress_deg(self) -> float:
+        """Um wie viel Grad es naeher geworden sein muss, damit es zaehlt."""
+        return max(
+            0.2, float(getattr(self.config, 'track_heading_progress_deg', 2.0))
+        )
+
     def _track_cross_track_recover_s(self) -> float:
         """Wie lange eine zu grosse Querabweichung bestehen darf, ohne kleiner
         zu werden."""
@@ -1081,12 +1120,6 @@ class NavigationController:
             float(getattr(self.config, 'track_heading_block_deg', 45.0)),
             10.0,
             60.0,
-        )
-
-    def _track_heading_block_samples(self) -> int:
-        return max(
-            1,
-            int(getattr(self.config, 'track_heading_block_samples', 3)),
         )
 
     @classmethod

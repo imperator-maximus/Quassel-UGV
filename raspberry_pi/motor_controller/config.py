@@ -242,6 +242,11 @@ class NavigationConfig:
     pivot_heading_threshold_deg: float = 70.0
     goto_divergence_limit_m: float = 0.75
     goto_divergence_samples: int = 5
+    # So lange darf der Winkelfehler ueber der Sperre bleiben, ohne kleiner
+    # zu werden. Wer sich eindreht, bekommt die Zeit immer wieder neu - vorher
+    # wurde in Posen gezaehlt, und drei davon sind kuerzer als jede Drehung.
+    track_heading_recover_s: float = 10.0
+    track_heading_progress_deg: float = 2.0
     track_cross_track_limit_m: float = 1.0
     # Oberhalb dieses Abstands wird nicht mehr auf Annaeherung gewartet: Dort
     # koennen Sperrzonen und Grenzen zwischen Fahrzeug und Bahn liegen.
@@ -277,7 +282,6 @@ class NavigationConfig:
     # erzeugt (real 07.08.: 16.4° -> 48.4° in 1 s bei 11 cm Querabstand).
     # In Posen statt Sekunden, damit dieselbe Regel im zeitraffenden
     # Pfadsimulator gilt wie auf dem Fahrzeug (5 Hz Telemetrie -> ~0.6 s).
-    track_heading_block_samples: int = 3
     # Der Ausrichtbogen macht bewusst kaum Bahnfortschritt, deshalb ruht dort
     # der Track-Waechter. Damit war dieser Zweig unbegrenzt: dreht sich das
     # Fahrzeug nicht, rollte es ewig weiter, ohne Fehler, alles gruen

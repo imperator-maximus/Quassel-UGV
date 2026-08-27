@@ -118,8 +118,12 @@ class HeadingBlockCheckTests(unittest.TestCase):
         self.assertIn('-90.0°', warning)
         self.assertEqual([1], [item['route_index'] for item in result['heading_blocks']])
 
-    def test_block_at_the_first_lane_rejects_play(self):
-        """Sperrt schon die erste Bahn, bringt der Start nichts - 0 statt 95%."""
+    def test_grosser_winkel_an_der_ersten_bahn_verhindert_den_start_nicht(self):
+        """Bis zum 27.08.2026 wurde hier abgelehnt, weil der Regler nach drei
+        Posen stoppte - ein Drittel einer Sekunde, kuerzer als jede Drehung.
+        Er dreht jetzt ein und stoppt nur, wenn der Winkel dabei nicht kleiner
+        wird. Das kann diese Pruefung aus geplanten Kursen nicht vorhersagen,
+        also meldet sie es und laesst fahren."""
         segments = [
             lane(0, coord(0.0, 0.0), coord(0.0, 10.0)),
             lane(1, coord(0.0, 10.0), coord(10.0, 10.0)),
@@ -128,13 +132,13 @@ class HeadingBlockCheckTests(unittest.TestCase):
 
         self.server._apply_heading_block_check(result, self.pose)
 
-        self.assertFalse(result['success'])
-        self.assertEqual([], result['warnings'])
-        self.assertEqual(1, len(result['errors']))
-        self.assertIn('vor der ersten', result['errors'][0])
-        self.assertIn('Bahn 0', result['errors'][0])
+        self.assertTrue(result['success'])
+        self.assertEqual([], result['errors'])
+        self.assertEqual(1, len(result['warnings']))
+        self.assertIn('Bahn 0', result['warnings'][0])
+        self.assertIn('Einlenken', result['warnings'][0])
 
-    def test_blocked_transfer_before_the_first_lane_rejects_play(self):
+    def test_grosser_winkel_am_uebergang_verhindert_den_start_nicht(self):
         segments = [
             transfer(coord(0.0, 0.0), coord(0.0, 2.0)),
             lane(0, coord(0.0, 2.0), coord(0.0, 12.0)),
@@ -143,8 +147,8 @@ class HeadingBlockCheckTests(unittest.TestCase):
 
         self.server._apply_heading_block_check(result, self.pose)
 
-        self.assertFalse(result['success'])
-        self.assertIn('Übergang zu Bahn 0', result['errors'][0])
+        self.assertTrue(result['success'])
+        self.assertIn('Übergang zu Bahn 0', result['warnings'][0])
 
     def test_goto_segments_are_not_checked(self):
         """Die Sperre sitzt hinter der Verzweigung auf mode == 'track'."""
