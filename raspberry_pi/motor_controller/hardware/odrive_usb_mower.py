@@ -433,7 +433,19 @@ class ODriveUSBMowerController(ODriveMowerController):
                 # jedem Achsfehler dabei: Der Verdacht auf einen
                 # Spannungseinbruch unter Last laesst sich nur mit dem Wert aus
                 # dem Fehleraugenblick pruefen.
+                # Spannung und Strom im Fehleraugenblick. Beide liegen in
+                # dieser Abfrage ohnehin an bzw. kosten einen einzigen
+                # Umlauf - und ein negativer Iq ist der direkte Beleg, dass
+                # die Achse gebremst hat, statt zu ziehen. Am 28.08. stand
+                # sie beim Rueckspeisefehler auf -5,74 A; im Log war davon
+                # nichts zu sehen.
                 sample["detail"] = {"vbus": sample.get("vbus")}
+                try:
+                    sample["detail"]["iq"] = float(
+                        axis.motor.current_control.Iq_measured
+                    )
+                except Exception:
+                    sample["detail"]["iq"] = None
                 for name, halter in (
                     ("motor", "motor"),
                     ("sensorless", "sensorless_estimator"),

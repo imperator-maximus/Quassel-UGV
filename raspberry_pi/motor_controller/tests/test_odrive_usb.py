@@ -326,6 +326,20 @@ class GateTreiberMeldungTests(unittest.TestCase):
 
         self.assertEqual([], gefragt)
 
+    def test_der_strom_zeigt_ob_die_achse_gebremst_hat(self):
+        """Negativer Iq heisst bremsen - und Bremsen ist Rueckspeisung.
+
+        Am 28.08. stand Achse 0 beim Rueckspeisefehler auf -5,74 A. Im Log
+        stand davon nichts; der Wert war nur von Hand am stehenden Dienst zu
+        holen.
+        """
+        self.board.axis0.motor.error = 0x01000000
+        self.board.axis0.motor.current_control.Iq_measured = -5.74
+
+        self.controller._refresh_node(0)
+
+        self.assertIn("iq=-5.74A", self.controller.last_error)
+
     def test_die_spannung_steht_bei_jedem_achsfehler(self):
         """Sie liegt in derselben Abfrage schon vor und kostet nichts extra."""
         self.board.vbus_voltage = 22.9

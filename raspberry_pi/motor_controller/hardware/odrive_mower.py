@@ -1062,6 +1062,13 @@ class ODriveMowerController:
                 klartext = f" [{', '.join(namen)}]" if namen else " [kein Bit gesetzt]"
                 teile.append(f"drv=0x{wert:08X}{klartext}")
                 continue
+            if name == "iq":
+                # Auch die glatte Null gehoert hierher: "Achse stromlos" ist
+                # eine Aussage ueber den Fehleraugenblick.
+                if wert is None:
+                    continue
+                teile.append(f"iq={float(wert):+.2f}A")
+                continue
             if not wert:
                 continue
             if name == "drv_unlesbar":
