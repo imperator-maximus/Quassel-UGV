@@ -23,6 +23,9 @@ class NavConfig:
     goto_divergence_limit_m: float = 0.75
     goto_divergence_samples: int = 5
     track_cross_track_limit_m: float = 1.0
+    track_cross_track_max_m: float = 8.0
+    track_cross_track_recover_s: float = 10.0
+    track_cross_track_progress_m: float = 0.1
     track_heading_block_deg: float = 25.0
     track_stall_timeout_s: float = 10.0
     track_stall_min_progress_m: float = 0.15
@@ -539,23 +542,86 @@ class NavigationControllerTests(unittest.TestCase):
 
         self.assertGreater(x, 0.0)
 
-    def test_track_mode_stops_when_cross_track_error_is_too_large(self):
+    def _bahnregler(self, **grenzen):
+        """Controller auf einer Ost-West-Bahn, Fahrzeug faehrt nach Osten."""
         motor = FakeMotor()
         controller = NavigationController(
-            motor,
-            NavConfig(track_lookahead_m=1.0, track_cross_track_limit_m=0.75),
+            motor, NavConfig(track_lookahead_m=1.0, **grenzen)
         )
         controller.set_waypoints([
             {'latitude': 52.0, 'longitude': 10.0},
             {'latitude': 52.0, 'longitude': 10.001},
         ], mode='track')
         controller.start()
+        return controller
+
+    @staticmethod
+    def _pose_noerdlich(meter: float):
+        """Pose um ``meter`` noerdlich der Bahn (0.00001 Grad ~ 1,11 m)."""
+        return {
+            'latitude': 52.0 + meter / 111_320.0,
+            'longitude': 10.0001,
+            'heading_deg': 90.0,
+        }
+
+    def test_eine_einzelne_zu_grosse_querabweichung_stoppt_nicht(self):
+        """Am 27.08. hing ein USB-Aufruf des Maehdecks, der Dienst startete neu,
+        und das Fahrzeug stand 1,42 m neben seiner Bahn. Die Navigation stieg
+        50 ms nach dem Start aus, ohne einen Meter gefahren zu sein - obwohl der
+        Fehler vom Maehdeck kam und mit dem Fahren nichts zu tun hatte.
+        """
+        controller = self._bahnregler(track_cross_track_limit_m=0.75)
         try:
-            controller.on_pose_update({
-                'latitude': 52.00002,
-                'longitude': 10.0001,
-                'heading_deg': 90.0,
-            })
+            controller.on_pose_update(self._pose_noerdlich(2.2))
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertTrue(status['running'])
+        self.assertNotEqual(status['state'], 'cross_track_stop')
+
+    def test_annaeherung_haelt_die_navigation_am_leben(self):
+        """Wer sich der Bahn naehert, tut genau das, was er soll - auch wenn er
+        laenger als die Frist ueber der Grenze bleibt."""
+        controller = self._bahnregler(
+            track_cross_track_limit_m=0.75, track_cross_track_recover_s=1.0
+        )
+        try:
+            for abstand in (3.0, 2.5, 2.0, 1.5, 1.2):
+                controller.on_pose_update(self._pose_noerdlich(abstand))
+                time.sleep(0.3)
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertTrue(status['running'])
+
+    def test_stoppt_wenn_die_abweichung_nicht_kleiner_wird(self):
+        """Ein Regler, der die Bahn wirklich verliert, muss weiterhin stoppen."""
+        controller = self._bahnregler(
+            track_cross_track_limit_m=0.75, track_cross_track_recover_s=1.0
+        )
+        try:
+            for _ in range(5):
+                controller.on_pose_update(self._pose_noerdlich(2.2))
+                time.sleep(0.3)
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertFalse(status['running'])
+        self.assertEqual(status['state'], 'cross_track_stop')
+        self.assertIn('nicht naeher', status['last_error'])
+
+    def test_weit_jenseits_der_grenze_wird_sofort_gestoppt(self):
+        """Aus dieser Entfernung faengt sich nichts mehr ein: Zwischen Fahrzeug
+        und Bahn koennen Sperrzonen liegen, von denen der Bahnregler nichts
+        weiss."""
+        controller = self._bahnregler(
+            track_cross_track_limit_m=0.75, track_cross_track_max_m=5.0
+        )
+        try:
+            controller.on_pose_update(self._pose_noerdlich(9.0))
             status = controller.get_status()
         finally:
             controller.shutdown()

@@ -81,6 +81,10 @@ class NavigationController:
         # Aufeinanderfolgende Posen mit zu grossem Winkelfehler zur Bahn.
         # Null heisst, dass der zuletzt ausgewertete Kurs in der Grenze lag.
         self._heading_block_count = 0
+        # Beginn und bisher kleinster Abstand einer zu grossen
+        # Querabweichung. None heisst, dass die Bahn gehalten wird.
+        self._cross_track_since = None
+        self._cross_track_best_m = None
         # Bester Winkelfehler des laufenden Ausrichtbogens und wann er zuletzt
         # verbessert wurde. Begrenzt eine Ausrichtung, die nicht konvergiert.
         self._align_reference_error = None
@@ -161,6 +165,8 @@ class NavigationController:
             self._track_stall_reference_m = 0.0
             self._track_stall_reference_time = 0.0
             self._heading_block_count = 0
+            self._cross_track_since = None
+            self._cross_track_best_m = None
             self._align_reference_error = None
             self._align_reference_time = 0.0
 
@@ -186,6 +192,8 @@ class NavigationController:
             self._track_stall_reference_m = 0.0
             self._track_stall_reference_time = 0.0
             self._heading_block_count = 0
+            self._cross_track_since = None
+            self._cross_track_best_m = None
             self._align_reference_error = None
             self._align_reference_time = 0.0
         self._emit_state()
@@ -218,6 +226,8 @@ class NavigationController:
                 self._track_stall_reference_m = 0.0
                 self._track_stall_reference_time = time.time()
                 self._heading_block_count = 0
+                self._cross_track_since = None
+                self._cross_track_best_m = None
                 self._align_reference_error = None
                 self._align_reference_time = 0.0
                 self._geofence_origin = None
@@ -351,6 +361,8 @@ class NavigationController:
                     'goto_divergence_limit_m': float(getattr(self.config, 'goto_divergence_limit_m', 0.75)),
                     'goto_divergence_samples': int(getattr(self.config, 'goto_divergence_samples', 5)),
                 'track_cross_track_limit_m': float(getattr(self.config, 'track_cross_track_limit_m', 1.0)),
+                    'track_cross_track_max_m': float(getattr(self.config, 'track_cross_track_max_m', 8.0)),
+                    'track_cross_track_recover_s': self._track_cross_track_recover_s(),
                     'track_heading_block_deg': self._track_heading_block_deg(),
                     'track_heading_block_samples': self._track_heading_block_samples(),
                     'track_align_timeout_s': self._track_align_timeout_s(),
@@ -554,14 +566,56 @@ class NavigationController:
             0.25,
             float(getattr(self.config, 'track_cross_track_limit_m', 1.0)),
         )
-        if cross_track_m > cross_track_limit:
+        # Ein einzelner Wert ueber der Grenze ist kein Grund aufzugeben. Am
+        # 27.08. hing ein USB-Aufruf des Maehdecks, der Dienst startete neu,
+        # und das Fahrzeug stand 1,42 m neben seiner Bahn. Die Navigation
+        # stieg 50 ms nach dem Start aus, ohne einen Meter gefahren zu sein -
+        # obwohl der Fehler vom Maehdeck kam und mit dem Fahren nichts zu tun
+        # hatte. Diese Strecke faehrt der Regler im Vorbeifahren aus.
+        #
+        # Die Grenze soll einen Regler erwischen, der die Bahn *verliert*,
+        # nicht eine Fortsetzung, die sie noch sucht. Entscheidend ist deshalb
+        # nicht der Abstand selbst, sondern ob er kleiner wird. Dieselbe
+        # Ueberlegung steht ein paar Zeilen weiter schon beim Winkelfehler.
+        cross_track_max = max(
+            cross_track_limit,
+            float(getattr(self.config, 'track_cross_track_max_m', 8.0)),
+        )
+        if cross_track_m > cross_track_max:
+            # So weit entfernt wird nichts mehr eingefangen: Zwischen Fahrzeug
+            # und Bahn koennen Sperrzonen und Grenzen liegen, von denen der
+            # Bahnregler nichts weiss.
             message = (
                 f'Navigation zu weit vom Pfad entfernt: {cross_track_m:.2f} m '
-                f'(Grenze {cross_track_limit:.2f} m)'
+                f'(Grenze {cross_track_max:.2f} m)'
             )
             self.stop(reason='cross_track_stop')
             self._set_error(message)
             return
+        if cross_track_m > cross_track_limit:
+            now = time.monotonic()
+            annaeherung_m = self._track_cross_track_progress_m()
+            if (
+                self._cross_track_since is None
+                or self._cross_track_best_m is None
+                or cross_track_m <= self._cross_track_best_m - annaeherung_m
+            ):
+                # Erste Ueberschreitung oder ein Stueck naeher als je zuvor:
+                # Uhr neu stellen. Wer sich naehert, bekommt weiter Zeit.
+                self._cross_track_since = now
+                self._cross_track_best_m = cross_track_m
+            elif now - self._cross_track_since >= self._track_cross_track_recover_s():
+                message = (
+                    f'Navigation kommt der Bahn nicht naeher: {cross_track_m:.2f} m '
+                    f'(Grenze {cross_track_limit:.2f} m, '
+                    f'{now - self._cross_track_since:.0f} s ohne Annaeherung)'
+                )
+                self.stop(reason='cross_track_stop')
+                self._set_error(message)
+                return
+        else:
+            self._cross_track_since = None
+            self._cross_track_best_m = None
 
         bearing = self.bearing_deg(current, target)
         if direction == 'reverse':
@@ -1004,6 +1058,23 @@ class NavigationController:
         limit = self._speed_limit()
         ratio = max(0.01, float(self._turn_to_forward_ratio))
         return self._clamp(limit / ratio, limit, 1.0)
+
+    def _track_cross_track_recover_s(self) -> float:
+        """Wie lange eine zu grosse Querabweichung bestehen darf, ohne kleiner
+        zu werden."""
+        return max(
+            1.0, float(getattr(self.config, 'track_cross_track_recover_s', 10.0))
+        )
+
+    def _track_cross_track_progress_m(self) -> float:
+        """Wie viel naeher es geworden sein muss, damit es als Annaeherung zaehlt.
+
+        Ohne diese Schwelle setzt schon das Rauschen der Pose die Uhr immer
+        wieder zurueck, und ein stehendes Fahrzeug bekaeme unbegrenzt Zeit.
+        """
+        return max(
+            0.02, float(getattr(self.config, 'track_cross_track_progress_m', 0.1))
+        )
 
     def _track_heading_block_deg(self) -> float:
         return self._clamp(

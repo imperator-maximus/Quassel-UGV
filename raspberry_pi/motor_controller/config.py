@@ -243,6 +243,15 @@ class NavigationConfig:
     goto_divergence_limit_m: float = 0.75
     goto_divergence_samples: int = 5
     track_cross_track_limit_m: float = 1.0
+    # Oberhalb dieses Abstands wird nicht mehr auf Annaeherung gewartet: Dort
+    # koennen Sperrzonen und Grenzen zwischen Fahrzeug und Bahn liegen.
+    track_cross_track_max_m: float = 8.0
+    # So lange darf die Abweichung ueber der Grenze bleiben, ohne kleiner zu
+    # werden. Wer sich naehert, bekommt die Zeit immer wieder neu.
+    track_cross_track_recover_s: float = 10.0
+    # Um so viel muss es naeher geworden sein, damit es als Annaeherung zaehlt -
+    # sonst setzt schon das Rauschen der Pose die Uhr zurueck.
+    track_cross_track_progress_m: float = 0.1
     # Gleichzeitiges Drehen und Vorwaertsfahren (_calculate_command)
     # konvergiert auf diesem Fahrzeug nicht, sobald der Turn-Anteil
     # saettigt (~15° bei turn_kp=0.02): der Vorwaertsschub laeuft
