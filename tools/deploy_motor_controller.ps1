@@ -4,7 +4,21 @@ param(
     # Steht das Fahrzeug nicht im LAN, laeuft der Zugang ueber die Portfreigabe
     # des Routers - dort liegt SSH nicht auf 22.
     [int]$Port = 22,
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    # Ueberspringt die Testlaeufe auf dem Pi. Die dauern dort rund zehn
+    # Minuten, waehrend dieselbe Suite auf dem Entwicklungsrechner unter einer
+    # Minute braucht - ein Teil Rechenleistung, ein Teil Tests, die auf echte
+    # Zeitgrenzen warten.
+    #
+    # Ihr Nutzen ist echt: Der Pi laeuft mit Python 3.11, der Arbeitsrechner
+    # mit 3.13, und genau so ein Unterschied hat schon einen Ladefehler
+    # aufgedeckt, der lokal nicht auffiel. Deshalb bleiben sie die Vorgabe.
+    #
+    # Fuer mehrere Ausrollvorgaenge hintereinander, bei denen sich weder
+    # Abhaengigkeiten noch Konfiguration geaendert haben, ist der Preis aber
+    # unverhaeltnismaessig. Dann diesen Schalter setzen - und ihn beim
+    # naechsten Mal, wenn sich an der Umgebung etwas tut, wieder weglassen.
+    [switch]$SkipRemoteTests
 )
 
 $ErrorActionPreference = "Stop"
@@ -73,6 +87,21 @@ Invoke-Step "Upload motor-controller package, template, and static assets" {
     scp -4 @scpPort "scripts/configure_odrive_dc_current_limit.py" "${remote}:$remoteODriveDcLimitTmp"
 }
 
+# Der Testblock wird vor dem Here-String zusammengesetzt, damit der Schalter
+# nur ueber diese eine Stelle entscheidet.
+if ($SkipRemoteTests) {
+    $remoteTestBlock = "echo 'Testlauf auf dem Pi uebersprungen (-SkipRemoteTests).'"
+    Write-Host "Hinweis: Tests auf dem Pi werden uebersprungen." -ForegroundColor Yellow
+} else {
+    $remoteTestBlock = @'
+if ! PYTHONPATH="$staging_test_root:/home/USERPLATZHALTER/.venvs/odrive056/lib/python3.11/site-packages" python3 -m unittest discover -s motor_controller/tests -v; then
+  echo 'Remote staging tests failed; running installation was not changed.' >&2
+  exit 1
+fi
+'@
+    $remoteTestBlock = $remoteTestBlock -replace 'USERPLATZHALTER', $User
+}
+
 $deployCommand = @"
 set -e
 staging_test_root=/tmp/ugv_deploy_test_root
@@ -84,10 +113,7 @@ cp $remoteTmp/index.html /tmp/templates/index.html
 mkdir -p /tmp/static
 cp -a $remoteStaticTmp/. /tmp/static/
 cd "`$staging_test_root"
-if ! PYTHONPATH="`$staging_test_root:/home/$User/.venvs/odrive056/lib/python3.11/site-packages" python3 -m unittest discover -s motor_controller/tests -v; then
-  echo 'Remote staging tests failed; running installation was not changed.' >&2
-  exit 1
-fi
+$remoteTestBlock
 ts=`$(date +%Y%m%d_%H%M%S)
 backup=/home/$User/backup/motor_controller_`$ts
 mkdir -p /home/$User/backup
