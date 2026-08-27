@@ -46,6 +46,16 @@ var planIsRunning = false;
 var planResumeAvailable = false;
 var planStartAttemptToken = 0;
 var planLoadRunning = false;
+// Der offene Plan gehoert dem Fahrzeug, nicht dem Browser. Wer sich waehrend
+// einer Fahrt dazuschaltet - Plan am Handy gestartet, danach am PC
+// nachgesehen (real 27.08.) - sah oben "Fahre Brunnen" und darunter "Kein Plan
+// geladen": keine Bahnen auf der Karte, Abfahrposition 0 m / 0 m, leere
+// Planauswahl. Jede Oberflaeche holt sich den laufenden Plan deshalb selbst
+// nach, statt ihn nur beim Startklick zu kennen.
+var latestPlanExecutionStatus = null;
+var planAdoptedMapName = null;
+var planAdoptionRunning = false;
+var planAdoptionRetryAfter = 0;
 var selectedPointIndex = null;
 var manualPointDragIndex = null;
 
@@ -153,7 +163,7 @@ function loadMap(name) {
         .then(result => {
             if (!result.ok || result.data.success === false) {
                 setMapEditorStatus(result.data.error || 'Karte konnte nicht geladen werden');
-                return;
+                return false;
             }
             activeMapName = result.data.name;
             activeMapPayload = result.data.map;
@@ -164,6 +174,7 @@ function loadMap(name) {
             setMapEditorStatus(`${activeMapName}: ${boundaryPoints.length} Punkte`);
             loadMapAnalysis(activeMapName);
             refreshPlanList();
+            return true;
         });
 }
 
@@ -1098,42 +1109,72 @@ function selectSavedPlan() {
     loadSavedPlan();
 }
 
-function loadSavedPlan() {
-    if (planLoadRunning) return;
-    const mapName = document.getElementById('planSelect')?.value || activeMapName;
+// Der Name ist optional: ohne ihn gilt die Auswahlliste, wie beim Klick auf
+// "Plan laden". Die Rueckmeldung sagt, ob der Plan wirklich im Browser steht -
+// daran haengt, ob das Nachladen eines laufenden Plans als erledigt gilt.
+function loadSavedPlan(requestedMapName) {
+    if (planLoadRunning) return Promise.resolve(false);
+    const requested = typeof requestedMapName === 'string' ? requestedMapName : '';
+    const mapName = requested || document.getElementById('planSelect')?.value || activeMapName;
     if (!mapName) {
         setPlanStatus('Keine Karte oder kein Plan gewählt');
-        return;
+        return Promise.resolve(false);
     }
     planLoadRunning = true;
     refreshPlanButtons();
     setPlanStatus('Plan wird geladen...');
-    fetch(`/api/mapping/maps/${encodeURIComponent(mapName)}/plan/load`)
+    return fetch(`/api/mapping/maps/${encodeURIComponent(mapName)}/plan/load`)
         .then(response => response.json().then(data => ({ok: response.ok, data})))
         .then(result => {
             if (!result.ok || result.data.success === false) {
                 setPlanStatus(result.data.error || 'Plan laden fehlgeschlagen');
-                return;
+                return false;
             }
             const activateLoadedPlan = () => {
                 renderLanePreview(result.data.plan, 'saved');
                 setLoadedPlanReady(true);
                 planResumeAvailable = savedPlanHasResume(mapName);
                 enterPlanUiMode(mapName);
+                showPlanInSelect(mapName);
                 refreshPlanButtons();
-                refreshNoGoCheck(mapName, result.data.plan);
+                // Waehrend der Fahrt prueft der Dienst die No-Go-Zonen ohnehin
+                // laufend und schickt das Ergebnis im Status mit - eine zweite
+                // Pruefung nebenher kostet nur Rechenzeit auf dem Fahrzeug.
+                if (!planIsRunning) refreshNoGoCheck(mapName, result.data.plan);
                 setPlanStatus(`Plan geladen · ${planSummaryText(result.data.summary || result.data.plan)}`);
+                return true;
             };
             if (mapName !== activeMapName) {
-                return loadMap(mapName).then(activateLoadedPlan);
+                return loadMap(mapName).then(loaded => loaded === false ? false : activateLoadedPlan());
             }
-            activateLoadedPlan();
+            return activateLoadedPlan();
         })
-        .catch(error => setPlanStatus(error.message))
+        .catch(error => {
+            setPlanStatus(error.message);
+            return false;
+        })
         .finally(() => {
             planLoadRunning = false;
             refreshPlanButtons();
         });
+}
+
+// Die Auswahlliste muss den geladenen Plan auch dann zeigen, wenn er nicht
+// ueber sie gewaehlt wurde - sonst steht dort "Kein gespeicherter Plan",
+// waehrend das Fahrzeug ihn abfaehrt.
+function showPlanInSelect(mapName) {
+    const select = document.getElementById('planSelect');
+    if (!select || !mapName) return;
+    const known = Array.from(select.options).some(option => option.value === mapName);
+    if (known) {
+        select.value = mapName;
+        return;
+    }
+    refreshPlanList().then(() => {
+        if (Array.from(select.options).some(option => option.value === mapName)) {
+            select.value = mapName;
+        }
+    });
 }
 
 function refreshNoGoCheck(mapName, plan) {
@@ -1376,9 +1417,15 @@ function refreshPlanButtons() {
     if (simulationControls) simulationControls.hidden = !lanePreviewPlan;
     const loadBtn = document.getElementById('planLoadBtn');
     if (loadBtn) {
-        loadBtn.disabled = planLoadRunning;
+        // Waehrend einer Fahrt bestimmt das Fahrzeug, welcher Plan angezeigt
+        // wird. Sonst koennte hier ein anderer Plan ueber die laufende Fahrt
+        // gelegt werden und die Anzeige liefe wieder auseinander.
+        loadBtn.disabled = planLoadRunning || planIsRunning;
         loadBtn.textContent = planLoadRunning ? 'Plan wird geladen…' : 'Plan laden';
+        loadBtn.title = planIsRunning ? 'Während der Planfahrt zeigt die Karte den laufenden Plan' : '';
     }
+    const planSelect = document.getElementById('planSelect');
+    if (planSelect) planSelect.disabled = planLoadRunning || planIsRunning;
     const playBtn = document.getElementById('planPlayBtn');
     const playAvailability = planPlayAvailability();
     if (playBtn) {
@@ -1552,6 +1599,7 @@ function updateVehiclePose(sensorData, navigationStatus, planExecutionStatus) {
 function updatePlanStatusDisplay(navigationStatus, planExecutionStatus) {
     const nav = navigationStatus || {};
     const plan = planExecutionStatus || {};
+    latestPlanExecutionStatus = plan;
     planIsRunning = plan.running === true || plan.state === 'running';
     const planState = plan.state || '';
     if (['stopped', 'completed'].includes(planState)) {
@@ -1562,8 +1610,9 @@ function updatePlanStatusDisplay(navigationStatus, planExecutionStatus) {
             (!planIsRunning && savedPlanHasResume(activeMapName));
     }
     if (planIsRunning && planUiMode !== 'plan') {
-        enterPlanUiMode((plan.summary && plan.summary.map_name) || activePlanName || activeMapName || 'Plan');
+        enterPlanUiMode(remotePlanMapName(plan) || activePlanName || activeMapName || 'Plan');
     }
+    adoptRemotePlan();
     updateMapModeButton();
     updateMapsSectionTitle();
     updateNoGoStatus(plan.nogo_status);
@@ -1586,6 +1635,59 @@ function updatePlanStatusDisplay(navigationStatus, planExecutionStatus) {
     } else if (nav.state && nav.state !== 'idle') {
         setPlanStatus(`Navigation ${nav.state} · ${nav.mode || ''} ${nav.direction || ''}`.trim());
     }
+}
+
+// Name des Plans, der im Fahrzeug offen ist. ``map_name`` steht immer im
+// Status; ``summary`` gibt es nur, solange der Start im selben Dienstlauf
+// liegt - aeltere Staende koennen deshalb nur die Zusammenfassung haben.
+function remotePlanMapName(plan) {
+    const status = plan || latestPlanExecutionStatus || {};
+    return status.map_name || (status.summary && status.summary.map_name) || '';
+}
+
+// Ein Plan gilt als offen, solange er nicht sauber zu Ende oder bewusst
+// beendet wurde: pausiert, wegen RTK stehengeblieben, nach Dienstneustart.
+// In all diesen Faellen gehoert er auf jeden Bildschirm.
+function remotePlanIsOpen(plan) {
+    const status = plan || latestPlanExecutionStatus || {};
+    const state = status.state || '';
+    if (status.running === true || state === 'running') return true;
+    return Boolean(state) && !['idle', 'completed', 'stopped'].includes(state);
+}
+
+// Den offenen Plan des Fahrzeugs in diese Oberflaeche holen. Wird bei jedem
+// Statuseingang und beim Wechsel auf die Kartenseite aufgerufen, laedt aber
+// nur einmal je Plan.
+function adoptRemotePlan() {
+    const plan = latestPlanExecutionStatus;
+    const remoteName = remotePlanMapName(plan);
+    if (!remoteName || !remotePlanIsOpen(plan)) {
+        planAdoptedMapName = null;
+        return;
+    }
+    if (planAdoptedMapName === remoteName || planAdoptionRunning || planLoadRunning) return;
+    // Steht der richtige Plan schon da, ist nichts zu tun - eine eigene
+    // Vorschau desselben Gebiets wird dagegen durch den gespeicherten Plan
+    // ersetzt, denn gefahren wird der gespeicherte.
+    if (lanePreviewPlan && lanePreviewSource === 'saved' && activeMapName === remoteName) {
+        planAdoptedMapName = remoteName;
+        return;
+    }
+    // Leaflet auf einer unsichtbaren Seite bekommt seine Groesse nicht mit und
+    // zoomt daneben. Solange die Kartenseite zu ist, sieht ohnehin niemand
+    // hin; beim Aufschlagen wird nachgeholt.
+    if (!document.getElementById('mapsScreen')?.classList.contains('active')) return;
+    if (Date.now() < planAdoptionRetryAfter) return;
+    planAdoptionRunning = true;
+    loadSavedPlan(remoteName)
+        .then(loaded => {
+            planAdoptedMapName = loaded ? remoteName : null;
+            // Nach einem Fehlschlag nicht im Sekundentakt nachhaken.
+            if (!loaded) planAdoptionRetryAfter = Date.now() + 15000;
+        })
+        .finally(() => {
+            planAdoptionRunning = false;
+        });
 }
 
 function selectedPlanStart() {
@@ -1995,5 +2097,6 @@ window.MappingEditor = {
     stopPlanExecution,
     returnToMapEditMode,
     updateVehiclePose,
+    adoptRemotePlan,
     dismissPlanAlert,
 };

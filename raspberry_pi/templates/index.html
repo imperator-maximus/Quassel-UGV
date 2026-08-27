@@ -1544,6 +1544,11 @@
                 refreshPlanList();
                 setTimeout(() => {
                     if (mapEditor) mapEditor.invalidateSize();
+                    // Eine laufende Fahrt gehoert sofort auf die frisch
+                    // geoeffnete Karte, nicht erst mit dem naechsten Status.
+                    if (window.MappingEditor && typeof window.MappingEditor.adoptRemotePlan === 'function') {
+                        window.MappingEditor.adoptRemotePlan();
+                    }
                 }, 120);
             }
         }

@@ -1563,6 +1563,12 @@ class WebServer:
             status = dict(self._plan_status)
             if isinstance(status.get('current_segment'), dict):
                 status['current_segment'] = dict(status['current_segment'])
+            # Welcher Plan offen ist, stand bisher nur in ``summary`` - und die
+            # entsteht erst beim Start im selben Prozess. Eine Oberflaeche, die
+            # sich waehrend der Fahrt dazuschaltet, konnte den laufenden Plan
+            # deshalb nicht benennen und auch nicht nachladen. Der Name gehoert
+            # zum Zustand und wird jetzt immer mitgeschickt.
+            status['map_name'] = self._active_plan_map_name
             if self._active_plan_map_name:
                 resume_path = self._resume_path(self._active_plan_map_name)
                 status['resume_available'] = bool(resume_path and resume_path.exists())
