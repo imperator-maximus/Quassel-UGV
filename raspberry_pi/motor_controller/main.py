@@ -21,6 +21,7 @@ from .hardware.odrive_mower import ODriveMowerController
 from .hardware.odrive_usb_mower import ODriveUSBMowerController
 from .hardware.safety_monitor import SafetyMonitor
 from .hardware.battery_monitor import BatteryMonitor
+from .communication.network_monitor import NetworkMonitor
 from .communication.can_handler import CANHandler
 from .communication.push_notifier import PushNotifier
 from .communication.sensor_hub_http import SensorHubHttpClient
@@ -59,6 +60,7 @@ class MotorControllerApp:
         self.sensor_hub_http: SensorHubHttpClient = None
         self.odrive_mower: ODriveMowerController = None
         self.battery: BatteryMonitor = None
+        self.network: NetworkMonitor = None
         self.motor: MotorControl = None
         self.joystick: JoystickHandler = None
         self.navigation: NavigationController = None
@@ -204,6 +206,9 @@ class MotorControllerApp:
             # Batterieueberwachung
             self.battery = BatteryMonitor(self.config.battery, self.logger)
 
+            # Netzueberwachung: zeigt an, in welchem WLAN das Fahrzeug haengt
+            self.network = NetworkMonitor(self.config.network, self.logger)
+
             # Motor-Control
             self.logger.info("Initialisiere Motor-Control...")
             self.motor = MotorControl(self.pwm, self.config)
@@ -261,6 +266,7 @@ class MotorControllerApp:
                     self.safety,
                     notifier=self.notifier,
                     battery=self.battery,
+                    network=self.network,
                 )
                 # Hardware-Referenzen setzen
                 self.web.set_hardware_refs(
@@ -557,6 +563,8 @@ class MotorControllerApp:
                 self.odrive_mower.start_monitor()
             if self.battery:
                 self.battery.start()
+            if self.network:
+                self.network.start()
 
             # Safety-Watchdog starten
             if self.safety:
@@ -703,6 +711,10 @@ class MotorControllerApp:
             if self.battery:
                 self.logger.info("Stoppe Batterieueberwachung...")
                 self.battery.stop()
+
+            if self.network:
+                self.logger.info("Stoppe Netzueberwachung...")
+                self.network.stop()
             
             # CAN-Reader stoppen
             if self.can:

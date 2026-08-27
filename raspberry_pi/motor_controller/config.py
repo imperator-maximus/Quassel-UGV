@@ -94,6 +94,28 @@ class BatteryConfig:
 
 
 @dataclass
+class NetworkConfig:
+    """WLAN-Zustand des Fahrzeugs, gelesen ueber NetworkManager.
+
+    Das Fahrzeug kennt zwei Netze: den Mobilfunkrouter als Regelweg und das
+    alte WLAN als Notweg. Faellt es unbemerkt zurueck, laeuft der Betrieb
+    ueber den Notweg weiter - deshalb wird der Stand angezeigt und der Rueckweg
+    bedienbar gemacht.
+    """
+    enabled: bool = True
+    interface: str = 'wlan0'
+    preferred_profile: str = 'HUAWEI'
+    fallback_profile: str = 'UGV'
+    poll_interval_s: float = 10.0
+    command_timeout_s: float = 10.0
+    switch_timeout_s: float = 45.0
+    # Kommt das Wunschnetz nicht zustande, holt dieser Rueckfall das Fahrzeug
+    # von allein ins alte WLAN zurueck, statt es unerreichbar zu lassen.
+    fallback_unit: str = 'ugv-netz-rueckfall'
+    fallback_delay_min: int = 10
+
+
+@dataclass
 class ODriveMowerConfig:
     """ODrive/ODESC-Mähdeck über CAN oder direkte USB-Verbindungen."""
     enabled: bool = False
@@ -442,6 +464,7 @@ class Config:
     mower: MowerConfig = field(default_factory=MowerConfig)
     odrive_mower: ODriveMowerConfig = field(default_factory=ODriveMowerConfig)
     battery: BatteryConfig = field(default_factory=BatteryConfig)
+    network: NetworkConfig = field(default_factory=NetworkConfig)
     can: CANConfig = field(default_factory=CANConfig)
     sensor_hub: SensorHubConfig = field(default_factory=SensorHubConfig)
     navigation: NavigationConfig = field(default_factory=NavigationConfig)
@@ -488,6 +511,8 @@ class Config:
             config.odrive_mower = ODriveMowerConfig(**odrive_data)
         if 'battery' in data:
             config.battery = BatteryConfig(**data['battery'])
+        if 'network' in data:
+            config.network = NetworkConfig(**data['network'])
         if 'can' in data:
             config.can = CANConfig(**data['can'])
         if 'sensor_hub' in data:
@@ -653,6 +678,17 @@ class Config:
                 'connect_timeout_s': self.battery.connect_timeout_s,
                 'reconnect_delay_s': self.battery.reconnect_delay_s,
                 'reconnect_max_delay_s': self.battery.reconnect_max_delay_s
+            },
+            'network': {
+                'enabled': self.network.enabled,
+                'interface': self.network.interface,
+                'preferred_profile': self.network.preferred_profile,
+                'fallback_profile': self.network.fallback_profile,
+                'poll_interval_s': self.network.poll_interval_s,
+                'command_timeout_s': self.network.command_timeout_s,
+                'switch_timeout_s': self.network.switch_timeout_s,
+                'fallback_unit': self.network.fallback_unit,
+                'fallback_delay_min': self.network.fallback_delay_min
             },
             'can': {
                 'enabled': self.can.enabled,

@@ -76,7 +76,7 @@ class WebServer:
         'watchdog': 'Navigations-Watchdog',
     }
 
-    def __init__(self, config, motor_control, joystick_handler, can_handler, gpio_controller, navigation_controller=None, mapping_recorder=None, safety_monitor=None, notifier=None, battery=None):
+    def __init__(self, config, motor_control, joystick_handler, can_handler, gpio_controller, navigation_controller=None, mapping_recorder=None, safety_monitor=None, notifier=None, battery=None, network=None):
         """
         Initialisiert Web-Server
 
@@ -88,6 +88,7 @@ class WebServer:
             gpio_controller: GPIOController-Instanz
             notifier: optionaler PushNotifier fuer Stoerungsmeldungen
             battery: optionaler BatteryMonitor fuer den Ladezustand
+            network: optionaler NetworkMonitor fuer das aktive WLAN
         """
         self.logger = logging.getLogger(__name__)
         self.config = config
@@ -100,6 +101,7 @@ class WebServer:
         self.safety = safety_monitor
         self.notifier = notifier
         self.battery = battery
+        self.network = network
 
         # Flask-App
         self.flask_available = FLASK_AVAILABLE
@@ -436,6 +438,9 @@ class WebServer:
                 'notification_status': (
                     self.notifier.get_status() if self.notifier else {'enabled': False}
                 ),
+                'network_status': (
+                    self.network.get_status() if self.network else {'enabled': False}
+                ),
                 'light_state': self.light_state,
                 # Der Schieberegler liest diesen Wert beim Laden. Bisher gab es
                 # ihn nur im WebSocket-Status, nicht ueber HTTP.
@@ -668,6 +673,20 @@ class WebServer:
             """Startet Sensor Hub neu"""
             success = self.can.restart_sensor_hub()
             return jsonify({'success': success})
+
+        @self.app.route('/api/network/preferred', methods=['POST'])
+        def api_network_preferred():
+            """Holt das Fahrzeug ins Wunschnetz zurueck.
+
+            Der Wechsel kappt die Verbindung, ueber die dieser Aufruf kam. Die
+            Antwort bestaetigt deshalb nur den Anstoss; das Ergebnis steht
+            danach in `network_status.last_switch`.
+            """
+            if not self.network:
+                return jsonify({'success': False, 'error': 'Netzueberwachung deaktiviert'}), 503
+            result = self.network.switch_to_preferred()
+            status_code = 200 if result.get('success') else 409
+            return jsonify({**result, 'network_status': self.network.get_status()}), status_code
 
         @self.app.route('/api/navigation/waypoints', methods=['GET', 'POST', 'DELETE', 'OPTIONS'])
         def api_navigation_waypoints():
@@ -2543,6 +2562,9 @@ class WebServer:
             'safety_status': self.safety.get_status() if self.safety else {},
             'battery_status': (
                 self.battery.get_status() if self.battery else {'enabled': False}
+            ),
+            'network_status': (
+                self.network.get_status() if self.network else {'enabled': False}
             ),
             'light_state': self.light_state,
             'light_enabled': self.light_config.enabled if self.light_config else False,

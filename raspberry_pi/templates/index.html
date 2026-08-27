@@ -1103,6 +1103,10 @@
             <button class="mower-toggle-btn" id="mowerToggleBtn" onclick="openMowerModal()">🌾 Mäher</button>
         </div>
         <div class="status-bar" id="statusBar">
+            <div class="status-indicator" id="networkIndicator" onclick="switchToPreferredNetwork()" style="cursor: pointer;">
+                <div class="status-dot" id="networkStatus"></div>
+                <span id="networkStatusText">WLAN …</span>
+            </div>
             <div class="status-indicator" id="rtkInfoIndicator">
                 <div class="status-dot" id="rtkInfoStatus"></div>
                 <span id="rtkInfoStatusText">RTK unbekannt</span>
@@ -1717,6 +1721,7 @@
                     ? `${safetyStatus.motion_hold_reason || 'Fahrpause'} – wartet auf SensorHub`
                     : 'Sicherheitsüberwachung aktiv');
             updateBatteryStatus(data.battery_status || {});
+            updateNetworkStatus(data.network_status || {});
             document.getElementById('pwmStatus').className =
                 'status-dot ' + (data.pwm_enabled ? 'active' : 'inactive');
             document.getElementById('monitorStatus').className =
@@ -1788,6 +1793,91 @@
         // zum Fahrzeug zu gehen und die Versorgung zu trennen. Jetzt bietet
         // die Oberflaeche den bewussten Weg an - mit Rueckfrage, damit
         // niemand versehentlich einen echten Fehler wegwischt.
+        // Das aktive WLAN gehoert in die Statusleiste, weil das Fahrzeug
+        // unbemerkt ins alte Netz zurueckfallen kann: Dann laeuft alles
+        // weiter, nur eben ueber den Notweg statt ueber Mobilfunk.
+        let netzStatus = {};
+
+        function updateNetworkStatus(status) {
+            netzStatus = status || {};
+            const dot = document.getElementById('networkStatus');
+            const text = document.getElementById('networkStatusText');
+            const indicator = document.getElementById('networkIndicator');
+            if (!dot || !text || !indicator) return;
+
+            if (status.enabled === false) {
+                dot.className = 'status-dot inactive';
+                text.textContent = 'WLAN aus';
+                indicator.title = 'Netzüberwachung ist abgeschaltet';
+                return;
+            }
+
+            const name = status.ssid || status.profile;
+            if (status.switching) {
+                dot.className = 'status-dot warning';
+                text.textContent = `WLAN → ${status.preferred_profile || '?'}`;
+            } else if (!name) {
+                dot.className = 'status-dot inactive';
+                text.textContent = 'WLAN ?';
+            } else if (status.on_preferred) {
+                dot.className = 'status-dot active';
+                text.textContent = name;
+            } else {
+                dot.className = 'status-dot warning';
+                text.textContent = `${name} ⚠`;
+            }
+
+            const zeilen = [];
+            if (status.ssid) zeilen.push(`Netz: ${status.ssid}`);
+            if (status.profile) zeilen.push(`Profil: ${status.profile}`);
+            if (status.ipv4) zeilen.push(`Adresse: ${status.ipv4}`);
+            if (status.signal_percent != null) zeilen.push(`Feldstärke: ${status.signal_percent} %`);
+            if (status.age_s != null) zeilen.push(`Abgefragt vor ${status.age_s.toFixed(0)} s`);
+            if (status.error) zeilen.push(`Fehler: ${status.error}`);
+            const letzter = status.last_switch;
+            if (letzter && letzter.finished) {
+                zeilen.push(letzter.success
+                    ? `Letzter Wechsel: erfolgreich`
+                    : `Letzter Wechsel fehlgeschlagen: ${letzter.error || 'unbekannt'}` +
+                      (letzter.fallback_armed ? ' – Rückfall ins alte Netz ist scharf' : ''));
+            }
+            if (!status.switching && !status.on_preferred) {
+                zeilen.push(`Zum Zurückschalten auf ${status.preferred_profile || 'das Wunschnetz'} klicken`);
+            }
+            indicator.title = zeilen.join('
+') || 'Noch keine Netzabfrage';
+        }
+
+        function switchToPreferredNetwork() {
+            const ziel = netzStatus.preferred_profile || 'das Wunschnetz';
+            if (netzStatus.switching) {
+                alert('Ein Netzwechsel läuft bereits.');
+                return;
+            }
+            if (netzStatus.on_preferred &&
+                !confirm(`Das Fahrzeug ist bereits im Netz "${ziel}". Trotzdem neu verbinden?`)) {
+                return;
+            }
+            if (!netzStatus.on_preferred &&
+                !confirm(`Fahrzeug zurück ins Netz "${ziel}" holen?
+
+` +
+                         'Die Verbindung bricht dabei für einige Sekunden ab. ' +
+                         `Klappt der Wechsel nicht, kehrt das Fahrzeug nach ${netzStatus.fallback_delay_min || 10} Minuten ` +
+                         `von allein ins Netz "${netzStatus.fallback_profile || 'alt'}" zurück.`)) {
+                return;
+            }
+            fetch('/api/network/preferred', { method: 'POST' })
+                .then(async response => {
+                    const data = await response.json();
+                    if (!response.ok || !data.success) {
+                        throw new Error(data.error || 'Netzwechsel nicht möglich');
+                    }
+                    updateNetworkStatus(data.network_status || {});
+                })
+                .catch(error => alert('Netzwechsel fehlgeschlagen: ' + error.message));
+        }
+
         function resetSafetyStop() {
             fetch('/api/safety/reset', { method: 'POST' })
                 .then(async response => {
