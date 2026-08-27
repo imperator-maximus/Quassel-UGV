@@ -5,10 +5,13 @@ CH9141 BLE bridge on 2026-07-29 while the vehicle sat idle. Decoding them is
 pure logic, so the whole wire format is covered without any hardware.
 """
 
+import asyncio
+import logging
+import sys
 import time
+import types
 import unittest
 from pathlib import Path
-import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -120,6 +123,80 @@ class IterFramesTest(unittest.TestCase):
     def test_leading_garbage_is_discarded(self):
         buffer = bytearray(b"\x00\x01\x02" + VOLTAGE_FRAME)
         self.assertEqual(list(iter_frames(buffer)), [body_of(VOLTAGE_FRAME)])
+
+
+class StilleAmZaehlerTests(unittest.TestCase):
+    """Ein schweigender Zaehler ist nicht unbedingt ein abwesender.
+
+    Der Junctek laesst nur eine BLE-Verbindung zu und stellt das Senden ein,
+    solange eine besteht. Am 28.08.2026 um 00:50 Uhr blieb nach mehreren
+    Dienstneustarts eine alte Verbindung im Betriebssystem stehen: Das Geraet
+    schwieg deshalb, der Suchlauf fand nichts, und die Anzeige stand auf
+    offline - waehrend `hcitool con` die offene Verbindung auflistete.
+    """
+
+    def setUp(self):
+        self.gebaut = []
+        # Wird im Test auf das Stopp-Signal des Monitors gesetzt, damit die
+        # Schleife nach einer Runde endet.
+        self.beenden = lambda: None
+        pruefstand = self
+
+        class FakeScanner:
+            @staticmethod
+            async def find_device_by_address(address, timeout=None):
+                del address, timeout
+                return None  # sendet nicht, weil verbunden
+
+        class FakeClient:
+            def __init__(self, ziel, timeout=None):
+                del timeout
+                pruefstand.gebaut.append(ziel)
+                self.is_connected = True
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def start_notify(self, uuid, handler):
+                del uuid, handler
+                pruefstand.beenden()
+                self.is_connected = False
+
+            async def stop_notify(self, uuid):
+                del uuid
+
+        self.bleak = types.ModuleType("bleak")
+        self.bleak.BleakScanner = FakeScanner
+        self.bleak.BleakClient = FakeClient
+        self.vorher = sys.modules.get("bleak")
+        sys.modules["bleak"] = self.bleak
+
+    def tearDown(self):
+        if self.vorher is None:
+            sys.modules.pop("bleak", None)
+        else:
+            sys.modules["bleak"] = self.vorher
+
+    def test_ohne_advertisement_wird_die_adresse_trotzdem_versucht(self):
+        monitor = BatteryMonitor(
+            BatteryConfig(
+                enabled=True,
+                address="E4:66:E5:60:FB:1C",
+                scan_timeout_s=0.01,
+                connect_timeout_s=0.01,
+                reconnect_delay_s=0.01,
+                reconnect_max_delay_s=0.01,
+            ),
+            logging.getLogger("test"),
+        )
+        self.beenden = monitor._stop_event.set  # eine Runde, dann Schluss
+
+        asyncio.run(monitor._reader_loop())
+
+        self.assertEqual(["E4:66:E5:60:FB:1C"], self.gebaut)
 
 
 class BatteryMonitorStatusTest(unittest.TestCase):

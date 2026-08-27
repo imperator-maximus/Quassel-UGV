@@ -322,11 +322,29 @@ class BatteryMonitor:
                 device = await BleakScanner.find_device_by_address(
                     address, timeout=float(self.config.scan_timeout_s)
                 )
-                if device is None:
-                    raise RuntimeError(f"{address} sendet keine Advertisements")
+                ziel = device
+                if ziel is None:
+                    # Kein Advertisement heisst nicht, dass der Zaehler weg
+                    # ist. Er laesst nur eine Verbindung zu und stellt das
+                    # Senden ein, sobald eine besteht - bleibt nach einem
+                    # harten Neustart des Dienstes eine alte Verbindung im
+                    # System stehen, sucht der neue Prozess nach einem Geraet,
+                    # das genau deswegen schweigt (real 28.08., 00:50 Uhr: die
+                    # Anzeige stand auf offline, waehrend das Betriebssystem
+                    # die offene Verbindung fuehrte).
+                    #
+                    # Also die Adresse trotzdem versuchen: Besteht die
+                    # Verbindung noch, uebernimmt BlueZ sie, statt sie neu
+                    # aufzubauen.
+                    self.logger.info(
+                        "Batteriemonitor: keine Advertisements von %s - "
+                        "versuche die bestehende Verbindung zu uebernehmen",
+                        address,
+                    )
+                    ziel = address
 
                 async with BleakClient(
-                    device, timeout=float(self.config.connect_timeout_s)
+                    ziel, timeout=float(self.config.connect_timeout_s)
                 ) as client:
                     with self._lock:
                         self._connected = True
