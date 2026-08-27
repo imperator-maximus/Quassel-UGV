@@ -410,6 +410,30 @@ class ODriveUSBMowerController(ODriveMowerController):
                     # expose the same estimate as ``pll_pos``.
                     sample["position"] = float(axis.sensorless_estimator.pll_pos)
                 sample["velocity"] = float(axis.sensorless_estimator.vel_estimate)
+            if sample["error"]:
+                # Der Achsfehler ist ein Sammelbegriff: 0x40 heisst nur "das
+                # Motor-Objekt meldet einen Fehler", nicht welchen. Ohne diese
+                # Ebene war am 27.08. nicht zu klaeren, woher ein wiederkehrender
+                # 0x40 kam.
+                #
+                # Gelesen wird das ausschliesslich im Fehlerfall: Jede
+                # Eigenschaft ist ein eigener USB-Umlauf, und haengende Aufrufe
+                # sind hier das bekannte Problem. Liegt ein Fehler an, steht das
+                # Deck ohnehin.
+                sample["detail"] = {}
+                for name, halter in (
+                    ("motor", "motor"),
+                    ("sensorless", "sensorless_estimator"),
+                    ("encoder", "encoder"),
+                ):
+                    try:
+                        sample["detail"][name] = int(getattr(axis, halter).error)
+                    except Exception:
+                        sample["detail"][name] = None
+                try:
+                    sample["detail"]["board"] = int(board.error)
+                except Exception:
+                    sample["detail"]["board"] = None
             return sample
 
         sample = self._run_axis_operation(node_id, operation)
@@ -417,7 +441,9 @@ class ODriveUSBMowerController(ODriveMowerController):
         self._usb_metadata[serial]["online"] = True
         self._usb_metadata[serial]["last_error"] = None
         self._usb_metadata[serial]["vbus_voltage"] = round(sample["vbus"], 3)
-        self.on_heartbeat(int(node_id), sample["error"], sample["state"])
+        self.on_heartbeat(
+            int(node_id), sample["error"], sample["state"], sample.get("detail")
+        )
         if include_current:
             self.on_iq(int(node_id), sample["iq_setpoint"], sample["iq_measured"])
         if include_sensorless:

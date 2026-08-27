@@ -38,6 +38,8 @@ class ODriveMowerController:
         self.running = False
         self.target_rpm = int(config.default_rpm)
         self.commanded_rpm = 0
+        # Fehler der Unterobjekte je Knoten, nur solange einer anliegt.
+        self.odrive_error_details = {}
         self.last_error = None
         self.node_ids = self._configured_node_ids()
         self.odrive_errors = {node_id: 0 for node_id in self.node_ids}
@@ -1013,7 +1015,26 @@ class ODriveMowerController:
                 'last_seen': time.monotonic(),
             }
 
-    def on_heartbeat(self, node_id: int, error: int, state: int) -> None:
+    @staticmethod
+    def _format_error_detail(detail) -> str:
+        """Haengt die Fehler der Unterobjekte an, sofern welche vorliegen.
+
+        Ohne sie steht im Log nur der Sammelbegriff. Genau daran ist am
+        27.08. die Frage "woher kommt der wiederkehrende 0x40" haengen
+        geblieben.
+        """
+        if not detail:
+            return ""
+        teile = [
+            f"{name}=0x{wert:08X}"
+            for name, wert in sorted(detail.items())
+            if wert
+        ]
+        return f" ({', '.join(teile)})" if teile else ""
+
+    def on_heartbeat(
+        self, node_id: int, error: int, state: int, detail=None
+    ) -> None:
         """Verarbeitet ODrive-Heartbeat-Nachrichten vom CAN-Reader.
 
         Wird vom CANHandler bei jedem empfangenen Heartbeat (cmd 0x01) gerufen.
@@ -1029,6 +1050,9 @@ class ODriveMowerController:
             node_id: ODrive-Knoten-ID aus der Arbitration-ID.
             error: ODrive-Fehlercode (0 = kein Fehler).
             state: ODrive-Axis-State (1=IDLE, 5=CLOSED_LOOP_SENSORLESS, ...).
+            detail: Fehler der darunterliegenden Objekte, sofern der Transport
+                sie liefert. Der Achsfehler ist ein Sammelbegriff - 0x40 heisst
+                nur "das Motor-Objekt meldet einen Fehler", nicht welchen.
         """
         if node_id not in self.node_ids:
             return
@@ -1039,10 +1063,18 @@ class ODriveMowerController:
             self.odrive_last_seen[int(node_id)] = time.monotonic()
             self.odrive_errors[int(node_id)] = int(error)
             self.odrive_states[int(node_id)] = int(state)
+            if error:
+                self.odrive_error_details[int(node_id)] = dict(detail or {})
+            else:
+                self.odrive_error_details.pop(int(node_id), None)
             self.odrive_error = max(self.odrive_errors.values(), default=0)
             self.odrive_state = int(state)
             if error != 0:
-                self.last_error = f"ODrive node={node_id} error=0x{error:08X} state={state}"
+                klartext = self._format_error_detail(detail)
+                self.last_error = (
+                    f"ODrive node={node_id} error=0x{error:08X} "
+                    f"state={state}{klartext}"
+                )
                 # Nur bei einem *neuen* Fehler (0 -> !=0) den Lauf abbrechen.
                 # Bei stale-Fehlern, die schon vor start() da waren, nicht
                 # tearing-down: sonst latched jeder Fehler-Heartbeat running
@@ -1056,10 +1088,11 @@ class ODriveMowerController:
                     should_trip = True
                     trip_reason = f"ODrive node={node_id} error=0x{error:08X} state={state}"
                 self.logger.error(
-                    "ODrive-Heartbeat Fehler: node=%d error=0x%08X state=%d",
+                    "ODrive-Heartbeat Fehler: node=%d error=0x%08X state=%d%s",
                     node_id,
                     error,
                     state,
+                    klartext,
                 )
             else:
                 # ODrive-Fehler geloescht – aber Python-CAN-Send-Fehler bleiben
