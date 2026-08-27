@@ -228,11 +228,12 @@ class WebServer:
             if self.socketio_available:
                 self.socketio = SocketIO(
                     self.app,
-                    # None bedeutet: nur die eigene Herkunft. '*' haette jeder
-                    # fremden Seite einen Steuerkanal zum Fahrzeug geoeffnet.
-                    # Socket.IO vergleicht den vollstaendigen Origin-Wert, also
-                    # die Rohliste inklusive Schema.
-                    cors_allowed_origins=list(getattr(self.config, 'allowed_origins', []) or []) or None,
+                    # Eine Prueffunktion statt einer Liste. Eine Liste ersetzt
+                    # in engineio die Vorgabe "nur die eigene Herkunft" - und
+                    # genau daran ist am 27.08. der Zugang ueber die alte
+                    # Portfreigabe gestorben: Die Seite lud noch, der
+                    # Steuerkanal wurde abgewiesen, der Joystick war tot.
+                    cors_allowed_origins=self._socket_origin_allowed,
                     async_mode='threading',
                     logger=False,
                     engineio_logger=False,
@@ -295,6 +296,35 @@ class WebServer:
         except Exception as e:  # Komprimierung ist Beiwerk, nie ein Ausfallgrund
             self.logger.debug(f"Komprimierung uebersprungen: {e}")
         return response
+
+    def _socket_origin_allowed(self, origin, environ=None) -> bool:
+        """Entscheidet, wer den Steuerkanal oeffnen darf.
+
+        Erlaubt ist zweierlei: dieselbe Herkunft wie der Request selbst -
+        unabhaengig vom Schema, denn hinter einem TLS-Reverse-Proxy kommt die
+        Anfrage unverschluesselt an - und jede ausdruecklich konfigurierte.
+
+        Das Schema bewusst zu ignorieren ist vertretbar, weil ueber den
+        Steuerkanal ohnehin die Anmeldung entscheidet; der Herkunftsvergleich
+        haelt nur fremde Webseiten fern, und die stehen auf einem anderen Host.
+        """
+        if not origin:
+            # Kein Browser. Ein solcher Client bringt keine fremden
+            # Zugangsdaten mit; ueber ihn entscheidet die Anmeldung.
+            return True
+        origin_host = WebAuthGuard._origin_host(origin)
+        if not origin_host:
+            return False
+        if origin_host in self._configured_origins():
+            return True
+        target = ''
+        if environ:
+            target = (
+                environ.get('HTTP_X_FORWARDED_HOST')
+                or environ.get('HTTP_HOST')
+                or ''
+            ).split(',')[0].strip()
+        return bool(target) and WebAuthGuard._origin_host(target) == origin_host
 
     def _configured_origins(self):
         """Zusaetzlich erlaubte Origins, auf den blossen Host reduziert."""
