@@ -1782,8 +1782,51 @@
             }
         }
 
+        // Der Safety-Reset raeumt bewusst nur Watchdog-Fehler weg; alles
+        // andere soll ein Mensch angesehen haben. Bisher endete das aber in
+        // einer Sackgasse: Der Reset verweigerte, und der einzige Ausweg war,
+        // zum Fahrzeug zu gehen und die Versorgung zu trennen. Jetzt bietet
+        // die Oberflaeche den bewussten Weg an - mit Rueckfrage, damit
+        // niemand versehentlich einen echten Fehler wegwischt.
         function resetSafetyStop() {
             fetch('/api/safety/reset', { method: 'POST' })
+                .then(async response => {
+                    const data = await response.json();
+                    if (!response.ok || !data.success) {
+                        const grund = data.error || 'Safety-Reset nicht möglich';
+                        if (/ODrive-Fehler aktiv/i.test(grund)) {
+                            return offerOdriveErrorClear(grund);
+                        }
+                        throw new Error(grund);
+                    }
+                    fetchStatus();
+                })
+                .catch(error => alert('Safety-Reset fehlgeschlagen: ' + error.message));
+        }
+
+        function offerOdriveErrorClear(grund) {
+            const frage =
+                grund + '\n\n' +
+                'Diese Fehler löscht der Reset nicht von allein — sie liegen im ' +
+                'Arbeitsspeicher der ODrive-Boards und wären sonst nur durch ' +
+                'Trennen der Versorgung am Fahrzeug wegzubekommen.\n\n' +
+                'Fehler jetzt löschen und Reset wiederholen?';
+            if (!confirm(frage)) {
+                return;
+            }
+            fetch('/api/odrive/clear-errors', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({confirm: true})
+            })
+                .then(async response => {
+                    const data = await response.json();
+                    if (!response.ok || !data.success) {
+                        throw new Error(data.error || 'Fehler konnten nicht gelöscht werden');
+                    }
+                    console.log('🧹 ODrive-Fehler gelöscht:', data.cleared_text);
+                    return fetch('/api/safety/reset', { method: 'POST' });
+                })
                 .then(async response => {
                     const data = await response.json();
                     if (!response.ok || !data.success) {
@@ -1791,7 +1834,7 @@
                     }
                     fetchStatus();
                 })
-                .catch(error => alert('Safety-Reset fehlgeschlagen: ' + error.message));
+                .catch(error => alert('Löschen fehlgeschlagen: ' + error.message));
         }
 
         function updateMappingStatus(status) {

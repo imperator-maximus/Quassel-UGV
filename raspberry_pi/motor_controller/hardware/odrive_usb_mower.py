@@ -273,7 +273,11 @@ class ODriveUSBMowerController(ODriveMowerController):
             return False, f"Nicht-Watchdog-ODrive-Fehler aktiv: {details}"
         if not nonzero:
             return True, None
+        return self._clear_errors_verified('Watchdogfehler')
 
+    def _clear_errors_verified(self, kontext: str) -> tuple[bool, str | None]:
+        """Loescht die Fehler und liest nach, ob sie wirklich weg sind."""
+        remaining: dict = {}
         for attempt in range(1, 4):
             try:
                 # On both installed firmware generations the watchdog must be
@@ -302,11 +306,30 @@ class ODriveUSBMowerController(ODriveMowerController):
             except Exception as exc:
                 remaining = {"transport": str(exc)}
             self.logger.warning(
-                "ODrive USB-Watchdog-Clear noch nicht bestaetigt: attempt=%d remaining=%s",
+                "ODrive USB-Clear noch nicht bestaetigt (%s): attempt=%d remaining=%s",
+                kontext,
                 attempt,
                 remaining,
             )
-        return False, f"ODrive USB-Watchdogfehler blieb aktiv: {remaining}"
+        return False, f"ODrive USB-{kontext} blieben aktiv: {remaining}"
+
+    def clear_all_errors(self) -> tuple[bool, str | None, dict]:
+        """Loescht jeden Fehler - nur auf ausdrueckliche Anweisung.
+
+        Siehe die Basisklasse: Der automatische Weg verweigert alles, was kein
+        Watchdog-Fehler ist. Hier ist der bewusste Gegenweg, der sonst nur
+        ueber das Trennen der Versorgung am Fahrzeug moeglich waere.
+        """
+        with self._lock:
+            vorher = {
+                node_id: value
+                for node_id, value in self.odrive_errors.items()
+                if value
+            }
+        if not vorher:
+            return True, None, {}
+        success, error = self._clear_errors_verified('Fehler')
+        return success, error, vorher
 
     def _set_watchdog_enabled(self, node_id: int, enabled: bool) -> None:
         """Keep the hardware watchdog armed only while blades may run."""

@@ -785,6 +785,38 @@ class ODriveMowerController:
             return False, f"Watchdog-Fehler konnten nicht geloescht werden: {exc}"
         return True, None
 
+    def clear_all_errors(self) -> tuple[bool, str | None, dict]:
+        """Loescht jeden ODrive-Fehler - nur auf ausdrueckliche Anweisung.
+
+        ``clear_watchdog_errors`` verweigert alles, was kein Watchdog-Fehler
+        ist, und das ist richtig: Eine Maschine mit Messern soll einen echten
+        Fehler nicht stillschweigend wegwischen. Es fehlte aber der bewusste
+        Gegenweg. Ohne ihn blieb dem Bediener nur, zum Fahrzeug zu gehen und
+        die Versorgung zu trennen - die Fehler liegen im Arbeitsspeicher der
+        Boards und sind danach weg. Diese Methode tut dasselbe, nur ohne den
+        Weg dorthin.
+
+        Zurueck kommen die Fehler, die geloescht wurden, damit im Protokoll
+        steht, worueber hinweggegangen wurde.
+        """
+        with self._lock:
+            vorher = {
+                node_id: error
+                for node_id, error in self.odrive_errors.items()
+                if error
+            }
+        if not vorher:
+            return True, None, {}
+        try:
+            self._send_all(CMD_CLEAR_ERRORS)
+        except Exception as exc:
+            return (
+                False,
+                f"ODrive-Fehler konnten nicht geloescht werden: {exc}",
+                vorher,
+            )
+        return True, None, vorher
+
     def prepare_safety_reset(self) -> tuple[bool, str | None]:
         """Bereitet den expliziten Reset vor und startet IDLE-Polling erneut."""
         success, error = self.clear_watchdog_errors()

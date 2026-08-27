@@ -503,6 +503,56 @@ class WebServer:
             }
             return jsonify(payload), (200 if success else 409)
         
+        @self.app.route('/api/odrive/clear-errors', methods=['POST'])
+        def api_odrive_clear_errors():
+            """Loescht ODrive-Fehler auf ausdrueckliche Anweisung.
+
+            Der Safety-Reset raeumt bewusst nur Watchdog-Fehler weg; alles
+            andere soll ein Mensch angesehen haben. Es fehlte aber der Weg,
+            danach auch zu entscheiden - dem Bediener blieb nur, zum Fahrzeug
+            zu gehen und die Versorgung zu trennen, denn die Fehler liegen im
+            Arbeitsspeicher der Boards. Dieser Aufruf tut dasselbe, ohne den
+            Weg dorthin, und verlangt dafuer eine ausdrueckliche Bestaetigung.
+            """
+            if not self.odrive_mower or not self.odrive_mower.enabled:
+                return jsonify({
+                    'success': False,
+                    'error': 'Kein ODrive-Maehdeck konfiguriert',
+                }), 503
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict) or data.get('confirm') is not True:
+                # Kein Standardwert und kein Umschalten: Wer Fehler an einer
+                # Maschine mit Messern wegraeumt, soll das gesagt haben.
+                return jsonify({
+                    'success': False,
+                    'error': "Bestaetigung erforderlich: {'confirm': true}",
+                }), 400
+
+            success, error, geloescht = self.odrive_mower.clear_all_errors()
+            klartext = ', '.join(
+                f'node {node}=0x{wert:08X}'
+                for node, wert in sorted(geloescht.items())
+            ) or 'keine'
+            if success:
+                self.logger.warning(
+                    'ODrive-Fehler auf Anweisung geloescht: %s', klartext
+                )
+                self._notify_auto_resume(
+                    'recovery',
+                    'UGV: ODrive-Fehler geloescht',
+                    f'Auf Anweisung geloescht: {klartext}',
+                )
+            else:
+                self.logger.error(
+                    'ODrive-Fehler blieben trotz Anweisung aktiv: %s', error
+                )
+            return jsonify({
+                'success': success,
+                'error': error,
+                'cleared': {str(node): wert for node, wert in geloescht.items()},
+                'cleared_text': klartext,
+            }), (200 if success else 409)
+
         @self.app.route('/api/light/toggle', methods=['POST'])
         def api_light_toggle():
             """Schaltet Licht Ein/Aus"""
