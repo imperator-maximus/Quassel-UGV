@@ -132,5 +132,83 @@ class TurnLegsOnTheSpotTests(unittest.TestCase):
         )
 
 
+class TurningCloseToTheNoGoZoneTests(unittest.TestCase):
+    """Am Brunnenrand ist fuer den grossen Zug kein Platz.
+
+    Am 28.08.2026 um 00:33 Uhr stand das Fahrzeug 0,6 m von der Sperrzone und
+    haette sich um 167,5 Grad drehen muessen. Ein 45-Grad-Zug traegt es 3,1 m
+    weit - keine der vier Drehvarianten blieb dabei im erlaubten Bereich, und
+    der Plan blieb stehen. Zum Brunnen hin kann man nicht rangieren, von ihm
+    weg schon: Ein 15-Grad-Zug misst 1,05 m, und dort waren alle vier
+    Varianten sicher.
+    """
+
+    # Standplatz und Zielkurs aus dem Vorfall.
+    LON = 11.0783241
+    LAT = 53.3325422
+    ZIEL_DEG = 268.8
+
+    @classmethod
+    def setUpClass(cls):
+        cls.plan = json.loads(
+            (FIXTURES / "Brunnen.plan.json").read_text(encoding="utf-8")
+        )
+
+    def _plans(self):
+        return MowingPlanManager(str(FIXTURES))
+
+    def test_der_grosse_zug_findet_dort_keinen_platz(self):
+        """Die Ausgangslage - sonst prueft der Test unten nichts."""
+        plans = self._plans()
+        router = plans._runtime_transition_router(self.plan)
+
+        grob = plans._turn_legs_with_arc(
+            router, [self.LON, self.LAT], 101.3, self.ZIEL_DEG, 20.0, 45.0, 6
+        )
+
+        self.assertIsNone(grob)
+
+    def test_mit_feineren_zuegen_dreht_es_sich_doch(self):
+        plans = self._plans()
+
+        zuege = plans.turn_legs_from_pose(
+            self.plan, [self.LON, self.LAT], 101.3, self.ZIEL_DEG
+        )
+
+        self.assertTrue(zuege)
+        kurs = 101.3
+        for zug in zuege:
+            kurs = plans._segment_end_heading(zug, kurs)
+        self.assertLessEqual(
+            plans._angle_error_deg(kurs, self.ZIEL_DEG),
+            plans.TURN_ALIGN_TOLERANCE_DEG,
+        )
+
+    def test_die_feinen_zuege_bleiben_kurz(self):
+        """Sonst waere nichts gewonnen - die Laenge ist ja das Problem."""
+        plans = self._plans()
+
+        zuege = plans.turn_legs_from_pose(
+            self.plan, [self.LON, self.LAT], 101.3, self.ZIEL_DEG
+        )
+
+        self.assertTrue(all(zug["length_m"] <= 2.2 for zug in zuege))
+
+    def test_wo_der_grosse_zug_passt_bleibt_es_beim_grossen(self):
+        """Fein gedreht wird nur, wo grob nicht geht: Jeder Zug kostet Zeit."""
+        plans = self._plans()
+        router = plans._runtime_transition_router(self.plan)
+
+        grob = plans._turn_legs_with_arc(
+            router, [self.LON, self.LAT], 160.0, self.ZIEL_DEG, 20.0, 45.0, 6
+        )
+        gestaffelt = plans.turn_legs_from_pose(
+            self.plan, [self.LON, self.LAT], 160.0, self.ZIEL_DEG
+        )
+
+        self.assertTrue(grob)
+        self.assertEqual(len(grob), len(gestaffelt))
+
+
 if __name__ == "__main__":
     unittest.main()

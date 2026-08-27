@@ -1328,7 +1328,12 @@ class MowingPlanManager:
             back = unit(bearing_deg + side * 90.0 + 180.0)
             return (centre[0] + back[0] * radius_m, centre[1] + back[1] * radius_m)
 
-        steps = max(1, int(math.ceil(turn_deg / cls.MAX_TURN_STEP_DEG)))
+        # Mindestens drei Stuetzpunkte, sonst ist ein kleiner Bogen keine
+        # Kurve mehr, sondern eine Sehne: Bei 20 Grad Schrittweite kam ein
+        # 15-Grad-Zug als einzelne Gerade heraus, und das Fahrzeug haette sich
+        # auf ihr nur halb so weit gedreht wie gerechnet. Fuer die 45-Grad-
+        # Zuege aendert sich nichts, die hatten schon drei.
+        steps = max(3, int(math.ceil(turn_deg / cls.MAX_TURN_STEP_DEG)))
         points = [(0.0, 0.0)]
         for index in range(1, steps + 1):
             points.append(position(heading + rotation * turn_deg * index / steps))
@@ -1738,6 +1743,18 @@ class MowingPlanManager:
     # Rand ihrer Toleranz anlaeuft.
     TURN_ALIGN_TOLERANCE_DEG = 20.0
 
+    # Zugmasse fuer das Drehen, von grob nach fein: (Grad je Zug, Zuege).
+    # Der Radius bleibt bei APPROACH_TURN_ARCS[0] - er ist die engste
+    # Kurve, die der Regler nachweislich faehrt. Kuerzer wird nur der Bogen.
+    #
+    # Ein 45-Grad-Zug traegt das Fahrzeug 3,1 m weit. Am Brunnenrand, 0,6 m
+    # von der Sperrzone, ist das zu viel: Am 28.08. um 00:33 Uhr war dort kein
+    # einziges Manoever konstruierbar, und der Plan blieb stehen. Ein
+    # 15-Grad-Zug misst 1,05 m, und dort waren alle vier Drehvarianten sicher.
+    # Fein gedreht wird nur, wenn grob nicht geht: Jeder Zug kostet Zeit, und
+    # 167 Grad in 15-Grad-Schritten sind zwoelf Zuege.
+    TURN_ARC_LADDER = ((45.0, 6), (30.0, 8), (20.0, 12), (15.0, 16))
+
     def turn_legs_from_pose(
         self,
         plan: Dict[str, Any],
@@ -1778,7 +1795,32 @@ class MowingPlanManager:
         if runtime_router is None:
             return None
 
-        radius_m, turn_deg = self.APPROACH_TURN_ARCS[0]
+        for turn_deg, max_legs in self.TURN_ARC_LADDER:
+            manoever = self._turn_legs_with_arc(
+                runtime_router,
+                from_coord,
+                float(start_heading_deg),
+                float(target_heading_deg),
+                toleranz,
+                turn_deg,
+                max_legs,
+            )
+            if manoever:
+                return manoever
+        return None
+
+    def _turn_legs_with_arc(
+        self,
+        runtime_router,
+        from_coord: List[float],
+        start_heading_deg: float,
+        target_heading_deg: float,
+        toleranz: float,
+        turn_deg: float,
+        max_legs: int,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Ein Zugmass durchprobieren - beide Drehrichtungen, beide Anfaenge."""
+        radius_m = self.APPROACH_TURN_ARCS[0][0]
         best = None
         for rotate_left in (True, False):
             for first_reverse in (False, True):
@@ -1786,7 +1828,7 @@ class MowingPlanManager:
                 position = list(from_coord)
                 heading = float(start_heading_deg)
                 reverse = first_reverse
-                for _ in range(self.MAX_SHUNT_LEGS):
+                for _ in range(max_legs):
                     coords, turned = self._shunt_leg_coords(
                         position, heading, turn_deg, radius_m, rotate_left, reverse,
                     )
@@ -1805,7 +1847,12 @@ class MowingPlanManager:
                         break
                     legs.append(leg)
                     position = list(coords[-1])
-                    heading = turned
+                    # Der Kurs aus dem Streckenzug, nicht der ideale Bogenwert:
+                    # Gefahren wird der Streckenzug, und am Ende zaehlt, wohin
+                    # die Nase dann wirklich zeigt.
+                    heading = self._segment_end_heading(leg, heading)
+                    if heading is None:
+                        heading = turned
                     reverse = not reverse
                     if self._angle_error_deg(
                         heading, float(target_heading_deg)
