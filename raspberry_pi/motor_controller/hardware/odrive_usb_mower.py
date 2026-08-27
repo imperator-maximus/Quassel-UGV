@@ -469,16 +469,29 @@ class ODriveUSBMowerController(ODriveMowerController):
                     # Eigenschaft, deshalb nur, wenn der Treiber wirklich
                     # gemeldet hat.
                     #
-                    try:
-                        sample["detail"]["drv"] = int(axis.motor.get_drv_fault())
-                    except Exception as exc:
+                    #
+                    # Der Zugriffsweg ist nicht auf allen Staenden derselbe:
+                    # Auf den Boards hier gibt es `get_drv_fault()` nicht
+                    # (real 28.08.: "object has no attribute
+                    # 'get_drv_fault'"), aeltere und neuere Firmware fuehren
+                    # das Register als Eigenschaft. Deshalb der Reihe nach.
+                    sample["detail"]["drv"] = None
+                    gruende = []
+                    for zugriff in (
+                        lambda: axis.motor.gate_driver.drv_fault,
+                        lambda: axis.motor.drv_fault,
+                        lambda: axis.motor.get_drv_fault(),
+                    ):
+                        try:
+                            sample["detail"]["drv"] = int(zugriff())
+                            break
+                        except Exception as exc:
+                            gruende.append(str(exc) or exc.__class__.__name__)
+                    else:
                         # Verschluckt war das schon einmal: Dann sieht ein
                         # stilles Register genauso aus wie eine gescheiterte
                         # Abfrage, und die Frage bleibt offen.
-                        sample["detail"]["drv"] = None
-                        sample["detail"]["drv_unlesbar"] = (
-                            str(exc) or exc.__class__.__name__
-                        )
+                        sample["detail"]["drv_unlesbar"] = "; ".join(gruende)
             return sample
 
         sample = self._run_axis_operation(node_id, operation)

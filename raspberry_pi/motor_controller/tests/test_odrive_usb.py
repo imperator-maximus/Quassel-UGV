@@ -312,8 +312,22 @@ class GateTreiberMeldungTests(unittest.TestCase):
 
         self.controller._refresh_node(0)
 
-        self.assertIn("drv nicht lesbar: Fibre-Aufruf abgebrochen",
-                      self.controller.last_error)
+        self.assertIn("drv nicht lesbar:", self.controller.last_error)
+        self.assertIn("Fibre-Aufruf abgebrochen", self.controller.last_error)
+
+    def test_das_register_wird_auch_als_eigenschaft_gefunden(self):
+        """Nicht jede Firmware fuehrt es als Funktion.
+
+        Auf den Boards des Fahrzeugs gibt es `get_drv_fault()` nicht - am
+        28.08. stand deshalb "object has no attribute 'get_drv_fault'" im Log,
+        wo das Register haette stehen sollen.
+        """
+        self.board.axis0.motor.gate_driver = SimpleNamespace(drv_fault=0x0020)
+
+        self.controller._refresh_node(0)
+
+        self.assertIn("drv=0x00000020", self.controller.last_error)
+        self.assertIn("FETHA_OC", self.controller.last_error)
 
     def test_ohne_treiberfehler_wird_der_treiber_nicht_gefragt(self):
         """Jede Abfrage ist ein USB-Umlauf - und haengende Aufrufe sind hier
