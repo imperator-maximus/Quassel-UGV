@@ -1844,8 +1844,7 @@
             if (!status.switching && !status.on_preferred) {
                 zeilen.push(`Zum Zurückschalten auf ${status.preferred_profile || 'das Wunschnetz'} klicken`);
             }
-            indicator.title = zeilen.join('
-') || 'Noch keine Netzabfrage';
+            indicator.title = zeilen.join('\n') || 'Noch keine Netzabfrage';
         }
 
         function switchToPreferredNetwork() {
@@ -1859,9 +1858,7 @@
                 return;
             }
             if (!netzStatus.on_preferred &&
-                !confirm(`Fahrzeug zurück ins Netz "${ziel}" holen?
-
-` +
+                !confirm(`Fahrzeug zurück ins Netz "${ziel}" holen?\n\n` +
                          'Die Verbindung bricht dabei für einige Sekunden ab. ' +
                          `Klappt der Wechsel nicht, kehrt das Fahrzeug nach ${netzStatus.fallback_delay_min || 10} Minuten ` +
                          `von allein ins Netz "${netzStatus.fallback_profile || 'alt'}" zurück.`)) {
