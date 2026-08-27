@@ -1,0 +1,9 @@
+[Unit]
+Description=Rueckfallfrist nach dem Start
+
+[Timer]
+OnBootSec=10min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

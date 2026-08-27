@@ -1,0 +1,6 @@
+[Unit]
+Description=Adresse des SensorHub gegen das aktuelle Netz pruefen
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hub-netwatch.sh
