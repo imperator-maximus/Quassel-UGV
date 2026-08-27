@@ -242,11 +242,11 @@ class NavigationConfig:
     pivot_heading_threshold_deg: float = 70.0
     goto_divergence_limit_m: float = 0.75
     goto_divergence_samples: int = 5
-    # So lange darf der Winkelfehler ueber der Sperre bleiben, ohne kleiner
-    # zu werden. Wer sich eindreht, bekommt die Zeit immer wieder neu - vorher
-    # wurde in Posen gezaehlt, und drei davon sind kuerzer als jede Drehung.
-    track_heading_recover_s: float = 10.0
-    track_heading_progress_deg: float = 2.0
+    # So viele Posen in Folge muss der Winkelfehler ueber der Sperre liegen.
+    # Bewusst kurz: Ein grosser Winkel gehoert nicht in den Ausrichtbogen,
+    # sondern in ein Rangiermanoever - die Planausfuehrung baut daraufhin eine
+    # neue Anfahrt, statt die Fahrt zu beenden.
+    track_heading_block_samples: int = 3
     track_cross_track_limit_m: float = 1.0
     # Oberhalb dieses Abstands wird nicht mehr auf Annaeherung gewartet: Dort
     # koennen Sperrzonen und Grenzen zwischen Fahrzeug und Bahn liegen.

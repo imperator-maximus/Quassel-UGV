@@ -700,7 +700,7 @@ class NavigationControllerTests(unittest.TestCase):
 
         self.assertFalse(status['running'])
         self.assertEqual(status['state'], 'heading_block')
-        self.assertIn('dreht nicht auf die Bahn ein', status['last_error'])
+        self.assertIn('Winkelfehler', status['last_error'])
         self.assertEqual((0.0, 0.0, True), motor.commands[-1])
 
     def test_track_heading_block_threshold_is_a_single_cutoff(self):
@@ -772,7 +772,7 @@ class NavigationControllerTests(unittest.TestCase):
 
         self.assertFalse(status['running'])
         self.assertEqual(status['state'], 'heading_block')
-        self.assertIn('dreht nicht auf die Bahn ein', status['last_error'])
+        self.assertIn('Winkelfehler', status['last_error'])
 
     def test_reverse_large_heading_error_blocks_too(self):
         """Die Blockgrenze gilt richtungsunabhaengig - auch der fuer reverse
@@ -797,7 +797,7 @@ class NavigationControllerTests(unittest.TestCase):
 
         self.assertFalse(status['running'])
         self.assertEqual(status['state'], 'heading_block')
-        self.assertIn('dreht nicht auf die Bahn ein', status['last_error'])
+        self.assertIn('Winkelfehler', status['last_error'])
 
     def test_lateral_offset_at_the_lane_start_is_no_heading_error(self):
         """Regression fuer den Realstopp vom 07.08. mitten auf der Wiese.
@@ -889,30 +889,33 @@ class NavigationControllerTests(unittest.TestCase):
         self.assertNotEqual('heading_block', sofort)
         self.assertEqual('heading_block', spaeter)
 
-    def test_wer_sich_eindreht_bekommt_zeit(self):
-        """Der Fall, an dem die alte Sperre scheiterte: Das Fahrzeug steht
-        quer zur Bahn und dreht ein. Solange der Fehler kleiner wird, tut der
-        Regler genau seine Arbeit - auch laenger als die Frist."""
-        motor = FakeMotor()
-        controller = NavigationController(motor, NavConfig())
-        controller.set_waypoints([
-            {'latitude': 52.0, 'longitude': 10.0},
-            {'latitude': 52.0, 'longitude': 10.001},
-        ], mode='track')
-        controller.start()
+    def test_grosser_winkel_ist_ein_fall_fuers_rangieren(self):
+        """Kurz gelockert und wieder eingefuehrt.
+
+        Am 27.08. hatte ich die Sperre zu "bekommt Zeit, solange der Winkel
+        kleiner wird" geaendert. Der Ausrichtbogen nutzte das aus: Er drehte
+        das Fahrzeug ueber 115 Grad sauber ein und schob es dabei vorwaerts
+        von 0,89 auf 3,00 m neben die Bahn. Die Last dieses Drehens loeste
+        einen Spannungseinbruch aus, den ODrive und SensorHub unabhaengig
+        voneinander protokolliert haben.
+
+        Ein grosser Winkel gehoert also nicht in den Bogen. Die Sperre stoppt
+        hier wieder schnell - und die Planausfuehrung antwortet darauf mit
+        einer neu gebauten Anfahrt statt mit einem Fehler (siehe
+        test_web_plan_reposition).
+        """
+        controller = self._bahnregler(track_cross_track_limit_m=0.75)
         try:
-            # 60° Fehler, der sich Schritt fuer Schritt abbaut.
-            for kurs in (30.0, 40.0, 50.0, 55.0, 60.0, 65.0):
-                controller.on_pose_update(
-                    {'latitude': 52.0, 'longitude': 10.0, 'heading_deg': kurs}
-                )
-                time.sleep(0.3)
+            for _ in range(4):
+                controller.on_pose_update({
+                    'latitude': 52.0, 'longitude': 10.0, 'heading_deg': 30.0,
+                })
             status = controller.get_status()
         finally:
             controller.shutdown()
 
-        self.assertTrue(status['running'])
-        self.assertNotEqual('heading_block', status['state'])
+        self.assertFalse(status['running'])
+        self.assertEqual('heading_block', status['state'])
 
     def _lane_north(self):
         return [

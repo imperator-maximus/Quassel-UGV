@@ -177,13 +177,9 @@ navigation:
                                # -62.3°) - dort blockieren statt automatisch
                                # anzufahren. Gemessen gegen die Bahnrichtung,
                                # nicht gegen die Peilung zum Pure-Pursuit-Ziel.
-  track_heading_recover_s: 10.0      # So lange darf der Winkelfehler ueber
-                                    # der Sperre bleiben, ohne kleiner zu
-                                    # werden. Wer sich eindreht, bekommt die
-                                    # Zeit immer wieder neu.
-  track_heading_progress_deg: 2.0   # Um so viel Grad muss es naeher
-                                    # geworden sein, damit es als
-                                    # Annaeherung zaehlt.
+  track_heading_block_samples: 3  # So viele Posen in Folge muss der Fehler
+                                  # ueber der Sperre liegen. Danach wird nicht
+                                  # abgebrochen, sondern rangiert.
   track_align_timeout_s: 10.0     # Ausrichtbogen ohne Winkelfortschritt stoppen.
   track_align_min_progress_deg: 0.5 # Im Bogen ruht der Track-Waechter (dort ist
                                # kein Bahnfortschritt gewollt); ohne diese

@@ -152,19 +152,13 @@ class PathSimulatorTests(unittest.TestCase):
         self.assertEqual(["forward", "reverse"], [item["direction"] for item in result["segments"]])
         self.assertLess(self._distance_to_xy(result["final_pose"], 0.0, 0.35), 0.6)
 
-    def test_opposite_short_transition_is_reversed_and_driven(self):
+    def test_opposite_short_transition_is_reversed_but_blocks_on_heading(self):
         """The router still picks the direction that needs the smaller turn
-        (reverse here). The remaining 38 degree error is above this test's
-        track_heading_block_deg (25), and until 2026-08-27 that alone ended
-        the run after three poses - a third of a second, less than any turn
-        this vehicle makes. The roll alignment right below the check never got
-        to work, and whole plans were refused before they started.
-
-        What decides now is whether the error shrinks. The simulated vehicle
-        turns onto the lane, so it drives. A vehicle that does not turn is
-        still stopped - see
-        test_stalled_reverse_transition_blocks_instead_of_realigning, which is
-        exactly that case."""
+        (reverse here). The remaining 38 degree error exceeds this test's
+        track_heading_block_deg (25) - above the roll-alignment band the
+        controller does not guess and blocks instead of driving through it.
+        During execution that block is what triggers a fresh approach; here
+        only the block itself is under test."""
         first = self._segment(0, [(0.0, 0.0), (10.0, 0.0)])
         second = self._segment(1, [(8.0, 1.0), (0.0, 1.0)], direction="reverse")
         plan = self._plan([first, second])
@@ -176,11 +170,11 @@ class PathSimulatorTests(unittest.TestCase):
             parameters=self.params,
         )
 
-        self.assertTrue(result["safe"])
-        self.assertNotEqual("heading_block", result["state"])
+        self.assertFalse(result["safe"])
+        self.assertEqual("heading_block", result["state"])
         transition = next(item for item in result["segments"] if item["type"] == "transition")
         self.assertEqual("reverse", transition["direction"])
-        self.assertNotEqual("heading_block", transition["state"])
+        self.assertEqual("heading_block", transition["state"])
 
     def test_grass_model_does_not_invent_counter_rotation_motion(self):
         pose = self._pose(0.0, 0.0, 220.0)
@@ -242,7 +236,7 @@ class PathSimulatorTests(unittest.TestCase):
 
         self.assertFalse(status["running"])
         self.assertEqual("heading_block", status["state"])
-        self.assertIn("dreht nicht auf die Bahn ein", status["last_error"])
+        self.assertIn("Winkelfehler", status["last_error"])
 
     def test_simulation_stops_when_driven_footprint_enters_sub_zone(self):
         plan = self._plan(
