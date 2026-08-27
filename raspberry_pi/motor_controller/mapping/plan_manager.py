@@ -1683,6 +1683,56 @@ class MowingPlanManager:
             return segment
         return segment
 
+    def approach_segment_from_pose(
+        self,
+        plan: Dict[str, Any],
+        from_coord: List[float],
+        target_coords: List[List[float]],
+        *,
+        direction: Optional[str],
+        to_segment_index: Optional[int],
+        start_heading_deg: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Baut nachtraeglich eine Anfahrt an den Anfang eines Segments.
+
+        Dieselbe Konstruktion wie beim Zusammenstellen der Route, nur zur
+        Laufzeit: Steht das Fahrzeug nach einem Abbruch oder nach einem
+        Ausrichtbogen neben seiner Bahn, ist der Bahnregler das falsche
+        Werkzeug. Er zieht seitlich heran, statt zu rangieren - und mit 0,8 m
+        Vorausschau ist das aus knapp zwei Metern Versatz ein zaeher Fall
+        (real 27.08., seg=0: der Ausrichtbogen drehte sauber ein und schob
+        dabei den Versatz von 1,51 auf 1,83 m).
+
+        Der Ankunftskurs wird ausdruecklich vorgegeben, damit das Fahrzeug in
+        Bahnrichtung ankommt und nicht quer. Genau daran ist der frueher hier
+        versuchte Weg gescheitert - siehe den Kommentar an der Kompilierstelle.
+
+        Gibt None zurueck, wenn sich kein sicherer Weg bauen laesst; dann
+        bleibt es beim gemeldeten Fehler.
+        """
+        if not target_coords:
+            return None
+        runtime_router = self._runtime_transition_router(plan or {})
+        if runtime_router is None:
+            return None
+        try:
+            return self._routed_positioning_segment(
+                runtime_router,
+                from_coord,
+                target_coords[0],
+                source_type="mow",
+                to_segment_index=to_segment_index,
+                start_heading_deg=start_heading_deg,
+                arrival_heading_deg=self._segment_entry_heading(
+                    target_coords, direction
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - lieber melden als raten
+            self.logger.warning(
+                "Anfahrt zum Segment liess sich nicht bauen: %s", exc
+            )
+            return None
+
     def _routed_positioning_segment(
         self,
         runtime_router,

@@ -50,6 +50,7 @@ class WebServer:
         'stopping',       # beendet gerade
         'shutdown',       # Dienst faehrt herunter
         'cleared',        # Wegpunkte geleert
+        'repositioning',  # rangiert an den Bahnanfang - Normalbetrieb
     })
 
     # Diese Zustaende meldet der Safety-Monitor selbst, mit der echten Ursache.
@@ -1664,11 +1665,25 @@ class WebServer:
                         'length_m': segment.get('length_m', 0.0),
                     },
                 )
-                self.navigation.set_waypoints(waypoints, mode=mode, direction=direction)
-                if not self.navigation.start():
-                    raise RuntimeError(self.navigation.get_status().get('last_error') or 'Navigation konnte nicht starten')
-                if not self._wait_for_navigation_segment(nogo_monitor):
-                    return
+                versuche = 0
+                while True:
+                    self.navigation.set_waypoints(waypoints, mode=mode, direction=direction)
+                    if not self.navigation.start():
+                        raise RuntimeError(self.navigation.get_status().get('last_error') or 'Navigation konnte nicht starten')
+                    if self._wait_for_navigation_segment(nogo_monitor):
+                        break
+                    with self._plan_lock:
+                        zustand = self._plan_status.get('state')
+                    if (
+                        zustand not in self.PLAN_REPOSITION_STATES
+                        or versuche >= self.PLAN_REPOSITION_ATTEMPTS
+                    ):
+                        return
+                    versuche += 1
+                    if not self._reposition_to_segment(
+                        segment, plan, nogo_monitor, versuche
+                    ):
+                        return
             if self._active_plan_map_name:
                 self._delete_resume_state(self._active_plan_map_name)
             self.stop_mower(reason='plan_completed')
@@ -1678,6 +1693,81 @@ class WebServer:
             if self.navigation:
                 self.navigation.stop(reason='plan_error')
             self._set_plan_status(running=False, state='error', last_error=str(exc))
+
+    # Fehler, die eine falsche Stellung beschreiben, keinen Defekt. Dafuer
+    # gibt es ein Manoever - erst rangieren, dann melden.
+    PLAN_REPOSITION_STATES = frozenset({'cross_track_stop', 'heading_block'})
+    # Danach uebernimmt der Mensch. Ohne Grenze wuerde ein Fahrzeug, das den
+    # Bahnanfang nicht erreicht, endlos hin und her setzen.
+    PLAN_REPOSITION_ATTEMPTS = 2
+
+    def _reposition_to_segment(self, segment, plan, nogo_monitor, versuch):
+        """Faehrt eine frisch geroutete Anfahrt an den Anfang des Segments.
+
+        Aufgerufen, wenn die Bahnverfolgung gemeldet hat, dass sie die Bahn
+        nicht erreicht. Der Bahnregler kann seitlich heranziehen, aber nicht
+        rangieren; die Wegplanung kann beides und kennt die Sperrzonen.
+        """
+        if not self.mapping or not self.navigation:
+            return False
+        coords = segment.get('coordinates') or []
+        pose = self.can.get_sensor_data() or {}
+        gps = pose.get('gps') or {}
+        lat = gps.get('lat')
+        lon = gps.get('lon')
+        if lat is None or lon is None or not coords:
+            return False
+
+        anfahrt = self.mapping.plans.approach_segment_from_pose(
+            plan or {},
+            [float(lon), float(lat)],
+            coords,
+            direction=segment.get('direction', 'forward'),
+            to_segment_index=segment.get('source_index'),
+            start_heading_deg=pose.get('heading'),
+        )
+        weg = [
+            {'longitude': coord[0], 'latitude': coord[1]}
+            for coord in ((anfahrt or {}).get('coordinates') or [])
+        ]
+        if len(weg) < 2:
+            self.logger.warning(
+                'Kein Rangierweg zum Bahnanfang konstruierbar - Fehler bleibt stehen'
+            )
+            return False
+
+        self.logger.warning(
+            '↩️ Rangieren zum Bahnanfang (Versuch %d/%d): %s, %.2f m',
+            versuch,
+            self.PLAN_REPOSITION_ATTEMPTS,
+            anfahrt.get('direction', 'forward'),
+            float(anfahrt.get('length_m') or 0.0),
+        )
+        self._set_plan_status(
+            running=True,
+            state='repositioning',
+            last_error=None,
+            current_segment={
+                'type': 'positioning',
+                'source_type': segment.get('type'),
+                'source_index': segment.get('source_index'),
+                'mode': anfahrt.get('mode', 'track'),
+                'direction': anfahrt.get('direction', 'forward'),
+                'route_kind': 'reposition',
+                'length_m': anfahrt.get('length_m', 0.0),
+            },
+        )
+        self.navigation.set_waypoints(
+            weg,
+            mode=anfahrt.get('mode', 'track'),
+            direction=anfahrt.get('direction', 'forward'),
+        )
+        if not self.navigation.start():
+            return False
+        if not self._wait_for_navigation_segment(nogo_monitor):
+            return False
+        self._set_plan_status(running=True, state='running', last_error=None)
+        return True
 
     def _wait_for_navigation_segment(self, nogo_monitor=None):
         while not self._plan_stop_event.is_set():
