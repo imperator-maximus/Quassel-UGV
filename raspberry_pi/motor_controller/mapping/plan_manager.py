@@ -1733,6 +1733,95 @@ class MowingPlanManager:
             )
             return None
 
+    # Wie nah die Nase nach dem Drehen am Zielkurs stehen soll. Deutlich unter
+    # der Winkelsperre des Reglers (45°), damit der naechste Zug nicht am
+    # Rand ihrer Toleranz anlaeuft.
+    TURN_ALIGN_TOLERANCE_DEG = 20.0
+
+    def turn_legs_from_pose(
+        self,
+        plan: Dict[str, Any],
+        from_coord: List[float],
+        start_heading_deg: Optional[float],
+        target_heading_deg: Optional[float],
+        tolerance_deg: Optional[float] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Dreht die Nase auf einen Kurs - mehr nicht.
+
+        Das vorhandene Rangiermanoever (``_shunt_transfer``) dreht *und* faehrt
+        anschliessend den Bahnanfang an. Genau daran scheitert es, wenn das
+        Fahrzeug schon auf dem Bahnanfang steht und nur verdreht ist: Jeder Zug
+        faehrt von diesem Punkt weg, danach liegt er hinter dem Fahrzeug, und
+        der Abschlusszug muss ihn nach vorn treffen. Am 27.08. um 23:15 Uhr
+        waren alle sechs Zuege in allen vier Drehvarianten sicher und fahrbar -
+        und kein einziger Abschluss kam zustande (nachgerechnet mit dem echten
+        Plan Brunnen, Anlaufwinkel des Abschlusses 157°).
+
+        Hier wird deshalb nur gedreht, in denselben geprueften Zuegen: 45° auf
+        4 m Radius, abwechselnd vor und zurueck, jeder Zug gegen Rand und
+        Sperrzonen geprueft. Steht die Nase richtig, baut der Aufrufer seine
+        Anfahrt neu - aus der neuen Pose ist sie dann fahrbar.
+
+        Gibt ``None`` zurueck, wenn sich kein sicherer Zug bauen laesst, und
+        eine leere Liste, wenn schon nichts mehr zu drehen ist.
+        """
+        if start_heading_deg is None or target_heading_deg is None:
+            return None
+        toleranz = float(
+            self.TURN_ALIGN_TOLERANCE_DEG if tolerance_deg is None else tolerance_deg
+        )
+        if self._angle_error_deg(
+            float(target_heading_deg), float(start_heading_deg)
+        ) <= toleranz:
+            return []
+        runtime_router = self._runtime_transition_router(plan or {})
+        if runtime_router is None:
+            return None
+
+        radius_m, turn_deg = self.APPROACH_TURN_ARCS[0]
+        best = None
+        for rotate_left in (True, False):
+            for first_reverse in (False, True):
+                legs: List[Dict[str, Any]] = []
+                position = list(from_coord)
+                heading = float(start_heading_deg)
+                reverse = first_reverse
+                for _ in range(self.MAX_SHUNT_LEGS):
+                    coords, turned = self._shunt_leg_coords(
+                        position, heading, turn_deg, radius_m, rotate_left, reverse,
+                    )
+                    if len(coords) < 2 or not runtime_router.is_polyline_safe(coords):
+                        break
+                    leg = {
+                        "type": "transition",
+                        "source_index": None,
+                        "mode": "track",
+                        "direction": "reverse" if reverse else "forward",
+                        "route_kind": "align_turn",
+                        "coordinates": coords,
+                        "length_m": round(self._polyline_length_m(coords), 2),
+                    }
+                    if self._blocks_on_heading(leg, heading):
+                        break
+                    legs.append(leg)
+                    position = list(coords[-1])
+                    heading = turned
+                    reverse = not reverse
+                    if self._angle_error_deg(
+                        heading, float(target_heading_deg)
+                    ) <= toleranz:
+                        # Kurz vor lang: Jeder Zug kostet Weg und Zeit, und
+                        # ueber die Ausrichtung entscheidet ohnehin erst die
+                        # neu gebaute Anfahrt danach.
+                        rank = (
+                            len(legs),
+                            round(sum(item["length_m"] for item in legs), 2),
+                        )
+                        if best is None or rank < best[0]:
+                            best = (rank, [dict(item) for item in legs])
+                        break
+        return None if best is None else best[1]
+
     def _routed_positioning_segment(
         self,
         runtime_router,
@@ -2374,6 +2463,15 @@ class MowingPlanManager:
             if best is None or rank < best[0]:
                 best = (rank, coords)
         return None if best is None else best[1]
+
+    @classmethod
+    def segment_entry_heading(cls, coords, direction):
+        """Kurs, den die Nase am Anfang dieses Weges haben muss.
+
+        Oeffentlich, weil die Planausfuehrung ihn braucht: Sie dreht das
+        Fahrzeug auf diesen Kurs, bevor sie den Weg fahren laesst.
+        """
+        return cls._segment_entry_heading(coords, direction)
 
     @classmethod
     def _segment_entry_heading(

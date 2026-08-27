@@ -1717,11 +1717,13 @@ class WebServer:
     # gibt es ein Manoever - erst rangieren, dann melden.
     PLAN_REPOSITION_STATES = frozenset({'cross_track_stop', 'heading_block'})
     # Danach uebernimmt der Mensch. Ohne Grenze wuerde ein Fahrzeug, das den
-    # Bahnanfang nicht erreicht, endlos hin und her setzen.
-    PLAN_REPOSITION_ATTEMPTS = 2
+    # Bahnanfang nicht erreicht, endlos hin und her setzen. Drei statt zwei,
+    # seit ein Anlauf auch nur die Nase drehen kann: Dann ist der erste das
+    # Drehen und erst der zweite die Anfahrt.
+    PLAN_REPOSITION_ATTEMPTS = 3
 
     def _reposition_to_segment(self, segment, plan, nogo_monitor, versuch):
-        """Faehrt eine frisch geroutete Anfahrt an den Anfang des Segments.
+        """Bringt das Fahrzeug an den Anfang des Segments - notfalls rangierend.
 
         Aufgerufen, wenn die Bahnverfolgung gemeldet hat, dass sie die Bahn
         nicht erreicht. Der Bahnregler kann seitlich heranziehen, aber nicht
@@ -1737,56 +1739,158 @@ class WebServer:
         if lat is None or lon is None or not coords:
             return False
 
-        anfahrt = self.mapping.plans.approach_segment_from_pose(
-            plan or {},
-            [float(lon), float(lat)],
-            coords,
-            direction=segment.get('direction', 'forward'),
-            to_segment_index=segment.get('source_index'),
-            start_heading_deg=pose.get('heading'),
+        zuege = self._reposition_legs(
+            segment, plan, [float(lon), float(lat)], pose.get('heading')
         )
-        weg = [
-            {'longitude': coord[0], 'latitude': coord[1]}
-            for coord in ((anfahrt or {}).get('coordinates') or [])
-        ]
-        if len(weg) < 2:
+        if not zuege:
             self.logger.warning(
                 'Kein Rangierweg zum Bahnanfang konstruierbar - Fehler bleibt stehen'
             )
             return False
 
         self.logger.warning(
-            '↩️ Rangieren zum Bahnanfang (Versuch %d/%d): %s, %.2f m',
+            '↩️ Rangieren zum Bahnanfang (Versuch %d/%d): %d Zug/Zuege, %s',
             versuch,
             self.PLAN_REPOSITION_ATTEMPTS,
-            anfahrt.get('direction', 'forward'),
-            float(anfahrt.get('length_m') or 0.0),
+            len(zuege),
+            ', '.join(
+                f"{zug.get('direction', 'forward')} {float(zug.get('length_m') or 0.0):.2f} m"
+                for zug in zuege
+            ),
         )
-        self._set_plan_status(
-            running=True,
-            state='repositioning',
-            last_error=None,
-            current_segment={
-                'type': 'positioning',
-                'source_type': segment.get('type'),
-                'source_index': segment.get('source_index'),
-                'mode': anfahrt.get('mode', 'track'),
-                'direction': anfahrt.get('direction', 'forward'),
-                'route_kind': 'reposition',
-                'length_m': anfahrt.get('length_m', 0.0),
-            },
-        )
-        self.navigation.set_waypoints(
-            weg,
-            mode=anfahrt.get('mode', 'track'),
-            direction=anfahrt.get('direction', 'forward'),
-        )
-        if not self.navigation.start():
-            return False
-        if not self._wait_for_navigation_segment(nogo_monitor):
-            return False
+        for nummer, zug in enumerate(zuege, start=1):
+            weg = [
+                {'longitude': coord[0], 'latitude': coord[1]}
+                for coord in (zug.get('coordinates') or [])
+            ]
+            if len(weg) < 2:
+                return False
+            self._set_plan_status(
+                running=True,
+                state='repositioning',
+                last_error=None,
+                current_segment={
+                    'type': 'positioning',
+                    'source_type': segment.get('type'),
+                    'source_index': segment.get('source_index'),
+                    'mode': zug.get('mode', 'track'),
+                    'direction': zug.get('direction', 'forward'),
+                    'route_kind': zug.get('route_kind', 'reposition'),
+                    'length_m': zug.get('length_m', 0.0),
+                    'leg': nummer,
+                    'legs': len(zuege),
+                },
+            )
+            self.navigation.set_waypoints(
+                weg,
+                mode=zug.get('mode', 'track'),
+                direction=zug.get('direction', 'forward'),
+            )
+            if not self.navigation.start():
+                return False
+            if not self._wait_for_navigation_segment(nogo_monitor):
+                return False
         self._set_plan_status(running=True, state='running', last_error=None)
         return True
+
+    def _reposition_legs(self, segment, plan, from_coord, heading_deg):
+        """Waehlt zwischen gerader Anfahrt und Wendemanoever.
+
+        Die Anfahrt ist der Regelfall: Steht das Fahrzeug neben seiner Bahn,
+        faehrt es hin. Sie kann aber keine Nase drehen - und genau das war am
+        27.08. um 23:15 Uhr das Problem: Das Fahrzeug stand auf dem
+        Bahnanfang, nur um 160° verdreht, und bekam zweimal eine gerade
+        Anfahrt (3,24 m und 0,38 m), die der Regler nach je drei Posen wieder
+        sperrte. Gedreht hat sich dabei nichts.
+
+        Deshalb wird hier vorher gerechnet, ob die gebaute Anfahrt ueberhaupt
+        angefahren werden kann. Sperrt der Regler schon ihren Anfang, ist sie
+        wertlos, und es uebernimmt das Rangieren - vor und zurueck, bis die
+        Nase passt.
+        """
+        anfahrt = self.mapping.plans.approach_segment_from_pose(
+            plan or {},
+            list(from_coord),
+            segment.get('coordinates') or [],
+            direction=segment.get('direction', 'forward'),
+            to_segment_index=segment.get('source_index'),
+            start_heading_deg=heading_deg,
+        )
+        if self._approach_is_usable(anfahrt, heading_deg):
+            return [anfahrt]
+
+        # Gedreht wird auf den Kurs, den der naechste Weg verlangt: die eben
+        # gebaute Anfahrt, wenn es eine gibt - sonst das Segment selbst. Steht
+        # das Fahrzeug schon auf dessen Anfang, laesst sich naemlich gar keine
+        # Anfahrt bauen: Sie fuehrt von diesem Punkt zu diesem Punkt. Genau das
+        # kam am 27.08. um 23:15 Uhr als 0,38-m-Weg heraus.
+        naechster = anfahrt if self._has_length(anfahrt) else segment
+        ziel = self.mapping.plans.segment_entry_heading(
+            naechster.get('coordinates') or [],
+            naechster.get('direction', 'forward'),
+        )
+        manoever = self.mapping.plans.turn_legs_from_pose(
+            plan or {}, list(from_coord), heading_deg, ziel
+        )
+        if manoever:
+            return list(manoever)
+        if anfahrt:
+            # Ohne Manoever bleibt nur die Anfahrt, von der wir wissen, dass
+            # der Regler sie sperrt. Sie trotzdem zu fahren hiesse, denselben
+            # Abbruch noch einmal zu erzeugen - der Fehler ist ehrlicher.
+            self.logger.warning(
+                'Anfahrt zum Bahnanfang liegt hinter der Winkelsperre und '
+                'kein Wendemanoever ist konstruierbar'
+            )
+        return []
+
+    # Kuerzer ist kein Weg, sondern der Standpunkt selbst. Am 27.08. um 23:15
+    # Uhr kamen so 0,38 m und 0,00 m heraus, weil das Fahrzeug auf dem
+    # Bahnanfang stand: Beide wurden als Rangierweg gefahren, beide aenderten
+    # nichts, und danach stand der Plan.
+    MIN_REPOSITION_LEG_M = 0.5
+
+    def _has_length(self, weg):
+        return bool(
+            weg
+            and len(weg.get('coordinates') or []) >= 2
+            and float(weg.get('length_m') or 0.0) >= self.MIN_REPOSITION_LEG_M
+        )
+
+    def _approach_is_usable(self, anfahrt, heading_deg):
+        """Taugt diese Anfahrt ueberhaupt als Rangierweg?"""
+        if not anfahrt:
+            return False
+        if len(anfahrt.get('coordinates') or []) < 2:
+            return False
+        if float(anfahrt.get('length_m') or 0.0) < self.MIN_REPOSITION_LEG_M:
+            return False
+        return not self._leg_starts_blocked(anfahrt, heading_deg)
+
+    def _leg_starts_blocked(self, leg, heading_deg):
+        """Sperrt der Regler diesen Zug schon an seinem Anfang?
+
+        Dieselbe Groesse, die ``_heading_block_findings`` fuer den ganzen Plan
+        rechnet - hier fuer einen einzelnen Zug, bevor er gefahren wird.
+        """
+        if heading_deg is None or not self.navigation:
+            return False
+        coords = leg.get('coordinates') or []
+        if len(coords) < 2 or leg.get('mode') != 'track':
+            return False
+        try:
+            limits = (self.navigation.get_status() or {}).get('limits') or {}
+            block_deg = float(limits['track_heading_block_deg'])
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
+        lookahead_m = float(getattr(self.navigation.config, 'track_lookahead_m', 0.8))
+        error = NavigationController.track_start_heading_error_deg(
+            coords,
+            float(heading_deg),
+            direction=leg.get('direction', 'forward'),
+            lookahead_m=lookahead_m,
+        )
+        return error is not None and abs(error) >= block_deg
 
     def _wait_for_navigation_segment(self, nogo_monitor=None):
         while not self._plan_stop_event.is_set():
