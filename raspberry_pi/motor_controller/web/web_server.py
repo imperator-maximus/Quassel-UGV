@@ -151,6 +151,10 @@ class WebServer:
         # ODrive-USB-Haenger). Beim ersten Statusabruf wird deshalb aus dem
         # gespeicherten Wiederaufsetzpunkt nachgetragen, was zuletzt war.
         self._stop_reason_restored = False
+        # Anlaeufe des automatischen Fortsetzens nach einem USB-Haenger, und
+        # der Bahnindex, ab dem wieder Fortschritt zaehlt.
+        self._auto_resume_count = 0
+        self._auto_resume_anchor_index = None
 
         # Statusuebertragung als Differenz. Der Grundstand ist der zuletzt
         # gesendete Status; die laufende Nummer laesst den Browser merken,
@@ -1420,9 +1424,9 @@ class WebServer:
             return {'success': False, 'error': 'Pausierter Plan wird noch beendet'}
         return self.resume_plan_execution(map_name)
 
-    def pause_plan_execution(self, reason='paused'):
+    def pause_plan_execution(self, reason='paused', detail=None):
         self._plan_pause_event.set()
-        self._save_resume_state(reason=reason)
+        self._save_resume_state(reason=reason, detail=detail)
         with self._plan_lock:
             previous_state = self._plan_status.get('state')
             was_running = bool(self._plan_status.get('running'))
@@ -1826,12 +1830,173 @@ class WebServer:
     def _check_nogo(self, monitor):
         return monitor.check_pose(self.can.get_sensor_data())
 
+    # Kennzeichen des bekannten Haengers im gespeicherten Klartext. Nur dieser
+    # eine Fall laeuft automatisch wieder an.
+    USB_STALL_MARKER = 'ODrive USB haengt'
+
+    def _maybe_auto_resume_after_usb_stall(self):
+        """Setzt nach einem haengenden USB-Aufruf von allein fort.
+
+        Der Haenger ist bekannt und harmlos: ``libfibre`` blockiert seinen
+        Thread ohne Zeitgrenze, der Prozess beendet sich deshalb selbst und
+        systemd startet neu. Danach stand das Fahrzeug bisher mitten auf der
+        Wiese und wartete auf einen Menschen - bei einem Fehler, der
+        regelmaessig auftritt und mit dem Maehen nichts zu tun hat.
+
+        Automatisch angelaufen wird ausschliesslich dieser eine Fall. Jeder
+        andere Sicherheitsstopp hat eine andere Ursache und wartet weiter.
+        """
+        if not bool(getattr(self.config, 'auto_resume_after_usb_stall', True)):
+            return
+        map_name = self._active_plan_map_name
+        if not map_name:
+            return
+        resume = self._load_resume_state(map_name) or {}
+        if self.USB_STALL_MARKER not in str(resume.get('detail') or ''):
+            return
+
+        versuche = int(resume.get('auto_resume_count') or 0)
+        grenze = int(getattr(self.config, 'auto_resume_max_attempts', 3) or 3)
+        if versuche >= grenze:
+            # Haengt der Transport wirklich fest, waere die Kette sonst
+            # Neustart, Messer an, Haenger, Neustart - ohne Ende.
+            self.logger.error(
+                "Kein automatischer Anlauf mehr: %d Versuche ohne Fortschritt",
+                versuche,
+            )
+            self._notify_auto_resume(
+                'fault',
+                'UGV: Fahrt laeuft nicht mehr von allein an',
+                f'Nach {versuche} Anlaeufen ohne Fortschritt wartet das '
+                f'Fahrzeug auf dich.',
+            )
+            return
+
+        self._auto_resume_count = versuche + 1
+        self._auto_resume_anchor_index = int(resume.get('active_index') or 0)
+        thread = threading.Thread(
+            target=self._auto_resume_worker,
+            args=(map_name, resume),
+            daemon=True,
+        )
+        thread.start()
+
+    def _auto_resume_worker(self, map_name, resume):
+        """Wartet auf gesunde Verhaeltnisse und faehrt dann weiter."""
+        gesund, hindernis = self._wait_for_healthy_restart()
+        if not gesund:
+            self.logger.warning("Automatischer Anlauf abgebrochen: %s", hindernis)
+            self._notify_auto_resume(
+                'fault',
+                'UGV: Fahrt konnte nicht von allein anlaufen',
+                f'{hindernis} - das Fahrzeug wartet auf dich.',
+            )
+            return
+
+        rpm = int(resume.get('mower_rpm') or 0)
+        if (
+            resume.get('mower_running')
+            and rpm > 0
+            and self.odrive_mower
+            and self.odrive_mower.enabled
+        ):
+            status = self.odrive_mower.start(rpm)
+            if not status.get('success', True):
+                self.logger.error(
+                    "Maehdeck laeuft nicht wieder an: %s", status.get('error')
+                )
+                self._notify_auto_resume(
+                    'fault',
+                    'UGV: Maehdeck laeuft nicht wieder an',
+                    f"{status.get('error') or 'unbekannter Fehler'} - das "
+                    f"Fahrzeug wartet auf dich.",
+                )
+                return
+            self.mower_state = bool(status.get('running'))
+
+        ergebnis = self.resume_plan_execution(map_name)
+        if not ergebnis.get('success'):
+            self.logger.error(
+                "Automatische Fortsetzung fehlgeschlagen: %s",
+                ergebnis.get('error'),
+            )
+            self._notify_auto_resume(
+                'fault',
+                'UGV: Fahrt konnte nicht von allein anlaufen',
+                f"{ergebnis.get('error') or 'unbekannter Fehler'} - das "
+                f"Fahrzeug wartet auf dich.",
+            )
+            return
+
+        self.logger.info(
+            "Fahrt nach USB-Haenger automatisch fortgesetzt (Versuch %d)",
+            self._auto_resume_count,
+        )
+        self._notify_auto_resume(
+            'recovery',
+            'UGV: Fahrt laeuft wieder',
+            f'Nach einem USB-Haenger am Maehdeck automatisch fortgesetzt '
+            f'(Anlauf {self._auto_resume_count}), Maehdeck bei {rpm} U/min.',
+        )
+
+    def _wait_for_healthy_restart(self):
+        """Wartet, bis Pose, RTK und ODrive einen Anlauf erlauben."""
+        frist_s = float(
+            getattr(self.config, 'auto_resume_health_timeout_s', 120.0) or 120.0
+        )
+        ende = time.monotonic() + frist_s
+        hindernis = 'Zustand nach dem Neustart unklar'
+        while time.monotonic() < ende and self.running:
+            hindernis = self._restart_health_problem()
+            if hindernis is None:
+                return True, None
+            time.sleep(2.0)
+        return False, hindernis
+
+    def _restart_health_problem(self):
+        """Was einem Anlauf gerade entgegensteht, oder None."""
+        try:
+            if self.safety:
+                safety = self.safety.get_status()
+                if safety.get('system_stop_latched'):
+                    return 'Sicherheitsstopp verriegelt'
+                if safety.get('motion_hold_active'):
+                    return 'Fahrpause aktiv'
+            status = self._can_api_status()
+            if not status.get('sensor_hub', {}).get('online'):
+                return 'SensorHub ohne Telemetrie'
+            odrives = status.get('odrives', {})
+            fehlerhafte = sorted(
+                str(node)
+                for node, wert in (odrives.get('nodes') or {}).items()
+                if wert.get('error')
+            )
+            if fehlerhafte:
+                return f"ODrive-Fehler an Knoten {', '.join(fehlerhafte)}"
+            if not odrives.get('all_online', True):
+                return 'ODrive nicht vollstaendig online'
+            rtk = str((self.can.get_sensor_data() or {}).get('rtk_status') or '')
+            if 'FIX' not in rtk.upper():
+                return f"RTK nicht fix ({rtk or 'unbekannt'})"
+        except Exception as exc:  # noqa: BLE001 - lieber warten als anlaufen
+            return f'Zustand nicht lesbar: {exc}'
+        return None
+
+    def _notify_auto_resume(self, method, title, message):
+        """Meldet jeden Anlauf - er passiert, ohne dass jemand hingesehen hat."""
+        if not self.notifier:
+            return
+        try:
+            getattr(self.notifier, method)('auto_resume', title, message)
+        except Exception as exc:  # noqa: BLE001 - Melden ist Nebensache
+            self.logger.error('Push-Meldung zum Anlauf fehlgeschlagen: %s', exc)
+
     def _resume_path(self, map_name):
         if not self.mapping:
             return None
         return self.mapping.plans.plans_dir / f"{self.mapping.plans._sanitize_name(map_name)}.resume.json"
 
-    def _save_resume_state(self, reason='running'):
+    def _save_resume_state(self, reason='running', detail=None):
         with self._resume_lock:
             now = time.time()
             if reason == 'running' and now - self._last_resume_save < 2.0:
@@ -1854,10 +2019,27 @@ class WebServer:
                     if segment.get('source_index') is not None:
                         source_index = segment.get('source_index')
                         break
+            # Fortschritt setzt die Anlaufbremse zurueck: Wer eine Bahn
+            # weiter gekommen ist, hat gemaeht und nicht nur neu gestartet.
+            if (
+                self._auto_resume_anchor_index is not None
+                and active_index > self._auto_resume_anchor_index
+            ):
+                self._auto_resume_count = 0
+                self._auto_resume_anchor_index = None
             payload = {
                 'schema': 'raspberrycan.mowing_resume.v2',
                 'map_name': map_name,
                 'reason': reason,
+                # Der Klartext des Stopps. 'safety_stop' allein sagt nicht, ob
+                # ein bekannter USB-Haenger oder etwas Ernstes dahinter steckt.
+                'detail': str(detail) if detail else None,
+                # Damit das Maehdeck mit derselben Drehzahl wieder anlaeuft.
+                # Beides sind einfache Attribute ohne USB-Zugriff - an dieser
+                # Stelle haengt der Transport moeglicherweise gerade.
+                'mower_rpm': int(getattr(self.odrive_mower, 'commanded_rpm', 0) or 0),
+                'mower_running': bool(self.mower_state),
+                'auto_resume_count': int(self._auto_resume_count),
                 'timestamp': time.time(),
                 'active_index': active_index,
                 'source_segment_index': source_index,
@@ -2319,6 +2501,7 @@ class WebServer:
         # Wiederaufsetzpunkt bedeutet, dass die letzte Fahrt abgebrochen ist.
         # Genau das soll die Push-Meldung ja mitteilen.
         self._restore_last_stop_reason()
+        self._maybe_auto_resume_after_usb_stall()
         self.server_thread = threading.Thread(target=self._run_server, daemon=True)
         self.server_thread.start()
 

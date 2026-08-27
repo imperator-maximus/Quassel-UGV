@@ -492,7 +492,13 @@ class MotorControllerApp:
         self.logger.critical("🛑 Gesamtsystem wird gestoppt: %s", reason)
         if self.web:
             try:
-                self.web.pause_plan_execution(reason='safety_stop')
+                # Der Klartext entscheidet spaeter, ob automatisch
+                # fortgesetzt werden darf - 'safety_stop' allein sagt
+                # nicht, ob ein USB-Haenger oder etwas Ernstes dahinter
+                # steckt.
+                self.web.pause_plan_execution(
+                    reason='safety_stop', detail=reason
+                )
             except Exception as exc:
                 self.logger.error("Plan-Stopp fehlgeschlagen: %s", exc)
         if self.navigation:

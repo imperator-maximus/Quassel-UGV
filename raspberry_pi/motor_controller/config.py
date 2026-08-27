@@ -357,6 +357,22 @@ class WebConfig:
     # allein sind 90 kB Quelltext, komprimiert etwa ein Fuenftel davon.
     compress_min_bytes: int = 1024
 
+    # Ein haengender USB-Aufruf am Maehdeck ist bekannt und harmlos: Der
+    # Prozess beendet sich, systemd startet neu. Danach stand das Fahrzeug
+    # bisher und wartete auf einen Menschen - bei einem Fehler, der regelmaessig
+    # auftritt und mit dem Maehen nichts zu tun hat.
+    #
+    # Automatisch fortgesetzt wird ausschliesslich dieser Fall. Jeder andere
+    # Sicherheitsstopp hat eine andere Ursache und wartet weiterhin.
+    auto_resume_after_usb_stall: bool = True
+    # Bremse gegen das Endlosdrehen: Ist das Maehdeck wirklich defekt, waere
+    # die Kette sonst Neustart, Messer an, Haenger, Neustart - ohne Ende. Nach
+    # so vielen Anlaeufen ohne Fortschritt uebernimmt wieder der Mensch.
+    auto_resume_max_attempts: int = 3
+    # So lange wird auf gesunde Verhaeltnisse gewartet (Pose, RTK, ODrive),
+    # bevor der Anlauf aufgegeben wird.
+    auto_resume_health_timeout_s: float = 120.0
+
     # Zugangsschutz. Passwort und secret_key gehoeren nicht in die YAML,
     # sondern in UGV_WEB_PASSWORD bzw. UGV_WEB_SECRET_KEY.
     auth_enabled: bool = True

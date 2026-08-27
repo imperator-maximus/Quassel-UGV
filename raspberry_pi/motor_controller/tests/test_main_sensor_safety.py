@@ -269,7 +269,11 @@ class SystemStopWiringTests(unittest.TestCase):
         app = self._app(SimpleNamespace(emergency_stop=lambda reason: blocked.wait(30)))
         app.MOWER_STOP_JOIN_TIMEOUT_S = 0.2
         app.web = SimpleNamespace(
-            pause_plan_execution=lambda reason: calls.append(('plan', reason))
+            # detail traegt den Klartext des Stopps - daran entscheidet sich
+            # spaeter, ob automatisch fortgesetzt werden darf.
+            pause_plan_execution=lambda reason, detail=None: calls.append(
+                ('plan', reason, detail)
+            )
         )
         app.navigation = SimpleNamespace(stop=lambda reason: calls.append(('nav', reason)))
         app.joystick = SimpleNamespace(disable=lambda: calls.append(('joystick',)))
@@ -278,7 +282,7 @@ class SystemStopWiringTests(unittest.TestCase):
         app._system_safety_stop('Maehdeck haengt')
         elapsed = time.monotonic() - started
 
-        self.assertIn(('plan', 'safety_stop'), calls)
+        self.assertIn(('plan', 'safety_stop', 'Maehdeck haengt'), calls)
         self.assertIn(('nav', 'safety_stop'), calls)
         self.assertIn(('joystick',), calls)
         # Der Safety-Watchdog ruft diesen Pfad; blockiert er hier, ueberwacht
@@ -322,7 +326,9 @@ class DeadMowerStopsVehicleTests(unittest.TestCase):
         app.odrive_mower = mower
         app.can = FakeCan(sensor_online=True)
         app.web = SimpleNamespace(
-            pause_plan_execution=lambda reason: stopped.append(('plan', reason)),
+            pause_plan_execution=lambda reason, detail=None: stopped.append(
+                ('plan', reason, detail)
+            ),
             get_plan_execution_status=lambda: {'running': True},
         )
         app.navigation = SimpleNamespace(
@@ -348,7 +354,10 @@ class DeadMowerStopsVehicleTests(unittest.TestCase):
 
         self.assertFalse(safety.is_motion_allowed(), 'Bewegung blieb freigegeben')
         self.assertIn('Kommandoschleife', safety.get_status()['system_stop_reason'])
-        self.assertIn(('plan', 'safety_stop'), stopped)
+        plan_stops = [eintrag for eintrag in stopped if eintrag[0] == 'plan']
+        self.assertEqual(len(plan_stops), 1)
+        self.assertEqual(plan_stops[0][1], 'safety_stop')
+        self.assertTrue(plan_stops[0][2], 'Der Klartext des Stopps fehlt')
         self.assertIn(('nav', 'safety_stop'), stopped)
         self.assertIn(('joystick',), stopped)
 
