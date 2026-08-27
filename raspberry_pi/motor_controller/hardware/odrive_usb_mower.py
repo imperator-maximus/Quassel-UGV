@@ -54,6 +54,13 @@ class ODriveUSBMowerController(ODriveMowerController):
         self._last_connect_attempt = {serial: 0.0 for serial in set(self._axis_serials.values())}
         self._idle_poll_index = 0
         self._watchdog_cleanup_pending = False
+        # Die Nachbereitung laeuft bei jedem Umlauf. Scheitert sie an einem
+        # anstehenden Fehler, aendert sich am Grund minutenlang nichts - dann
+        # ist jede weitere Zeile nur Rauschen, das die naechste echte Meldung
+        # begraebt (real 27.08.: zweimal pro Sekunde, ueber eine Stunde).
+        self._letzte_nachbereitungsmeldung = None
+        self._letzte_nachbereitungszeit = 0.0
+        self._NACHBEREITUNG_WIEDERHOLUNG_S = 60.0
         # libfibre dispatches every property access to its own worker thread and
         # then blocks the caller in ``concurrent.futures.Future.result()`` with
         # no timeout. A board that stops answering therefore parks the calling
@@ -421,7 +428,12 @@ class ODriveUSBMowerController(ODriveMowerController):
                 # Eigenschaft ist ein eigener USB-Umlauf, und haengende Aufrufe
                 # sind hier das bekannte Problem. Liegt ein Fehler an, steht das
                 # Deck ohnehin.
-                sample["detail"] = {}
+                # Die Klemmenspannung liegt in dieser Abfrage ohnehin vor
+                # und kostet keinen weiteren USB-Umlauf. Sie steht deshalb bei
+                # jedem Achsfehler dabei: Der Verdacht auf einen
+                # Spannungseinbruch unter Last laesst sich nur mit dem Wert aus
+                # dem Fehleraugenblick pruefen.
+                sample["detail"] = {"vbus": sample.get("vbus")}
                 for name, halter in (
                     ("motor", "motor"),
                     ("sensorless", "sensorless_estimator"),
@@ -444,10 +456,17 @@ class ODriveUSBMowerController(ODriveMowerController):
                     # Ein Funktionsaufruf ueber Fibre ist teurer als eine
                     # Eigenschaft, deshalb nur, wenn der Treiber wirklich
                     # gemeldet hat.
+                    #
                     try:
                         sample["detail"]["drv"] = int(axis.motor.get_drv_fault())
-                    except Exception:
+                    except Exception as exc:
+                        # Verschluckt war das schon einmal: Dann sieht ein
+                        # stilles Register genauso aus wie eine gescheiterte
+                        # Abfrage, und die Frage bleibt offen.
                         sample["detail"]["drv"] = None
+                        sample["detail"]["drv_unlesbar"] = (
+                            str(exc) or exc.__class__.__name__
+                        )
             return sample
 
         sample = self._run_axis_operation(node_id, operation)
@@ -535,10 +554,7 @@ class ODriveUSBMowerController(ODriveMowerController):
             self._set_all_watchdogs(False)
             cleared, error = self.clear_watchdog_errors()
             if not cleared:
-                self.logger.warning(
-                    "ODrive USB-Watchdog-Nachbereitung fehlgeschlagen: %s",
-                    error,
-                )
+                self._melde_nachbereitung(error)
                 return
             with self._lock:
                 self._watchdog_cleanup_pending = False
@@ -547,6 +563,20 @@ class ODriveUSBMowerController(ODriveMowerController):
                 "ODrive USB-Watchdogs nach verzoegertem IDLE nicht bereinigt: %s",
                 exc,
             )
+
+    def _melde_nachbereitung(self, grund) -> None:
+        """Meldet den Grund einmal - und danach erst wieder, wenn er sich aendert."""
+        text = str(grund)
+        jetzt = time.monotonic()
+        neu = text != self._letzte_nachbereitungsmeldung
+        faellig = jetzt - self._letzte_nachbereitungszeit >= self._NACHBEREITUNG_WIEDERHOLUNG_S
+        if not neu and not faellig:
+            return
+        self._letzte_nachbereitungsmeldung = text
+        self._letzte_nachbereitungszeit = jetzt
+        self.logger.warning(
+            "ODrive USB-Watchdog-Nachbereitung fehlgeschlagen: %s", text
+        )
 
     def _schedule_or_run_watchdog_cleanup(self, status) -> None:
         active_nodes = list(status.get('active_axis_nodes') or [])

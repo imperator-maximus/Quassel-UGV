@@ -267,5 +267,119 @@ class ODriveUSBTests(unittest.TestCase):
         self.assertEqual(self.controller.odrive_errors[0], 0)
 
 
+class GateTreiberMeldungTests(unittest.TestCase):
+    """Was der Gate-Treiber gesehen hat - und was die Klemme dabei fuehrte.
+
+    Am 27.08.2026 um 23:52 Uhr fielen beide Achsen eines Boards gleichzeitig
+    mit DRV_FAULT aus. Im Log stand nur der Sammelbegriff: kein Register, keine
+    Spannung. Unterspannung und Ueberstrom sahen damit gleich aus.
+    """
+
+    def setUp(self):
+        self.serial = "386132523135"
+        self.board = FakeBoard(self.serial)
+        self.controller = ODriveUSBMowerController(
+            config_for(self.serial),
+            odrive_module=FakeODriveModule({self.serial: self.board}),
+        )
+        self.controller._connect_serial(self.serial)
+        self.board.axis0.error = 0x40
+        self.board.axis0.motor.error = 0x08
+
+    def test_bei_treiberfehler_kommen_register_und_spannung_mit(self):
+        self.board.vbus_voltage = 21.4
+        self.board.axis0.motor.get_drv_fault = lambda: 0x0100
+
+        self.controller._refresh_node(0)
+
+        self.assertIn("drv=0x00000100", self.controller.last_error)
+        self.assertIn("PVDD_Unterspannung", self.controller.last_error)
+        self.assertIn("vbus=21.40V", self.controller.last_error)
+
+    def test_ein_leeres_register_wird_als_leer_gemeldet(self):
+        self.board.axis0.motor.get_drv_fault = lambda: 0
+
+        self.controller._refresh_node(0)
+
+        self.assertIn("drv=0x00000000", self.controller.last_error)
+        self.assertIn("kein Bit gesetzt", self.controller.last_error)
+
+    def test_eine_gescheiterte_abfrage_wird_nicht_verschluckt(self):
+        def kaputt():
+            raise RuntimeError("Fibre-Aufruf abgebrochen")
+
+        self.board.axis0.motor.get_drv_fault = kaputt
+
+        self.controller._refresh_node(0)
+
+        self.assertIn("drv nicht lesbar: Fibre-Aufruf abgebrochen",
+                      self.controller.last_error)
+
+    def test_ohne_treiberfehler_wird_der_treiber_nicht_gefragt(self):
+        """Jede Abfrage ist ein USB-Umlauf - und haengende Aufrufe sind hier
+        das bekannte Problem."""
+        gefragt = []
+        self.board.axis0.motor.error = 0x1000
+        self.board.axis0.motor.get_drv_fault = lambda: gefragt.append(1) or 0
+
+        self.controller._refresh_node(0)
+
+        self.assertEqual([], gefragt)
+
+    def test_die_spannung_steht_bei_jedem_achsfehler(self):
+        """Sie liegt in derselben Abfrage schon vor und kostet nichts extra."""
+        self.board.vbus_voltage = 22.9
+        self.board.axis0.motor.error = 0x1000
+
+        self.controller._refresh_node(0)
+
+        self.assertIn("vbus=22.90V", self.controller.last_error)
+
+
+class NachbereitungsmeldungTests(unittest.TestCase):
+    """Dieselbe Zeile zweimal pro Sekunde begraebt das naechste Ereignis.
+
+    Nach dem Ausfall vom 27.08. lief das Protokoll ueber eine Stunde mit
+    ``Watchdog-Nachbereitung fehlgeschlagen`` voll, weil der anstehende Fehler
+    sich nicht aendert.
+    """
+
+    def setUp(self):
+        self.serial = "386132523135"
+        self.board = FakeBoard(self.serial)
+        self.controller = ODriveUSBMowerController(
+            config_for(self.serial),
+            odrive_module=FakeODriveModule({self.serial: self.board}),
+        )
+        self.meldungen = []
+        self.controller.logger = SimpleNamespace(
+            warning=lambda text, *args: self.meldungen.append(text % args),
+            info=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+        )
+
+    def test_derselbe_grund_wird_einmal_gemeldet(self):
+        for _ in range(20):
+            self.controller._melde_nachbereitung("Nicht-Watchdog-Fehler aktiv")
+
+        self.assertEqual(1, len(self.meldungen))
+
+    def test_ein_neuer_grund_wird_sofort_gemeldet(self):
+        self.controller._melde_nachbereitung("Nicht-Watchdog-Fehler aktiv")
+        self.controller._melde_nachbereitung("Achse antwortet nicht")
+
+        self.assertEqual(2, len(self.meldungen))
+
+    def test_nach_der_sprechpause_wird_erinnert(self):
+        """Ganz verstummen darf sie nicht - der Zustand haelt ja an."""
+        self.controller._melde_nachbereitung("Nicht-Watchdog-Fehler aktiv")
+        self.controller._letzte_nachbereitungszeit -= (
+            self.controller._NACHBEREITUNG_WIEDERHOLUNG_S + 1.0
+        )
+        self.controller._melde_nachbereitung("Nicht-Watchdog-Fehler aktiv")
+
+        self.assertEqual(2, len(self.meldungen))
+
+
 if __name__ == "__main__":
     unittest.main()

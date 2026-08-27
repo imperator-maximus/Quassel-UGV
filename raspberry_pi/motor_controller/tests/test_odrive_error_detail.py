@@ -60,6 +60,38 @@ class FehlerKlartextTests(unittest.TestCase):
         self.assertIn('drv=0x00008000', text)
 
 
+    def test_ein_leeres_treiberregister_ist_auch_eine_aussage(self):
+        """Am 27.08. um 23:52 Uhr stand DRV_FAULT im Log - ohne Register.
+
+        Ob der Treiber nichts gespeichert hatte oder die Abfrage scheiterte,
+        war nicht zu unterscheiden, weil beides gleich aussah: gar keine
+        Angabe. Die Null gehoert deshalb ins Log.
+        """
+        text = ODriveMowerController._format_error_detail(
+            {'motor': 0x08, 'drv': 0}
+        )
+
+        self.assertIn('drv=0x00000000', text)
+        self.assertIn('kein Bit gesetzt', text)
+
+    def test_eine_gescheiterte_abfrage_wird_benannt(self):
+        text = ODriveMowerController._format_error_detail(
+            {'motor': 0x08, 'drv': None, 'drv_unlesbar': 'Fibre-Aufruf abgebrochen'}
+        )
+
+        self.assertIn('drv nicht lesbar: Fibre-Aufruf abgebrochen', text)
+        self.assertNotIn('drv=0x', text)
+
+    def test_die_klemmenspannung_steht_beim_treiberfehler(self):
+        """Der Unterschied zwischen Spannungseinbruch und Ueberstrom."""
+        text = ODriveMowerController._format_error_detail(
+            {'motor': 0x08, 'drv': 0x0100, 'vbus': 21.44}
+        )
+
+        self.assertIn('vbus=21.44V', text)
+        self.assertIn('PVDD_Unterspannung', text)
+
+
 class HeartbeatMitEinzelheitenTests(unittest.TestCase):
     def _controller(self):
         from types import SimpleNamespace

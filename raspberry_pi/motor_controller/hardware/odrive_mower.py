@@ -1048,16 +1048,29 @@ class ODriveMowerController:
             return ""
         teile = []
         for name, wert in sorted(detail.items()):
-            if not wert:
-                continue
             if name == "drv":
+                # Auch die Null gehoert ins Log. Sie ist eine Aussage - der
+                # Treiber hat gemeldet, sein Register steht aber leer - und sah
+                # bisher genauso aus wie eine Abfrage, die es nie gab.
+                if wert is None:
+                    continue
                 namen = [
                     bezeichnung
                     for bit, bezeichnung in DRV_FAULT_BITS
                     if wert & bit
                 ]
-                klartext = f" [{', '.join(namen)}]" if namen else ""
+                klartext = f" [{', '.join(namen)}]" if namen else " [kein Bit gesetzt]"
                 teile.append(f"drv=0x{wert:08X}{klartext}")
+                continue
+            if not wert:
+                continue
+            if name == "drv_unlesbar":
+                teile.append(f"drv nicht lesbar: {wert}")
+            elif name == "vbus":
+                # Die Klemmenspannung im Fehleraugenblick. Bricht sie ein,
+                # meldet der Gate-Treiber Unterspannung; ohne den Wert daneben
+                # ist das von einem mechanischen Ueberstrom nicht zu trennen.
+                teile.append(f"vbus={float(wert):.2f}V")
             else:
                 teile.append(f"{name}=0x{wert:08X}")
         return f" ({', '.join(teile)})" if teile else ""
