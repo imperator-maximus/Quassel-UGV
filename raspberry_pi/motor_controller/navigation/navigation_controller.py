@@ -597,7 +597,17 @@ class NavigationController:
             self.stop(reason='cross_track_stop')
             self._set_error(message)
             return
-        if cross_track_m > cross_track_limit:
+        if self._track_aligning:
+            # Waehrend des Ausrichtbogens waechst der Seitenversatz zwangs-
+            # laeufig: Das Fahrzeug tauscht bewusst Abstand gegen Winkel und
+            # faehrt dabei vorwaerts. Am 27.08. lief die Uhr hier schon mit -
+            # als das Ausrichten fertig war und die Annaeherung haette
+            # beginnen koennen, waren die zehn Sekunden abgelaufen, und der
+            # Plan stoppte, ohne sie je versucht zu haben (seg=0, 1,51 -> 1,83 m,
+            # Winkel 35° -> 5°). Das Ausrichten hat seinen eigenen Wächter.
+            self._cross_track_since = None
+            self._cross_track_best_m = None
+        elif cross_track_m > cross_track_limit:
             # Eigene Uhr, bewusst nicht ``now``: Der Parameter traegt die
             # Zeitbasis fuer alles Weitere in dieser Methode.
             jetzt = time.monotonic()

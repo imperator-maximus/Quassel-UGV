@@ -582,6 +582,33 @@ class NavigationControllerTests(unittest.TestCase):
             'heading_deg': 90.0,
         }
 
+    def test_waehrend_des_ausrichtens_laeuft_die_uhr_nicht(self):
+        """Der Ausrichtbogen vergroessert den Seitenversatz mit Absicht: Das
+        Fahrzeug tauscht Abstand gegen Winkel. Am 27.08. lief die Uhr dabei
+        schon mit, und als die Annaeherung haette beginnen koennen, war die
+        Frist abgelaufen - der Plan stoppte, ohne sie je zu versuchen."""
+        controller = self._bahnregler(
+            track_cross_track_limit_m=0.75, track_cross_track_recover_s=1.0
+        )
+        try:
+            # 2 m neben der Bahn, Kurs 15° daneben: ueber der Ausricht-
+            # schwelle (10°), aber unter der Winkelsperre (25°) - genau das
+            # Fenster, in dem der Ausrichtbogen arbeitet.
+            for _ in range(6):
+                controller.on_pose_update({
+                    'latitude': 52.0 + 2.0 / 111_320.0,
+                    'longitude': 10.0001,
+                    'heading_deg': 75.0,
+                })
+                time.sleep(0.3)
+            status = controller.get_status()
+        finally:
+            controller.shutdown()
+
+        self.assertTrue(status['running'])
+        self.assertNotEqual('cross_track_stop', status['state'])
+        self.assertTrue(status['limits']['track_aligning'])
+
     def test_eine_einzelne_zu_grosse_querabweichung_stoppt_nicht(self):
         """Am 27.08. hing ein USB-Aufruf des Maehdecks, der Dienst startete neu,
         und das Fahrzeug stand 1,42 m neben seiner Bahn. Die Navigation stieg
