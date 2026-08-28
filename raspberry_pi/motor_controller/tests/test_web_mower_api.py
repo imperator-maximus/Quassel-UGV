@@ -346,7 +346,7 @@ class MowerApiSafetyTests(unittest.TestCase):
                 _sanitize_name=lambda name: name,
             )
             self.server.mapping = SimpleNamespace(plans=plans)
-            self.server.can = SimpleNamespace(
+            self.server.pose = SimpleNamespace(
                 get_sensor_data=lambda: {
                     'timestamp': 123.0,
                     'gps': {'lat': 52.0, 'lon': 10.0},
@@ -381,7 +381,7 @@ class MowerApiSafetyTests(unittest.TestCase):
                 _sanitize_name=lambda name: name,
             )
             self.server.mapping = SimpleNamespace(plans=plans)
-            self.server.can = SimpleNamespace(get_sensor_data=lambda: {
+            self.server.pose = SimpleNamespace(get_sensor_data=lambda: {
                 'timestamp': 123.0,
                 'gps': {'lat': 52.0, 'lon': 10.0},
             })
@@ -441,7 +441,7 @@ class FakeNavigation:
         self.stop_reasons.append(reason)
 
 
-class FakeCan:
+class FakePose:
     """Liefert eine rtk_status-Folge; der letzte Wert bleibt danach stehen."""
 
     def __init__(self, statuses):
@@ -461,7 +461,7 @@ class RtkRecoveryWaitTests(unittest.TestCase):
         config = SimpleNamespace(template_folder='.', static_folder='.', secret_key='test')
         dummy = SimpleNamespace()
         server = WebServer(config, dummy, dummy, dummy, dummy)
-        server.can = FakeCan(statuses)
+        server.pose = FakePose(statuses)
         server.mapping = SimpleNamespace(
             plans=SimpleNamespace(
                 pose_rtk_ok=lambda pose: str((pose or {}).get('rtk_status', '')).upper()

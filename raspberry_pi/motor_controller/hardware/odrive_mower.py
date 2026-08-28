@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""ODrive/ODESC mower deck control over SimpleCAN."""
+"""ODrive/ODESC mower deck control - transport-independent part.
+
+Diese Klasse haelt die gesamte Ablauf- und Sicherheitslogik des Maehdecks:
+Anlauf mit Pruefung je Achse, Stromgrenzen, Watchdogs, Fehlerauswertung. Wie
+die Befehle beim Umrichter ankommen, weiss sie nicht - das liefert die
+Unterklasse ueber :meth:`_send` und :meth:`_send_rtr`.
+
+Die ``CMD_``-Nummern darunter sind die nativen ODrive-Befehlsindizes. Sie
+stammen aus der Zeit ueber SimpleCAN, gelten aber unveraendert fuer die
+direkte USB-Verbindung, die den Bus abgeloest hat.
+"""
 
 import logging
 import math
@@ -7,12 +17,6 @@ import struct
 import threading
 import time
 from typing import Dict, Any
-
-try:
-    import can
-    CAN_AVAILABLE = True
-except ImportError:
-    CAN_AVAILABLE = False
 
 
 CMD_SET_AXIS_STATE = 0x007
@@ -50,10 +54,9 @@ DRV_FAULT_BITS = (
 class ODriveMowerController:
     """Keeps an ODrive axis running at a requested RPM until stopped."""
 
-    def __init__(self, config, can_handler, safety_monitor=None):
+    def __init__(self, config, safety_monitor=None):
         self.logger = logging.getLogger(__name__)
         self.config = config
-        self.can_handler = can_handler
         self.safety_monitor = safety_monitor
         self.enabled = bool(config.enabled)
         self.running = False
@@ -119,34 +122,13 @@ class ODriveMowerController:
             node_ids = [getattr(self.config, "node_id", 0)]
         return [int(node_id) for node_id in node_ids]
 
-    def _arbitration_id(self, node_id: int, command_id: int) -> int:
-        return (int(node_id) << 5) | command_id
-
     def _send(self, node_id: int, command_id: int, data: bytes = b"") -> None:
-        if not CAN_AVAILABLE:
-            raise RuntimeError("python-can nicht verfuegbar")
-        if not self.can_handler or not self.can_handler.can_bus:
-            raise RuntimeError("CAN-Bus nicht verfuegbar")
-        message = can.Message(
-            arbitration_id=self._arbitration_id(node_id, command_id),
-            data=data,
-            is_extended_id=False,
-        )
-        self.can_handler.can_bus.send(message, timeout=1.0)
+        """Setzt einen Befehl an einer Achse ab. Liefert die Unterklasse."""
+        raise NotImplementedError("Transport fehlt: _send ist nicht implementiert")
 
     def _send_rtr(self, node_id: int, command_id: int, dlc: int = 8) -> None:
-        """Sendet einen Classical-CAN RTR-Request ohne Nutzdaten."""
-        if not CAN_AVAILABLE:
-            raise RuntimeError("python-can nicht verfuegbar")
-        if not self.can_handler or not self.can_handler.can_bus:
-            raise RuntimeError("CAN-Bus nicht verfuegbar")
-        message = can.Message(
-            arbitration_id=self._arbitration_id(node_id, command_id),
-            is_extended_id=False,
-            is_remote_frame=True,
-            dlc=int(dlc),
-        )
-        self.can_handler.can_bus.send(message, timeout=1.0)
+        """Fragt einen Wert einer Achse ab. Liefert die Unterklasse."""
+        raise NotImplementedError("Transport fehlt: _send_rtr ist nicht implementiert")
 
     def set_system_stop_callback(self, callback) -> None:
         """Registriert den zentralen Stopp fuer Fahrantrieb und Maehdeck."""
@@ -222,10 +204,10 @@ class ODriveMowerController:
     ) -> tuple[list[int], list[str]]:
         """Requests IDLE repeatedly and verifies it through fresh heartbeats.
 
-        SocketCAN accepting a frame only proves that it was queued locally.
-        A disturbed CAN receiver may miss one Set_Axis_State frame while its
-        transmitted heartbeats remain visible.  A mower stop therefore needs
-        retries plus confirmation from every configured axis.
+        A transport accepting a command only proves that it was handed over.
+        A disturbed axis may miss one Set_Axis_State while its reported state
+        remains readable.  A mower stop therefore needs retries plus
+        confirmation from every configured axis.
         """
         data = struct.pack("<I", AXIS_STATE_IDLE)
         pending = list(self.node_ids)
@@ -264,15 +246,10 @@ class ODriveMowerController:
         return max(int(self.config.min_rpm), min(int(self.config.max_rpm), int(rpm)))
 
     def _missing_heartbeats_locked(self) -> list[int]:
-        timeout_name = (
-            "usb_status_timeout_s"
-            if getattr(self, "transport", "can") == "usb"
-            else "heartbeat_timeout_s"
-        )
         timeout_s = float(
             getattr(
                 self.config,
-                timeout_name,
+                "usb_status_timeout_s",
                 getattr(self.config, "heartbeat_timeout_s", 1.0),
             )
         )
@@ -646,7 +623,7 @@ class ODriveMowerController:
         """Best-effort transport cleanup after a rejected start."""
 
     def emergency_stop(self, reason: str) -> Dict[str, Any]:
-        """Stoppt das Deck sofort und best-effort, auch bei defektem CAN."""
+        """Stoppt das Deck sofort und best-effort, auch bei defektem Transport."""
         self._stop_event.set()
         with self._lock:
             self.running = False
@@ -751,7 +728,7 @@ class ODriveMowerController:
         self._startup_watchdog_clear_done = False
         self._monitor_worker = threading.Thread(target=self._monitor_loop, daemon=True)
         self._monitor_worker.start()
-        self.logger.info("ODrive CAN-Strommonitor gestartet: nodes=%s", self.node_ids)
+        self.logger.info("ODrive-Strommonitor gestartet: nodes=%s", self.node_ids)
 
     def stop_monitor(self) -> None:
         self._monitor_stop_event.set()
@@ -777,16 +754,17 @@ class ODriveMowerController:
                 if not running and not safety_stopped and poll_while_idle:
                     self._poll_currents()
             except Exception as exc:
-                # Der zentrale CAN-Watchdog entscheidet anhand der empfangenen
-                # Heartbeats. Hier nicht blockieren oder bei Systemstart latched
-                # stoppen, waehrend SocketCAN noch hochkommt.
+                # Der zentrale Watchdog entscheidet anhand der zuletzt
+                # gelesenen Achszustaende. Hier nicht blockieren oder bei
+                # Systemstart latched stoppen, waehrend die Verbindung zu den
+                # Umrichtern noch aufgebaut wird.
                 now = time.monotonic()
                 if now - self._last_poll_error_log >= 5.0:
                     self._last_poll_error_log = now
                     self.logger.warning("ODrive GET_IQ Poll fehlgeschlagen: %s", exc)
 
     def clear_watchdog_errors(self) -> tuple[bool, str | None]:
-        """Loescht ausschliesslich reine Watchdog-Fehler nach CAN-Wiederkehr."""
+        """Loescht ausschliesslich reine Watchdog-Fehler nach Wiederkehr."""
         with self._lock:
             errors = dict(self.odrive_errors)
         nonzero = {node_id: error for node_id, error in errors.items() if error != 0}
@@ -858,7 +836,7 @@ class ODriveMowerController:
         except Exception as exc:
             with self._lock:
                 self._system_stop_pending = True
-            return False, f"ODrive CAN-Poll nach Safety-Reset fehlgeschlagen: {exc}"
+            return False, f"ODrive-Abfrage nach Safety-Reset fehlgeschlagen: {exc}"
         return True, None
 
     def _maybe_clear_startup_watchdog_errors(self) -> None:
@@ -940,7 +918,7 @@ class ODriveMowerController:
                         self._request_system_stop(timeout_error)
                         return
             except Exception as exc:
-                self._request_system_stop(f"ODrive-Maehdeck CAN-Fehler: {exc}")
+                self._request_system_stop(f"ODrive-Maehdeck Transportfehler: {exc}")
                 return
             # Only a fully completed cycle counts as a sign of life. A transport
             # call that never returns freezes this timestamp, which is exactly
@@ -1085,19 +1063,19 @@ class ODriveMowerController:
     def on_heartbeat(
         self, node_id: int, error: int, state: int, detail=None
     ) -> None:
-        """Verarbeitet ODrive-Heartbeat-Nachrichten vom CAN-Reader.
+        """Verarbeitet den gelesenen Zustand einer ODrive-Achse.
 
-        Wird vom CANHandler bei jedem empfangenen Heartbeat (cmd 0x01) gerufen.
-        Speichert error/state fuer konfigurierte Achsen (config.node_ids)
-        und aktualisiert ``last_error``, damit Web-App/UI ODrive-Fehler sehen.
+        Wird bei jeder Abfrage einer Achse gerufen. Speichert error/state fuer
+        konfigurierte Achsen (config.node_ids) und aktualisiert
+        ``last_error``, damit Web-App/UI ODrive-Fehler sehen.
 
-        Bei error!=0 wird der ODrive-internen Fehlercode als Hex-String in
+        Bei error!=0 wird der ODrive-interne Fehlercode als Hex-String in
         ``last_error`` geschrieben, damit /api/status ihn als ``mower_error``
         meldet. Bei error=0 wird ein vorheriger ODrive-Fehler geloescht – aber
-        nur wenn er von ODrive kam (nicht wenn er ein Python-CAN-Send-Fehler war).
+        nur wenn er von ODrive kam, nicht wenn er ein Sendefehler war.
 
         Args:
-            node_id: ODrive-Knoten-ID aus der Arbitration-ID.
+            node_id: logische ODrive-Knoten-ID der Achse.
             error: ODrive-Fehlercode (0 = kein Fehler).
             state: ODrive-Axis-State (1=IDLE, 5=CLOSED_LOOP_SENSORLESS, ...).
             detail: Fehler der darunterliegenden Objekte, sofern der Transport
@@ -1145,7 +1123,7 @@ class ODriveMowerController:
                     klartext,
                 )
             else:
-                # ODrive-Fehler geloescht – aber Python-CAN-Send-Fehler bleiben
+                # ODrive-Fehler geloescht – aber Sendefehler bleiben
                 if (
                     self.last_error
                     and self.last_error.startswith(f"ODrive node={node_id} error=")
@@ -1157,7 +1135,7 @@ class ODriveMowerController:
         self._maybe_clear_startup_watchdog_errors()
 
     def transport_stall_reason(self) -> str | None:
-        """Meldet einen haengenden Transportaufruf; CAN kennt keinen solchen."""
+        """Meldet einen haengenden Transportaufruf, wenn der Transport das kann."""
         return None
 
     def runtime_health(self) -> tuple[bool, str | None]:

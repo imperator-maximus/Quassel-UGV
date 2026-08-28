@@ -33,13 +33,13 @@ class ODriveUSBMowerController(ODriveMowerController):
     """Runs the existing mower safety logic through two direct USB links.
 
     Logical ``node_id`` values remain part of the public status API, but they
-    only identify an entry in ``usb_axes``. No CAN traffic is generated.
+    only identify an entry in ``usb_axes``.
     """
 
     transport = "usb"
 
     def __init__(self, config, safety_monitor=None, odrive_module=None):
-        super().__init__(config, can_handler=None, safety_monitor=safety_monitor)
+        super().__init__(config, safety_monitor=safety_monitor)
         self.logger = logging.getLogger(__name__)
         self._odrive = odrive_module if odrive_module is not None else odrive
         self._usb_specs = self._parse_usb_specs(getattr(config, "usb_axes", []))
@@ -515,7 +515,7 @@ class ODriveUSBMowerController(ODriveMowerController):
         self._monitor_stop_event.clear()
         # Native Fibre discovery takes several seconds per board. Complete the
         # first discovery and status sample before the central safety watchdog
-        # starts, otherwise its old 5 s CAN startup grace produces a false
+        # starts, otherwise its 5 s startup grace produces a false
         # system stop while two healthy USB boards are still being opened.
         self._connect_missing()
         for node_id in self.node_ids:

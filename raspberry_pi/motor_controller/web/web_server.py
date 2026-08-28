@@ -76,7 +76,7 @@ class WebServer:
         'watchdog': 'Navigations-Watchdog',
     }
 
-    def __init__(self, config, motor_control, joystick_handler, can_handler, gpio_controller, navigation_controller=None, mapping_recorder=None, safety_monitor=None, notifier=None, battery=None, network=None):
+    def __init__(self, config, motor_control, joystick_handler, pose_cache, gpio_controller, navigation_controller=None, mapping_recorder=None, safety_monitor=None, notifier=None, battery=None, network=None):
         """
         Initialisiert Web-Server
 
@@ -84,7 +84,7 @@ class WebServer:
             config: WebConfig-Instanz
             motor_control: MotorControl-Instanz
             joystick_handler: JoystickHandler-Instanz
-            can_handler: CANHandler-Instanz
+            pose_cache: PoseCache-Instanz
             gpio_controller: GPIOController-Instanz
             notifier: optionaler PushNotifier fuer Stoerungsmeldungen
             battery: optionaler BatteryMonitor fuer den Ladezustand
@@ -94,7 +94,7 @@ class WebServer:
         self.config = config
         self.motor = motor_control
         self.joystick = joystick_handler
-        self.can = can_handler
+        self.pose = pose_cache
         self.gpio = gpio_controller
         self.navigation = navigation_controller
         self.mapping = mapping_recorder
@@ -117,7 +117,6 @@ class WebServer:
         self.odrive_mower = None
         
         # Status
-        self.can_enabled = bool(getattr(self.can, 'can_enabled', True))
         self.light_state = False
         self.mower_state = False
         self._plan_lock = threading.Lock()
@@ -418,11 +417,10 @@ class WebServer:
         def api_status():
             """Gibt System-Status zurück"""
             return jsonify({
-                'can_enabled': self.can_enabled,
-                'can_status': self._can_api_status(),
+                'link_status': self._link_api_status(),
                 'motor_status': self.motor.get_status(),
                 'joystick_status': self.joystick.get_status(),
-                'sensor_data': self.can.get_sensor_data(),
+                'sensor_data': self.pose.get_sensor_data(),
                 'navigation_status': self.navigation.get_status() if self.navigation else {'state': 'disabled'},
                 'plan_execution_status': self.get_plan_execution_status(),
                 'mapping_status': self.mapping.get_status() if self.mapping else {'state': 'disabled'},
@@ -466,25 +464,9 @@ class WebServer:
                 'status': self.notifier.get_status(),
             })
 
-        @self.app.route('/api/can/toggle', methods=['POST'])
-        def api_can_toggle():
-            """Schaltet CAN Ein/Aus"""
-            self.can_enabled = not self.can_enabled
-            self.can.can_enabled = self.can_enabled
-            
-            if not self.can_enabled:
-                if self.safety:
-                    self.safety.trigger_system_stop("CAN manuell deaktiviert")
-                else:
-                    self.motor.emergency_stop()
-                    self.joystick.disable()
-            
-            self.logger.info(f"CAN {'aktiviert' if self.can_enabled else 'deaktiviert'}")
-            return jsonify({'can_enabled': self.can_enabled})
-
         @self.app.route('/api/safety/reset', methods=['POST'])
         def api_safety_reset():
-            """Entriegelt nach manueller Bestaetigung nur bei gesundem CAN."""
+            """Entriegelt nach Bestaetigung nur bei gesunder Pose und Deck."""
             if not self.safety:
                 return jsonify({'success': False, 'error': 'Safety Monitor nicht verfuegbar'}), 503
             if self.odrive_mower:
@@ -645,18 +627,11 @@ class WebServer:
         
         @self.app.route('/api/sensor/status', methods=['GET'])
         def api_sensor_status():
-            """Fordert Sensor-Status an"""
-            self.can.request_sensor_status()
+            """Gibt die zuletzt gemeldete Pose samt Alter zurueck"""
             return jsonify({
-                'request': 'sent',
-                'sensor_data': self.can.get_sensor_data()
+                'pose_status': self.pose.get_status(),
+                'sensor_data': self.pose.get_sensor_data()
             })
-        
-        @self.app.route('/api/sensor/restart', methods=['POST'])
-        def api_sensor_restart():
-            """Startet Sensor Hub neu"""
-            success = self.can.restart_sensor_hub()
-            return jsonify({'success': success})
 
         @self.app.route('/api/network/preferred', methods=['POST'])
         def api_network_preferred():
@@ -892,7 +867,7 @@ class WebServer:
                 return jsonify({'error': 'Mapping deaktiviert'}), 503
             data = request.get_json(silent=True) or {}
             plan = data.get('plan') if isinstance(data, dict) else None
-            start_pose = self.can.get_sensor_data()
+            start_pose = self.pose.get_sensor_data()
             start_segment_index = data.get('start_segment_index')
             if start_segment_index is None and data.get('resume'):
                 # Fortsetzen faehrt ab dem Wiederaufsetzpunkt, nicht ab Bahn 0.
@@ -997,8 +972,8 @@ class WebServer:
                         return jsonify(loaded), 404
                     plan = loaded.get('plan')
                 start_pose = data.get('start_pose') if isinstance(data.get('start_pose'), dict) else None
-                if data.get('use_current_pose') is True and self.can:
-                    start_pose = self.can.get_sensor_data()
+                if data.get('use_current_pose') is True and self.pose:
+                    start_pose = self.pose.get_sensor_data()
                 try:
                     simulator = MowingPathSimulator(
                         self.mapping.plans,
@@ -1090,7 +1065,7 @@ class WebServer:
                 start_pose = continuation_pose
                 start_coordinate = None
             elif use_current_pose:
-                start_pose = self.can.get_sensor_data() if self.can else None
+                start_pose = self.pose.get_sensor_data() if self.pose else None
                 if self.mapping.plans._pose_coord(start_pose) is None:
                     return jsonify({
                         'success': False,
@@ -1162,7 +1137,7 @@ class WebServer:
             if resume:
                 resume_started = self.resume_plan_execution(map_name)
                 return jsonify(resume_started), 200 if resume_started.get('success') else 409
-            start_pose = self.can.get_sensor_data()
+            start_pose = self.pose.get_sensor_data()
             result = self.mapping.check_plan(
                 map_name,
                 start_segment_index=data.get('start_segment_index'),
@@ -1710,7 +1685,7 @@ class WebServer:
         if not self.mapping or not self.navigation:
             return False
         coords = segment.get('coordinates') or []
-        pose = self.can.get_sensor_data() or {}
+        pose = self.pose.get_sensor_data() or {}
         gps = pose.get('gps') or {}
         lat = gps.get('lat')
         lon = gps.get('lon')
@@ -1964,7 +1939,7 @@ class WebServer:
     def _rtk_available(self):
         if not self.mapping:
             return False
-        return self.mapping.plans.pose_rtk_ok(self.can.get_sensor_data())
+        return self.mapping.plans.pose_rtk_ok(self.pose.get_sensor_data())
 
     def _mower_fault_reason(self):
         """Bricht die Planfahrt ab, wenn das laufende Deck nicht gesund ist.
@@ -2071,7 +2046,7 @@ class WebServer:
             return None
 
     def _check_nogo(self, monitor):
-        return monitor.check_pose(self.can.get_sensor_data())
+        return monitor.check_pose(self.pose.get_sensor_data())
 
     # Kennzeichen des bekannten Haengers im gespeicherten Klartext. Nur dieser
     # eine Fall laeuft automatisch wieder an.
@@ -2205,9 +2180,9 @@ class WebServer:
                     return 'Sicherheitsstopp verriegelt'
                 if safety.get('motion_hold_active'):
                     return 'Fahrpause aktiv'
-            status = self._can_api_status()
-            if not status.get('sensor_hub', {}).get('online'):
-                return 'SensorHub ohne Telemetrie'
+            status = self._link_api_status()
+            if not status.get('pose', {}).get('online'):
+                return 'GNSS-Empfaenger ohne Pose'
             odrives = status.get('odrives', {})
             fehlerhafte = sorted(
                 str(node)
@@ -2218,7 +2193,7 @@ class WebServer:
                 return f"ODrive-Fehler an Knoten {', '.join(fehlerhafte)}"
             if not odrives.get('all_online', True):
                 return 'ODrive nicht vollstaendig online'
-            rtk = str((self.can.get_sensor_data() or {}).get('rtk_status') or '')
+            rtk = str((self.pose.get_sensor_data() or {}).get('rtk_status') or '')
             if 'FIX' not in rtk.upper():
                 return f"RTK nicht fix ({rtk or 'unbekannt'})"
         except Exception as exc:  # noqa: BLE001 - lieber warten als anlaufen
@@ -2249,7 +2224,7 @@ class WebServer:
             if not map_name or not self._active_executable_segments:
                 return
             status = self.get_plan_execution_status()
-            pose = self.can.get_sensor_data()
+            pose = self.pose.get_sensor_data()
             active_index = int(status.get('active_index') or 0)
             current_segment = status.get('current_segment') or {}
             source_index = current_segment.get('source_index')
@@ -2492,7 +2467,7 @@ class WebServer:
             verified_running = bool(commanded and not mower_fault)
             return {
                 'success': status['success'],
-                'mower_mode': f"odrive_{status.get('transport', 'can')}",
+                'mower_mode': f"odrive_{status.get('transport', 'usb')}",
                 'mower_enabled': status['enabled'],
                 'mower_state': verified_running,
                 'mower_command_running': verified_running,
@@ -2577,69 +2552,76 @@ class WebServer:
             'mower_current_trip_duration_s': None,
         }
 
-    def _can_api_status(self):
-        """CAN-Interface sowie SensorHub- und ODrive-Erreichbarkeit."""
-        expected_nodes = []
-        heartbeat_timeout_s = 1.0
-        odrive_transport = None
-        if self.odrive_mower and self.odrive_mower.enabled:
-            expected_nodes = self.odrive_mower.node_ids
-            heartbeat_timeout_s = float(self.odrive_mower.config.heartbeat_timeout_s)
-            odrive_transport = getattr(self.odrive_mower, 'transport', 'can')
-        status = self.can.get_status(
-            expected_odrive_node_ids=expected_nodes if odrive_transport == 'can' else [],
-            sensor_timeout_s=2.0,
-            odrive_timeout_s=heartbeat_timeout_s,
-        )
-        if odrive_transport == 'usb':
-            mower = self.odrive_mower.get_status()
-            missing = set(mower.get('odrive_missing_heartbeats', []))
-            errors = mower.get('odrive_errors', {})
-            states = mower.get('odrive_states', {})
-            ages = mower.get('odrive_heartbeat_ages', {})
-            currents = mower.get('odrive_currents', {})
-            nodes = {}
-            for node_id in expected_nodes:
-                node_current = currents.get(node_id, currents.get(str(node_id), {}))
-                node_error = errors.get(node_id, errors.get(str(node_id)))
-                nodes[str(node_id)] = {
-                    'online': node_id not in missing,
-                    'age_s': ages.get(node_id, ages.get(str(node_id))),
-                    'error': node_error,
-                    'state': states.get(node_id, states.get(str(node_id))),
-                    'iq_setpoint_a': node_current.get('setpoint_a'),
-                    'iq_measured_a': node_current.get('measured_a'),
-                    'iq_age_s': node_current.get('age_s'),
-                }
-            error_nodes = [node_id for node_id in expected_nodes if nodes[str(node_id)]['error']]
-            online_count = sum(1 for node in nodes.values() if node['online'])
-            status['odrives'] = {
-                'transport': 'usb',
-                'expected_node_ids': list(expected_nodes),
-                'online_count': online_count,
-                'expected_count': len(expected_nodes),
-                'all_online': online_count == len(expected_nodes),
-                'error_node_ids': error_nodes,
-                'all_healthy': online_count == len(expected_nodes) and not error_nodes,
-                'nodes': nodes,
-                'usb_boards': mower.get('usb_boards', {}),
+    def _link_api_status(self):
+        """Erreichbarkeit von Pose und Maehdeck-Achsen.
+
+        Fasst zusammen, was frueher der CAN-Handler ueber den Bus wusste. Die
+        Achszustaende liest jetzt das Maehdeck selbst ueber USB; hier werden
+        sie nur in die Form gebracht, die die Statusleiste erwartet.
+        """
+        status = {
+            'pose': self.pose.get_status(pose_timeout_s=2.0),
+            'odrives': {
+                'expected_node_ids': [],
+                'online_count': 0,
+                'expected_count': 0,
+                'all_online': False,
+                'error_node_ids': [],
+                'all_healthy': False,
+                'nodes': {},
+            },
+        }
+        if not (self.odrive_mower and self.odrive_mower.enabled):
+            status['healthy'] = bool(status['pose']['online'])
+            return status
+
+        expected_nodes = self.odrive_mower.node_ids
+        mower = self.odrive_mower.get_status()
+        missing = set(mower.get('odrive_missing_heartbeats', []))
+        errors = mower.get('odrive_errors', {})
+        states = mower.get('odrive_states', {})
+        ages = mower.get('odrive_heartbeat_ages', {})
+        currents = mower.get('odrive_currents', {})
+        nodes = {}
+        for node_id in expected_nodes:
+            node_current = currents.get(node_id, currents.get(str(node_id), {}))
+            node_error = errors.get(node_id, errors.get(str(node_id)))
+            nodes[str(node_id)] = {
+                'online': node_id not in missing,
+                'age_s': ages.get(node_id, ages.get(str(node_id))),
+                'error': node_error,
+                'state': states.get(node_id, states.get(str(node_id))),
+                'iq_setpoint_a': node_current.get('setpoint_a'),
+                'iq_measured_a': node_current.get('measured_a'),
+                'iq_age_s': node_current.get('age_s'),
             }
-            status['network_healthy'] = bool(
-                status['sensor_hub']['online'] and status['odrives']['all_healthy']
-            )
+        error_nodes = [node_id for node_id in expected_nodes if nodes[str(node_id)]['error']]
+        online_count = sum(1 for node in nodes.values() if node['online'])
+        status['odrives'] = {
+            'expected_node_ids': list(expected_nodes),
+            'online_count': online_count,
+            'expected_count': len(expected_nodes),
+            'all_online': online_count == len(expected_nodes),
+            'error_node_ids': error_nodes,
+            'all_healthy': online_count == len(expected_nodes) and not error_nodes,
+            'nodes': nodes,
+            'usb_boards': mower.get('usb_boards', {}),
+        }
+        status['healthy'] = bool(
+            status['pose']['online'] and status['odrives']['all_healthy']
+        )
         return status
 
     def _build_status_payload(self):
         """Stellt den vollstaendigen Status zusammen, gerundet auf Anzeigemass."""
         status = {
-            'can_enabled': self.can_enabled,
             'pwm_enabled': True,
             'monitor_enabled': True,
-            'can_status': self._can_api_status(),
+            'link_status': self._link_api_status(),
             'motor_status': self.motor.get_status(),
             'joystick_status': self.joystick.get_status(),
             'joystick_enabled': self.joystick.get_status().get('enabled', False),
-            'sensor_data': self.can.get_sensor_data(),
+            'sensor_data': self.pose.get_sensor_data(),
             'navigation_status': self.navigation.get_status() if self.navigation else {'state': 'disabled'},
             'plan_execution_status': self.get_plan_execution_status(),
             'mapping_status': self.mapping.get_status() if self.mapping else {'state': 'disabled'},

@@ -29,18 +29,27 @@ USB_HAENGER = 'ODrive USB haengt: USB-Aufruf ohne Antwort seit 5.1s (node 2)'
 
 
 class FakeMower:
-    # transport='can' laesst _can_api_status den Knotenzustand direkt aus
-    # can.get_status uebernehmen. Geprueft wird hier die Anlauflogik, nicht der
-    # Weg, auf dem die Knotendaten zusammenkommen.
-    transport = 'can'
+    """Geprueft wird die Anlauflogik, nicht das Lesen der Achszustaende."""
+
+    transport = 'usb'
     node_ids = [0, 1, 2]
     config = SimpleNamespace(heartbeat_timeout_s=1.0)
 
-    def __init__(self, erfolg=True):
+    def __init__(self, erfolg=True, fehler=None):
         self.enabled = True
         self.commanded_rpm = 0
         self.erfolg = erfolg
+        self.fehler = dict(fehler or {})
         self.gestartet_mit = []
+
+    def get_status(self, **_kwargs):
+        return {
+            'odrive_missing_heartbeats': [],
+            'odrive_errors': {node_id: self.fehler.get(node_id, 0) for node_id in self.node_ids},
+            'odrive_states': {node_id: 5 for node_id in self.node_ids},
+            'odrive_heartbeat_ages': {node_id: 0.1 for node_id in self.node_ids},
+            'odrive_currents': {},
+        }
 
     def start(self, rpm=None):
         self.gestartet_mit.append(rpm)
@@ -63,12 +72,9 @@ class FakeNotifier:
 
 def build_server(gesund=True, mower=None, notifier=None, **config_overrides):
     dummy = SimpleNamespace()
-    can = SimpleNamespace(
+    pose = SimpleNamespace(
         get_sensor_data=lambda: {'rtk_status': 'RTK FIXED' if gesund else 'FLOAT'},
-        get_status=lambda **_kwargs: {
-            'odrives': {'all_online': True, 'nodes': {'0': {'error': 0}}},
-            'sensor_hub': {'online': True},
-        },
+        get_status=lambda **_kwargs: {'online': True, 'age_s': 0.1, 'source': {}},
     )
     motor = SimpleNamespace(
         get_status=lambda: {'current_pwm': {'left': 1500, 'right': 1500}}
@@ -80,7 +86,7 @@ def build_server(gesund=True, mower=None, notifier=None, **config_overrides):
         }
     )
     server = WebServer(
-        web_config(**config_overrides), motor, joystick, can, dummy,
+        web_config(**config_overrides), motor, joystick, pose, dummy,
         safety_monitor=safety, notifier=notifier,
     )
     server.odrive_mower = mower
@@ -188,22 +194,17 @@ class AnlaufNachUsbHaengerTests(unittest.TestCase):
         self.assertIn('RTK', server._restart_health_problem())
 
     def test_odrive_fehler_verhindert_den_anlauf(self):
-        server = build_server(mower=FakeMower())
-        server.can.get_status = lambda **_kwargs: {
-            'odrives': {'all_online': True, 'nodes': {'2': {'error': 64}}},
-            'sensor_hub': {'online': True},
-        }
+        server = build_server(mower=FakeMower(fehler={2: 64}))
 
         self.assertIn('ODrive-Fehler', server._restart_health_problem())
 
     def test_fehlende_pose_verhindert_den_anlauf(self):
         server = build_server(mower=FakeMower())
-        server.can.get_status = lambda **_kwargs: {
-            'odrives': {'all_online': True, 'nodes': {}},
-            'sensor_hub': {'online': False},
+        server.pose.get_status = lambda **_kwargs: {
+            'online': False, 'age_s': None, 'source': {}
         }
 
-        self.assertIn('SensorHub', server._restart_health_problem())
+        self.assertIn('GNSS', server._restart_health_problem())
 
     def test_gesunder_zustand_meldet_kein_hindernis(self):
         server = build_server(mower=FakeMower())

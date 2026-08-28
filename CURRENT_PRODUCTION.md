@@ -3,41 +3,31 @@
 Stand: 24.07.2026
 
 Diese Datei ist die maßgebliche Transport- und Hardwareübersicht für neue
-Arbeiten am UGV. Ältere CAN-Anleitungen im Repository gelten ausschließlich
-für den ehemaligen Offline-Teststand.
+Arbeiten am UGV. CAN-Bus und SensorHub sind ausgebaut; ihr Code wurde aus dem
+Repository entfernt.
 
 ## Produktive Verbindungen
 
 | Verbindung | Aktiver Transport |
 |---|---|
-| Orange Pi SensorHub → Raspberry-Hauptrechner | zwei parallele persistente HTTP/WiFi-NDJSON-Streams |
+| GNSS-Empfänger UM982 → Raspberry-Hauptrechner | serielle USB-Verbindung, Port über `/dev/serial/by-id` |
 | Raspberry → ODrive Board A | direkte USB/Fibre-Verbindung, Serial `386132523135`, Axis 0/1 = Node 0/1 |
 | Raspberry → ODrive Board B | direkte USB/Fibre-Verbindung, Serial `387132523135`, Axis 0 = Node 2 |
 | Raspberry → Fahrmotorcontroller | Hardware-PWM über GPIO 19/18 |
 
-Der SensorHub-Basisendpunkt ist
-`http://schloss.fdog.de:8081/api/telemetry`; der Client verwendet daraus
-`/api/telemetry/stream`. Zwei unabhängige TCP-Verbindungen verhindern, dass
-das Stocken eines einzelnen Streams die Navigation pausiert.
+Die Pose entsteht auf dem Raspberry selbst: Der Empfänger liefert NMEA über
+USB, die RTK-Korrekturen holt der Raspberry per NTRIP. Es gibt keinen zweiten
+Rechner mehr, dessen Ausfall die Navigation pausieren könnte.
 
 ## Zugangsschutz der Weboberflächen
 
-Steuerungsoberfläche und SensorHub sind über Portfreigaben aus dem Internet
-erreichbar: extern `8080` → `raspberrycan:80`, extern `8081` → `orangeugv:80`.
-Die Ports 80 und 443 zeigen auf ein anderes Gerät im Netz, nicht auf das UGV.
+Die Steuerungsoberfläche ist über eine Portfreigabe aus dem Internet
+erreichbar: extern `8080` → `raspberrycan:80`. Die Ports 80 und 443 zeigen auf
+ein anderes Gerät im Netz, nicht auf das UGV.
 
-Beide UGV-Endpunkte verlangen eine Anmeldung per HTTP-Basic-Auth; die
-Passwörter stehen in `/etc/ugv-web.env` (Modus 600) bzw. `/opt/sensor_hub/.env`,
-nie in der Konfigurationsdatei. Ohne gesetztes Passwort antworten sie mit 503
-statt ungeschützt zu laufen.
-
-Beim Ausrollen gilt: **Raspberry zuerst, dann SensorHub.** Umgekehrt entsteht
-ein Fenster, in dem der SensorHub den Raspberry mit 401 abweist und der
-Fahrantrieb pausiert.
-
-Der Raspberry ist selbst Client des SensorHub: `sensor_hub.auth_username` und
-`SENSOR_HUB_TELEMETRY_PASSWORD` müssen zu den Zugangsdaten des SensorHub
-passen, sonst bleibt die Pose aus und der Watchdog pausiert den Fahrantrieb.
+Sie verlangt eine Anmeldung per HTTP-Basic-Auth; das Passwort steht in
+`/etc/ugv-web.env` (Modus 600), nie in der Konfigurationsdatei. Ohne gesetztes
+Passwort antwortet sie mit 503 statt ungeschützt zu laufen.
 
 Die Verbindung ist unverschlüsselt; das Passwort ist unterwegs mitlesbar.
 Einzelheiten und die Nachrüstung von TLS: `raspberry_pi/WEB_ZUGANGSSCHUTZ.md`.
@@ -96,18 +86,18 @@ Oberfläche auf Sparsamkeit ausgelegt:
 
 ## CAN-Status
 
-- Haupt-UGV: `can.enabled: false`
-- SensorHub: `CAN_ENABLED=0`
-- Kein InnoMaker CAN HAT und kein CAN Device-Tree-Overlay
-- Kein USB-CAN-Adapter im produktiven SensorHub- oder Hauptrechner-Pfad
-- ODrive-Steuerung produktiv ausschließlich mit `odrive_mower.transport: usb`
-- CAN-Code bleibt nur für Legacy-/Testzwecke im Repository und ist kein
-  automatischer Rückfallpfad
-- Ehemaliger Teststand: offline, USB-CAN, Classical CAN 2.0 bei 250 kbit/s
+- Ausgebaut. Kein CAN-Adapter, kein CAN HAT, kein Device-Tree-Overlay, kein
+  `can0`, keine `can-interface.service`.
+- Der zugehörige Code ist aus dem Repository entfernt: CAN-Handler, CAN-
+  Protokoll, die Testskripte und das SensorHub-Verzeichnis.
+- Die ODrives hängen ausschließlich an ihren USB/Fibre-Leitungen.
+- Eine mitgereiste alte `config.yaml` startet weiter: die Abschnitte `can` und
+  `sensor_hub` werden mit einer Warnung im Journal übernommen bzw. verworfen.
+  Der Abschnitt heißt jetzt `pose`.
 
 ## Safety
 
-- Nach etwa 1 s ohne aktuelle SensorHub-Pose pausieren Fahrantrieb und Route.
+- Nach etwa 1 s ohne aktuelle GNSS-Pose pausieren Fahrantrieb und Route.
 - Kehrt die Pose zurück, wird eine aktive Route aus der Speicherpause exakt
   fortgesetzt.
 - Nach längerem Ausfall verriegelt der Gesamtsystem-Stopp einschließlich
@@ -125,5 +115,5 @@ Oberfläche auf Sparsamkeit ausgelegt:
 ## Vorgabe für weitere Entwicklung
 
 Navigation, Pfadplanung, Weboberfläche und Mählogik müssen auf dieser
-USB/WiFi-Architektur weiterentwickelt werden. CAN darf dabei nicht wieder als
+USB-Architektur weiterentwickelt werden. CAN darf dabei nicht wieder als
 Produktionsabhängigkeit eingeführt werden.

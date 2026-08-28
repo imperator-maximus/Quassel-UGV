@@ -50,7 +50,7 @@ class SafetyMonitor:
         # Emergency Stop Callback
         self.emergency_stop_callback: Optional[Callable] = None
         self.system_stop_callback: Optional[Callable] = None
-        self.can_health_check: Optional[Callable] = None
+        self.link_health_check: Optional[Callable] = None
         self.motion_hold_check: Optional[Callable] = None
         self.motion_hold_callback: Optional[Callable] = None
         self.motion_resume_callback: Optional[Callable] = None
@@ -142,9 +142,14 @@ class SafetyMonitor:
         """Setzt den Callback fuer einen verriegelten Gesamtsystem-Stopp."""
         self.system_stop_callback = callback
 
-    def set_can_health_check(self, callback: Callable):
-        """Setzt eine Funktion, die ``(healthy, reason)`` zurueckgibt."""
-        self.can_health_check = callback
+    def set_link_health_check(self, callback: Callable):
+        """Setzt eine Funktion, die ``(healthy, reason)`` zurueckgibt.
+
+        Sie prueft, was fuer sicheren Betrieb erreichbar sein muss: die Pose
+        und das Maehdeck. Hiess ``set_can_health_check``, solange beides
+        ueber den Bus kam.
+        """
+        self.link_health_check = callback
 
     def set_motion_hold_check(self, callback: Callable):
         """Setzt den Healthcheck fuer einen voruebergehenden Fahrstopp."""
@@ -282,14 +287,14 @@ class SafetyMonitor:
             return not self.system_stop_latched and not self.motion_hold_active
 
     def reset_system_stop(self) -> tuple[bool, str | None]:
-        """Loest die Verriegelung nur bei aktuell gesundem CAN-Netz."""
-        if self.can_health_check:
+        """Loest die Verriegelung nur bei gesunder Pose und Maehdeck."""
+        if self.link_health_check:
             try:
-                healthy, reason = self.can_health_check()
+                healthy, reason = self.link_health_check()
             except Exception as exc:
-                return False, f"CAN-Healthcheck fehlgeschlagen: {exc}"
+                return False, f"Healthcheck fehlgeschlagen: {exc}"
             if not healthy:
-                return False, str(reason or "CAN-Netz nicht gesund")
+                return False, str(reason or "Fahrzeug nicht betriebsbereit")
 
         with self._lock:
             if self.motion_hold_active:
@@ -302,7 +307,7 @@ class SafetyMonitor:
             'recovery',
             'system_stop',
             'UGV: Sicherheitsstopp entriegelt',
-            'Das CAN-Netz ist gesund, die Verriegelung wurde aufgehoben.',
+            'Pose und Maehdeck sind gesund, die Verriegelung wurde aufgehoben.',
         )
         return True, None
     
@@ -360,8 +365,8 @@ class SafetyMonitor:
     
     def start_watchdog(self):
         """Startet Watchdog-Thread"""
-        can_watchdog_enabled = bool(getattr(self.config, 'can_watchdog_enabled', False))
-        if not self.config.enabled and not can_watchdog_enabled:
+        link_watchdog_enabled = bool(getattr(self.config, 'link_watchdog_enabled', False))
+        if not self.config.enabled and not link_watchdog_enabled:
             self.logger.info("Safety Watchdog deaktiviert")
             return
 
@@ -409,32 +414,32 @@ class SafetyMonitor:
                     with self._lock:
                         self.joystick_active = False
 
-                if bool(getattr(self.config, 'can_watchdog_enabled', False)) and self.can_health_check:
-                    grace_s = float(getattr(self.config, 'can_watchdog_startup_grace_s', 5.0))
+                if bool(getattr(self.config, 'link_watchdog_enabled', False)) and self.link_health_check:
+                    grace_s = float(getattr(self.config, 'link_watchdog_startup_grace_s', 5.0))
                     if time.monotonic() - self._watchdog_started_monotonic >= grace_s:
                         if self.motion_hold_check:
                             try:
                                 motion_healthy, motion_reason = self.motion_hold_check()
                             except Exception as exc:
                                 motion_healthy = False
-                                motion_reason = f"SensorHub-Pausencheck fehlgeschlagen: {exc}"
+                                motion_reason = f"Pose-Pausencheck fehlgeschlagen: {exc}"
                             if motion_healthy:
                                 self.clear_motion_hold()
                             else:
                                 self.trigger_motion_hold(
-                                    motion_reason or "SensorHub-Telemetrie unterbrochen"
+                                    motion_reason or "GNSS-Pose unterbrochen"
                                 )
                         try:
-                            healthy, reason = self.can_health_check()
+                            healthy, reason = self.link_health_check()
                         except Exception as exc:
-                            healthy, reason = False, f"CAN-Healthcheck fehlgeschlagen: {exc}"
+                            healthy, reason = False, f"Healthcheck fehlgeschlagen: {exc}"
                         if not healthy:
-                            self.trigger_system_stop(reason or "CAN-Netz ausgefallen")
+                            self.trigger_system_stop(reason or "Fahrzeug nicht betriebsbereit")
 
                 self._check_motion_hold_duration()
 
                 # 100ms Wartezeit
-                interval_s = float(getattr(self.config, 'can_watchdog_interval_s', 0.1))
+                interval_s = float(getattr(self.config, 'link_watchdog_interval_s', 0.1))
                 self._stop_event.wait(max(0.02, interval_s))
             
             except Exception as e:
@@ -464,7 +469,7 @@ class SafetyMonitor:
                 'joystick_active': self.joystick_active,
                 'command_timeout': self.config.command_timeout,
                 'joystick_timeout': self.config.joystick_timeout,
-                'can_watchdog_enabled': bool(getattr(self.config, 'can_watchdog_enabled', False)),
+                'link_watchdog_enabled': bool(getattr(self.config, 'link_watchdog_enabled', False)),
                 'motion_hold_active': self.motion_hold_active,
                 'motion_hold_reason': self.motion_hold_reason,
                 'motion_hold_time': self.motion_hold_time,

@@ -141,7 +141,7 @@ def build_server(anfahrt=None, manoever=None):
         get_sensor_data=lambda: {
             'gps': {'lat': 53.0, 'lon': 11.0}, 'heading': 42.0
         },
-        get_status=lambda **_kwargs: {'odrives': {}, 'sensor_hub': {}},
+        get_status=lambda **_kwargs: {'online': True, 'age_s': 0.1, 'source': {}},
     )
     motor = SimpleNamespace(
         get_status=lambda: {'current_pwm': {'left': 1500, 'right': 1500}}
@@ -186,7 +186,7 @@ class RangierenTests(unittest.TestCase):
 
     def test_ohne_pose_wird_nicht_rangiert(self):
         server = build_server(ANFAHRT)
-        server.can.get_sensor_data = lambda: {'gps': {}}
+        server.pose.get_sensor_data = lambda: {'gps': {}}
 
         self.assertFalse(
             server._reposition_to_segment(SEGMENT, {}, None, 1)

@@ -42,7 +42,7 @@ def build_server(battery=None, joystick_enabled=False, **config_overrides):
     dummy = SimpleNamespace()
     can = SimpleNamespace(
         get_sensor_data=lambda: {'gps': {'lat': 53.3323205, 'lon': 11.0787511}},
-        get_status=lambda **_kwargs: {'odrives': {}, 'sensor_hub': {}},
+        get_status=lambda **_kwargs: {'online': True, 'age_s': 0.1, 'source': {}},
     )
     motor = SimpleNamespace(
         get_status=lambda: {'current_pwm': {'left': 1500, 'right': 1500}}

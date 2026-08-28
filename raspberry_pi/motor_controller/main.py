@@ -17,14 +17,13 @@ from pathlib import Path
 from .config import Config
 from .hardware.gpio_controller import GPIOController
 from .hardware.pwm_controller import PWMController
-from .hardware.odrive_mower import ODriveMowerController
 from .hardware.odrive_usb_mower import ODriveUSBMowerController
 from .hardware.safety_monitor import SafetyMonitor
 from .hardware.battery_monitor import BatteryMonitor
 from .communication.network_monitor import NetworkMonitor
-from .communication.can_handler import CANHandler
 from .communication.push_notifier import PushNotifier
-from .communication.sensor_hub_http import SensorHubHttpClient
+from .sensors.local_pose_source import LocalPoseSource
+from .sensors.pose_cache import PoseCache
 from .control.motor_control import MotorControl
 from .control.joystick_handler import JoystickHandler
 from .navigation.navigation_controller import NavigationController
@@ -56,8 +55,8 @@ class MotorControllerApp:
         self.gpio: GPIOController = None
         self.pwm: PWMController = None
         self.safety: SafetyMonitor = None
-        self.can: CANHandler = None
-        self.sensor_hub_http: SensorHubHttpClient = None
+        self.pose_cache: PoseCache = None
+        self.local_pose: LocalPoseSource = None
         self.odrive_mower: ODriveMowerController = None
         self.battery: BatteryMonitor = None
         self.network: NetworkMonitor = None
@@ -152,51 +151,23 @@ class MotorControllerApp:
             self.safety = SafetyMonitor(self.config.safety, self.gpio)
             self.safety.set_notifier(self.notifier)
             
-            # CAN-Handler
-            self.logger.info("Initialisiere CAN-Handler...")
-            self.can = CANHandler(self.config.can)
+            # Pose-Zwischenspeicher. Er haelt nur die letzte Pose und ihr
+            # Alter; wer sie fuellt, steht darunter.
+            self.pose_cache = PoseCache()
 
-            sensor_transport = str(self.config.sensor_hub.transport).strip().lower()
-            if sensor_transport not in ('can', 'shadow', 'wifi'):
-                raise ValueError(
-                    "sensor_hub.transport muss 'can', 'shadow' oder 'wifi' sein"
-                )
-            self.can.set_active_sensor_source(
-                'wifi' if sensor_transport == 'wifi' else 'can'
+            self.logger.info("Initialisiere lokale GNSS-Pose...")
+            self.local_pose = LocalPoseSource(
+                self.config.pose,
+                self._on_local_sensor_data,
             )
-            if sensor_transport in ('shadow', 'wifi'):
-                self.logger.info(
-                    "Initialisiere SensorHub-WiFi-Transport (%s)...",
-                    sensor_transport,
-                )
-                self.sensor_hub_http = SensorHubHttpClient(
-                    self.config.sensor_hub,
-                    self._on_wifi_sensor_data,
-                )
-                self.can.set_sensor_transport_status_callback(
-                    self.sensor_hub_http.get_status
-                )
+            self.pose_cache.set_source_status_callback(self.local_pose.get_status)
 
             if self.config.odrive_mower.enabled:
-                odrive_transport = str(
-                    getattr(self.config.odrive_mower, 'transport', 'can')
-                ).strip().lower()
-                self.logger.info(
-                    "Initialisiere ODrive-Maehdeck ueber %s...", odrive_transport.upper()
+                self.logger.info("Initialisiere ODrive-Maehdeck ueber USB...")
+                self.odrive_mower = ODriveUSBMowerController(
+                    self.config.odrive_mower,
+                    self.safety,
                 )
-                if odrive_transport == 'usb':
-                    self.odrive_mower = ODriveUSBMowerController(
-                        self.config.odrive_mower,
-                        self.safety,
-                    )
-                elif odrive_transport == 'can':
-                    self.odrive_mower = ODriveMowerController(
-                        self.config.odrive_mower,
-                        self.can,
-                        self.safety,
-                    )
-                else:
-                    raise ValueError("odrive_mower.transport muss 'can' oder 'usb' sein")
 
             # Batterieueberwachung
             self.battery = BatteryMonitor(self.config.battery, self.logger)
@@ -218,15 +189,15 @@ class MotorControllerApp:
 
             # Navigation
             if self.config.navigation.enabled:
-                # Der zentrale SensorHub-Watchdog muss zuerst pausieren
-                # koennen. Sonst beendet der lokale Pose-Watchdog den Plan,
-                # bevor die automatische WiFi-Wiederaufnahme greift.
-                pause_timeout = float(self.config.sensor_hub.pause_timeout_s)
+                # Der zentrale Pose-Watchdog muss zuerst pausieren koennen.
+                # Sonst beendet der Watchdog der Navigation den Plan, bevor
+                # die automatische Wiederaufnahme greift.
+                pause_timeout = float(self.config.pose.pause_timeout_s)
                 minimum_nav_timeout = pause_timeout + 1.0
                 if float(self.config.navigation.watchdog_timeout_s) < minimum_nav_timeout:
                     self.logger.warning(
                         "Navigation-Watchdog %.1fs ist kuerzer als die "
-                        "SensorHub-Pausenkette; verwende %.1fs",
+                        "Pausenkette der Pose; verwende %.1fs",
                         self.config.navigation.watchdog_timeout_s,
                         minimum_nav_timeout,
                     )
@@ -243,7 +214,7 @@ class MotorControllerApp:
                 self.logger.info("Initialisiere Mapping...")
                 self.mapping = MappingRecorder(
                     self.config.mapping.maps_dir,
-                    self.can.get_sensor_data,
+                    self.pose_cache.get_sensor_data,
                     min_point_distance_m=self.config.mapping.min_point_distance_m
                 )
             
@@ -254,7 +225,7 @@ class MotorControllerApp:
                     self.config.web,
                     self.motor,
                     self.joystick,
-                    self.can,
+                    self.pose_cache,
                     self.gpio,
                     self.navigation,
                     self.mapping,
@@ -294,37 +265,21 @@ class MotorControllerApp:
         # Safety Monitor -> Motor Control (Emergency Stop)
         self.safety.set_emergency_stop_callback(self.motor.emergency_stop)
         self.safety.set_system_stop_callback(self._system_safety_stop)
-        self.safety.set_can_health_check(self._can_health_check)
+        self.safety.set_link_health_check(self._link_health_check)
         self.safety.set_motion_hold_check(self._sensor_motion_health_check)
         self.safety.set_motion_hold_callback(self._sensor_motion_pause)
         self.safety.set_motion_resume_callback(self._sensor_motion_resume)
 
-        # CAN Handler -> Sensor Data (Logging + Navigation-Pose)
-        self.can.set_sensor_data_callback(self._on_sensor_data)
+        # Pose -> Logging + Navigation
+        self.pose_cache.set_pose_callback(self._on_sensor_data)
 
-        # CAN Handler -> ODrive-Heartbeat -> ODriveMowerController
-        # Damit erkennt die Web-App ODrive-Fehler (error!=0) in /api/status
-        if self.odrive_mower and getattr(self.odrive_mower, 'transport', 'can') == 'can':
-            self.can.set_odrive_heartbeat_callback(self.odrive_mower.on_heartbeat)
-            self.can.set_odrive_iq_callback(self.odrive_mower.on_iq)
-            self.can.set_odrive_sensorless_callback(
-                self.odrive_mower.on_sensorless_estimates
-            )
-
-        # Der Gesamtstopp gilt fuer jeden Transport. Haengt er am CAN-Zweig,
-        # stoppt ein Maehdeckfehler ueber USB nur die Messer, waehrend das
-        # Fahrzeug mit laufendem Plan weiterfaehrt.
+        # Ein Maehdeckfehler muss das ganze Fahrzeug anhalten, nicht nur die
+        # Messer - sonst faehrt der Plan mit stehendem Deck weiter.
         if self.odrive_mower:
             self.odrive_mower.set_system_stop_callback(self.safety.trigger_system_stop)
 
-        # CAN Handler -> Navigation-Befehle vom Sensor-Hub
-        if self.navigation:
-            self.can.set_navigation_command_callback(self.navigation.on_navigation_command)
-            # Navigation -> Sensor-Hub: State-Updates für UI-Feedback
-            self.navigation.set_state_callback(self._on_navigation_state)
-
     def _on_sensor_data(self, data: dict):
-        """Verteilt eingehende Sensor-Hub-Telemetrie auf Logging und Navigation."""
+        """Verteilt eingehende Pose auf Logging und Navigation."""
         if self.config.monitor and not self.config.quiet:
             # 5 Hz telemetry at INFO filled journald and made targeted fault
             # analysis unnecessarily expensive. It remains available when the
@@ -333,53 +288,27 @@ class MotorControllerApp:
         if self.navigation:
             self.navigation.on_pose_update(data)
 
-    def _on_wifi_sensor_data(self, data: dict):
-        """Speist WiFi-Telemetrie in denselben Cache wie CAN-Telemetrie ein."""
-        if self.can:
-            self.can.inject_sensor_data(data, source='wifi')
+    def _on_local_sensor_data(self, data: dict):
+        """Speist die Pose des GNSS-Empfaengers in den Zwischenspeicher.
 
-    def _on_navigation_state(self, payload: dict):
-        """Sendet Navigation-State über CAN an den Sensor-Hub (UI-Feedback)."""
-        sensor_transport = str(
-            getattr(self.config.sensor_hub, 'transport', 'can')
-        ).strip().lower()
-        if not self.can or sensor_transport == 'wifi':
-            return
-        try:
-            self.can.send_command('nav_status', payload)
-        except Exception as exc:
-            self.logger.debug(f"nav_status Send fehlgeschlagen: {exc}")
+        Die Quelle meldet sich nur mit frischen Daten. Bleibt sie stumm,
+        altert die Pose dort von selbst - dieselbe Kette, die frueher einen
+        ausgefallenen SensorHub aufgefangen hat.
+        """
+        if self.pose_cache:
+            self.pose_cache.inject_sensor_data(data)
 
-    def _can_health_check(self) -> tuple[bool, str | None]:
-        """Prueft alle CAN-Teilnehmer, die fuer sicheren Betrieb noetig sind."""
-        expected_nodes = self.odrive_mower.node_ids if self.odrive_mower else []
-        heartbeat_timeout_s = (
-            float(self.odrive_mower.config.heartbeat_timeout_s)
-            if self.odrive_mower
-            else 1.0
+    def _link_health_check(self) -> tuple[bool, str | None]:
+        """Prueft Pose und Maehdeck - alles, was sicherer Betrieb braucht."""
+        pose = self.pose_cache.get_status(
+            pose_timeout_s=float(self.config.pose.telemetry_timeout_s)
         )
-        odrive_transport = (
-            getattr(self.odrive_mower, 'transport', 'can') if self.odrive_mower else None
-        )
-        can_expected_nodes = expected_nodes if odrive_transport == 'can' else []
-        status = self.can.get_status(
-            expected_odrive_node_ids=can_expected_nodes,
-            sensor_timeout_s=float(self.config.sensor_hub.telemetry_timeout_s),
-            odrive_timeout_s=heartbeat_timeout_s,
-        )
-        sensor_transport = str(
-            getattr(self.config.sensor_hub, 'transport', 'can')
-        ).strip().lower()
-        can_required = sensor_transport in ('can', 'shadow') or odrive_transport == 'can'
-        if can_required and not status['interface_online']:
-            return False, "CAN-Interface oder Reader ausgefallen"
-        # SensorHub-Telemetrie ist nur waehrend einer aktiven Fahrt
-        # sicherheitsrelevant. Beim Boot im Stillstand darf ein noch nicht
-        # verfuegbares WLAN keinen permanenten Safety-Latch erzeugen, der
-        # spaeter sogar manuelles Rangieren blockiert.
-        if self._sensor_required_for_motion() and not status['sensor_hub']['online']:
-            transport = status['sensor_hub'].get('transport', 'can').upper()
-            return False, f"SensorHub {transport}-Timeout"
+        # Die Pose ist nur waehrend einer aktiven Fahrt sicherheitsrelevant.
+        # Beim Boot im Stillstand darf ein Empfaenger, der noch keinen Fix
+        # hat, keinen permanenten Safety-Latch erzeugen, der spaeter sogar
+        # manuelles Rangieren blockiert.
+        if self._sensor_required_for_motion() and not pose['online']:
+            return False, "GNSS-Pose-Timeout"
         # In IDLE the ODrives are not needed for propulsion, and mower start-up
         # validates every axis itself. Once the blades run, a stalled transport,
         # a stale status, an ODrive error, an axis that left closed loop and a
@@ -390,47 +319,31 @@ class MotorControllerApp:
             mower_healthy, mower_reason = self.odrive_mower.runtime_health()
             if not mower_healthy:
                 return False, mower_reason or "Maehdeck nicht betriebsbereit"
-        if odrive_transport == 'usb':
-            return True, None
-
-        odrives = status['odrives']
-        offline = [
-            int(node_id)
-            for node_id, node in odrives['nodes'].items()
-            if int(node_id) in expected_nodes and not node['online']
-        ]
-        if offline:
-            return False, f"ODrive CAN-Timeout: nodes {offline}"
-        if odrives['error_node_ids']:
-            return False, f"ODrive Fehler: nodes {odrives['error_node_ids']}"
         return True, None
 
     def _sensor_motion_health_check(self) -> tuple[bool, str | None]:
-        """Fordert bei kurzer SensorHub-Luecke nur eine Fahrpause an."""
+        """Fordert bei kurzer Pose-Luecke nur eine Fahrpause an."""
         if not self._sensor_required_for_motion():
             self._sensor_recovery_started_monotonic = None
             return True, None
-        status = self.can.get_status(
-            expected_odrive_node_ids=[],
-            sensor_timeout_s=float(self.config.sensor_hub.pause_timeout_s),
-            odrive_timeout_s=1.0,
+        pose = self.pose_cache.get_status(
+            pose_timeout_s=float(self.config.pose.pause_timeout_s)
         )
-        if not status['sensor_hub']['online']:
+        if not pose['online']:
             self._sensor_recovery_started_monotonic = None
-            transport = status['sensor_hub'].get('transport', 'can').upper()
-            return False, f"SensorHub {transport} kurzzeitig unterbrochen"
+            return False, "GNSS-Pose kurzzeitig unterbrochen"
         if self._sensor_pause_resume_mode:
             now = time.monotonic()
             if self._sensor_recovery_started_monotonic is None:
                 self._sensor_recovery_started_monotonic = now
             stable_s = max(
                 0.0,
-                float(getattr(self.config.sensor_hub, 'resume_stable_s', 2.0)),
+                float(getattr(self.config.pose, 'resume_stable_s', 2.0)),
             )
             elapsed = now - self._sensor_recovery_started_monotonic
             if elapsed < stable_s:
                 return False, (
-                    f"SensorHub-Verbindung stabilisiert sich "
+                    f"GNSS-Pose stabilisiert sich "
                     f"({elapsed:.1f}/{stable_s:.1f} s)"
                 )
         return True, None
@@ -443,9 +356,9 @@ class MotorControllerApp:
         navigation_running = bool(
             self.navigation and self.navigation.get_status().get('running')
         )
-        # Manuelles Rangieren verwendet keine SensorHub-Pose. Es besitzt mit
-        # dem Joystick-Timeout einen eigenen Dead-Man-Watchdog und darf nicht
-        # von kurzen WLAN-Luecken gestoppt werden.
+        # Manuelles Rangieren verwendet keine Pose. Es besitzt mit dem
+        # Joystick-Timeout einen eigenen Dead-Man-Watchdog und darf nicht von
+        # kurzen Empfangsluecken gestoppt werden.
         return bool(
             plan_running
             or navigation_running
@@ -556,11 +469,8 @@ class MotorControllerApp:
             if self.notifier:
                 self.notifier.start()
 
-            # CAN-Reader starten
-            if self.can:
-                self.can.start_reader()
-            if self.sensor_hub_http:
-                self.sensor_hub_http.start()
+            if self.local_pose:
+                self.local_pose.start()
             if self.odrive_mower:
                 self.odrive_mower.start_monitor()
             if self.battery:
@@ -650,13 +560,13 @@ class MotorControllerApp:
 
     def _odrive_usb_runtime_hang_reason(self) -> str | None:
         mower = self.odrive_mower
-        if not mower or getattr(mower, 'transport', 'can') != 'usb':
+        if not mower:
             return None
         return mower.transport_stall_reason()
 
     def _odrive_usb_startup_hang_reason(self) -> str | None:
         mower = self.odrive_mower
-        if not mower or getattr(mower, 'transport', 'can') != 'usb':
+        if not mower:
             return None
         status = mower.get_status()
         startup = status.get('startup_status') or {}
@@ -702,9 +612,9 @@ class MotorControllerApp:
                 self.logger.info("Stoppe Safety-Watchdog...")
                 self.safety.cleanup()
 
-            if self.sensor_hub_http:
-                self.logger.info("Stoppe SensorHub-WiFi-Empfang...")
-                self.sensor_hub_http.stop()
+            if self.local_pose:
+                self.logger.info("Stoppe lokale GNSS-Pose...")
+                self.local_pose.stop()
 
             if self.odrive_mower:
                 self.logger.info("Stoppe ODrive-Maehdeck...")
@@ -717,11 +627,6 @@ class MotorControllerApp:
             if self.network:
                 self.logger.info("Stoppe Netzueberwachung...")
                 self.network.stop()
-            
-            # CAN-Reader stoppen
-            if self.can:
-                self.logger.info("Stoppe CAN-Reader...")
-                self.can.cleanup()
             
             # Motor-Control stoppen
             if self.motor:
@@ -769,8 +674,6 @@ def main():
     parser.add_argument('--pins', default='18,19', help='PWM-Pins (right,left)')
     parser.add_argument('--web', action='store_true', help='Web-Interface aktivieren')
     parser.add_argument('--web-port', type=int, default=80, help='Web-Port')
-    parser.add_argument('--can', default='can0', help='CAN-Interface')
-    parser.add_argument('--bitrate', type=int, default=250000, help='CAN-Bitrate')
     parser.add_argument('--quiet', action='store_true', help='Keine Ausgabe')
     
     args = parser.parse_args()
@@ -798,10 +701,6 @@ def main():
             config.web.enabled = True
         if args.web_port:
             config.web.port = args.web_port
-        if args.can:
-            config.can.interface = args.can
-        if args.bitrate:
-            config.can.bitrate = args.bitrate
         if args.quiet:
             config.quiet = True
             config.logging.console = False

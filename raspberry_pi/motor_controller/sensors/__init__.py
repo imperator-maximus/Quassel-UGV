@@ -10,10 +10,12 @@ from .gps_handler import GPSHandler
 from .ntrip_client import NTRIPClient
 from .gps_ntrip_bridge import GPSNTRIPBridge
 from .local_pose_source import LocalPoseSource
+from .pose_cache import PoseCache
 
 __all__ = [
     'GPSHandler',
     'NTRIPClient',
     'GPSNTRIPBridge',
     'LocalPoseSource',
+    'PoseCache',
 ]

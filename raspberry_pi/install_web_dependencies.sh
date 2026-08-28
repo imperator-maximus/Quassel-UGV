@@ -35,7 +35,7 @@ pip3 list | grep -E "(Flask|flask-socketio|eventlet)"
 
 echo ""
 echo "🚀 Web-Interface kann jetzt gestartet werden mit:"
-echo "   python3 dronecan_esc_controller.py --pwm --web"
+echo "   python3 -m motor_controller.main --config config.yaml"
 echo ""
 echo "📱 Zugriff über Browser:"
 echo "   http://raspberrycan:5000"

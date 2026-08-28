@@ -176,8 +176,8 @@ class SafetyMonitorNotificationTests(unittest.TestCase):
         config = SimpleNamespace(
             pin=17, enabled=False, debounce_time=0.2,
             command_timeout=2.0, joystick_timeout=1.0,
-            can_watchdog_enabled=False, can_watchdog_startup_grace_s=0.0,
-            can_watchdog_interval_s=0.02,
+            link_watchdog_enabled=False, link_watchdog_startup_grace_s=0.0,
+            link_watchdog_interval_s=0.02,
         )
         self.safety = SafetyMonitor(config, SimpleNamespace())
         self.safety.set_notifier(self.notifier)

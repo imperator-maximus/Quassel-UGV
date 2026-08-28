@@ -1,7 +1,6 @@
-# Raspberry Pi teststand profile using a USB-CAN adapter for ODrive/ODESC
-# mower-deck bring-up. ODrive/ODESC units use their integrated Classical CAN
-# 2.0 interfaces; CAN FD is not used.
-# No camera, no SensorHub dependency, and no GPIO/PWM mower outputs.
+# Raspberry Pi teststand profile for ODrive/ODESC mower-deck bring-up over
+# direct USB/Fibre links. The CAN bus this profile once used is gone.
+# No camera, no pose source, and no GPIO/PWM mower outputs.
 
 pwm:
   enabled: false
@@ -28,9 +27,9 @@ safety:
   debounce_time: 0.2
   command_timeout: 2.0
   joystick_timeout: 1.0
-  can_watchdog_enabled: false
-  can_watchdog_startup_grace_s: 5.0
-  can_watchdog_interval_s: 0.1
+  link_watchdog_enabled: false
+  link_watchdog_startup_grace_s: 5.0
+  link_watchdog_interval_s: 0.1
 
 light:
   enabled: false
@@ -40,6 +39,11 @@ odrive_mower:
   enabled: true
   node_id: 0
   node_ids: [0, 1, 2]
+  # Je Achse ein Eintrag {node_id, serial_number, axis}. Die Seriennummern
+  # stehen auf den Boards des jeweiligen Teststands und muessen vor dem
+  # ersten Lauf hier eingetragen werden - ohne sie findet der Controller
+  # keine Achse.
+  usb_axes: []
   axis_state: 5
   min_rpm: 500
   max_rpm: 5000
@@ -57,14 +61,6 @@ odrive_mower:
   current_trip_duration_s: 0.5
   current_critical_trip_a: 29.0
   current_critical_trip_duration_s: 0.1
-
-can:
-  interface: can0
-  bitrate: 250000       # USB-CAN test bus; all ODrive nodes must match
-  motor_controller_id: 0x200
-  sensor_hub_id: 0x100
-  max_frame_size: 6
-  frame_timeout: 1.0
 
 navigation:
   enabled: false

@@ -5,10 +5,81 @@ Zentrale Konfigurationsverwaltung mit YAML-Support
 """
 
 import yaml
+import logging
 import os
 import secrets
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
+
+
+# ----------------------------------------------------------------------
+# Uebergang von der Bus- auf die lokale GNSS-Zeit
+# ----------------------------------------------------------------------
+# Der CAN-Bus und der SensorHub sind ausgebaut, ihre YAML-Abschnitte stehen
+# aber noch in jeder Datei, die vorher aufs Fahrzeug kopiert wurde. Die
+# Dataclasses lehnen unbekannte Schluessel ab, und ein Dienst, der deshalb
+# nicht startet, laesst das Fahrzeug im Feld stehen. Darum werden die
+# ueberholten Schluessel hier stillgelegt statt abgewiesen - laut genug im
+# Log, dass die Datei irgendwann nachgezogen wird.
+
+logger = logging.getLogger(__name__)
+
+# Was den SensorHub-Abschnitt beschrieb und mit ihm verschwunden ist.
+_OBSOLETE_POSE_KEYS = (
+    'transport', 'wifi_url', 'wifi_urls', 'auth_username', 'auth_password',
+    'poll_interval_s', 'request_timeout_s',
+)
+
+
+def _drop_obsolete(section: str, data: Dict[str, Any], obsolete) -> Dict[str, Any]:
+    """Entfernt ueberholte Schluessel eines Abschnitts und meldet sie."""
+    cleaned = dict(data or {})
+    entfernt = [key for key in obsolete if key in cleaned]
+    for key in entfernt:
+        cleaned.pop(key)
+    if entfernt:
+        logger.warning(
+            "config: %s.%s ist entfallen und wird ignoriert",
+            section, ', '.join(entfernt),
+        )
+    return cleaned
+
+
+def _migrate_safety_section(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Uebernimmt ``can_watchdog_*`` als ``link_watchdog_*``."""
+    cleaned = dict(data or {})
+    for suffix in ('enabled', 'startup_grace_s', 'interval_s'):
+        alt = f'can_watchdog_{suffix}'
+        neu = f'link_watchdog_{suffix}'
+        if alt in cleaned:
+            wert = cleaned.pop(alt)
+            cleaned.setdefault(neu, wert)
+            logger.warning("config: safety.%s heisst jetzt %s", alt, neu)
+    return cleaned
+
+
+def _migrate_pose_section(data: Dict[str, Any]):
+    """Liest ``pose`` oder den alten ``sensor_hub``-Abschnitt.
+
+    Gibt ``None`` zurueck, wenn die Datei keinen der beiden Abschnitte hat -
+    dann bleibt es bei den Vorgaben.
+    """
+    if 'can' in data:
+        logger.warning("config: der Abschnitt can ist entfallen und wird ignoriert")
+
+    if 'pose' in data:
+        if 'sensor_hub' in data:
+            logger.warning(
+                "config: sensor_hub wird ignoriert, weil pose vorhanden ist"
+            )
+        return _drop_obsolete('pose', data['pose'], _OBSOLETE_POSE_KEYS)
+
+    if 'sensor_hub' in data:
+        logger.warning("config: der Abschnitt sensor_hub heisst jetzt pose")
+        return _drop_obsolete('sensor_hub', data['sensor_hub'], _OBSOLETE_POSE_KEYS)
+
+    return None
+
 
 
 @dataclass
@@ -44,9 +115,11 @@ class SafetyConfig:
     debounce_time: float = 0.2  # Sekunden
     command_timeout: float = 2.0  # Sekunden
     joystick_timeout: float = 1.0  # Sekunden
-    can_watchdog_enabled: bool = True
-    can_watchdog_startup_grace_s: float = 5.0
-    can_watchdog_interval_s: float = 0.1
+    # Wacht ueber Pose und Maehdeck. Hiess ``can_watchdog``, solange beide
+    # ueber den Bus kamen.
+    link_watchdog_enabled: bool = True
+    link_watchdog_startup_grace_s: float = 5.0
+    link_watchdog_interval_s: float = 0.1
 
 
 @dataclass
@@ -122,9 +195,8 @@ class NetworkConfig:
 
 @dataclass
 class ODriveMowerConfig:
-    """ODrive/ODESC-Mähdeck über CAN oder direkte USB-Verbindungen."""
+    """ODrive/ODESC-Mähdeck über direkte USB-Verbindungen."""
     enabled: bool = False
-    transport: str = 'can'
     node_id: int = 0
     node_ids: List[int] = field(default_factory=list)
     usb_axes: List[Dict[str, Any]] = field(default_factory=list)
@@ -189,54 +261,64 @@ class ODriveMowerConfig:
 
 
 @dataclass
-class CANConfig:
-    """CAN-Bus-Konfiguration"""
-    enabled: bool = True
-    interface: str = 'can0'
-    bitrate: int = 250000
-    motor_controller_id: int = 0x200
-    sensor_hub_id: int = 0x100
-    max_frame_size: int = 6  # Bytes Nutzdaten pro Frame
-    frame_timeout: float = 1.0  # Sekunden
+class PoseConfig:
+    """GNSS-Empfaenger am Raspberry und die Alterung seiner Pose.
 
-
-@dataclass
-class SensorHubConfig:
-    """Transport der SensorHub-Telemetrie zum Hauptrechner.
-
-    Ist der SensorHub durch Basic-Auth geschuetzt, muessen hier dieselben
-    Zugangsdaten stehen. Fehlen sie, bleibt die Pose aus und der Watchdog
-    pausiert nach etwa einer Sekunde den Fahrantrieb.
+    Bis August 2026 kam die Pose von einem eigenen SensorHub - erst ueber den
+    CAN-Bus, spaeter per HTTP. Beides ist ausgebaut; der UM982 haengt jetzt
+    direkt per USB am Raspberry. Die Zeitgrenzen darunter sind geblieben,
+    denn sie beschreiben nicht den Transport, sondern wie alt eine Pose
+    werden darf, bevor das Fahrzeug stehen bleibt.
     """
-    transport: str = 'can'  # can, shadow oder wifi
-    wifi_url: str = 'http://192.168.178.20/api/telemetry'
-    # Mehrere Adressen fuer denselben SensorHub, in der Reihenfolge, in der
-    # sie probiert werden. Das Fahrzeug kann in zwei Netzen stehen: am
-    # Mobilfunkrouter erreicht es den SensorHub direkt, faellt der aus und
-    # beide buchen sich wieder ins alte WLAN ein, nur ueber den NAT-Hairpin.
-    # Leer heisst: es bleibt bei ``wifi_url``.
-    wifi_urls: List[str] = field(default_factory=list)
-    # Passwort gehoert in SENSOR_HUB_TELEMETRY_PASSWORD, nicht in die YAML.
-    auth_username: str = ''
-    auth_password: str = ''
-    poll_interval_s: float = 0.2
-    request_timeout_s: float = 1.5
+    # Der Port wird ueber /dev/serial/by-id angegeben, weil die Nummer hinter
+    # /dev/ttyUSB von der Aufzaehlreihenfolge beim Booten abhaengt und mit den
+    # beiden ODrives am selben Bus wandern kann.
+    gps_port: str = '/dev/serial/by-id/usb-FTDI_FT231X_USB_UART_D30JJBSU-if00-port0'
+    gps_baudrate: int = 230400
+    gps_read_timeout_s: float = 1.0
+    # Aelter als das, gilt die Position nicht mehr als Pose. Die Quelle
+    # schweigt dann, statt einen alten Wert erneut einzuspeisen - nur so
+    # altert die Pose und die Fahrpause greift. Der Empfaenger liefert
+    # mehrmals je Sekunde; zwei Sekunden sind reichlich Luft.
+    gps_max_fix_age_s: float = 2.0
+    gps_max_heading_age_s: float = 2.0
+    # Leer heisst: neben dem Modul liegende vehicle_geometry.json.
+    vehicle_geometry_path: str = ''
+
+    # Ab diesem Alter pausiert der Fahrantrieb.
     pause_timeout_s: float = 1.0
-    # Require a genuinely stable return before restarting an autonomous plan.
-    # A single successful HTTP response between outages must not start/stop
-    # the vehicle repeatedly.
+    # Erst eine wirklich stabile Pose setzt einen Plan wieder in Gang. Ein
+    # einzelner Treffer zwischen zwei Luecken darf das Fahrzeug nicht
+    # wiederholt anfahren und stoppen lassen.
     resume_stable_s: float = 2.0
+    # Ab diesem Alter gilt die Pose fuer den Sicherheitsstopp als verloren.
     telemetry_timeout_s: float = 30.0
+
+    # NTRIP: Open RTK-Dienst M-V. Mountpoint openrtk_mv deckt GPS, GLONASS,
+    # Galileo und BeiDou ab; openrtk_mv_2G nur GPS und GLONASS.
+    # Passwort gehoert in UGV_NTRIP_PASSWORD, nicht in die YAML.
+    ntrip_enabled: bool = True
+    ntrip_host: str = 'openrtk-mv.de'
+    ntrip_port: int = 2101
+    ntrip_mountpoint: str = 'openrtk_mv'
+    ntrip_username: str = ''
+    ntrip_password: str = ''
+    ntrip_timeout_s: float = 10.0
+    ntrip_reconnect_interval_s: float = 15.0
+    # Ein offener Socket ohne Daten ist der gefaehrliche Fall: der Empfaenger
+    # faellt still auf GPS FIX zurueck. Einmal hat das sieben Minuten Fahrt
+    # gekostet, bevor es auffiel.
+    ntrip_stale_timeout_s: float = 10.0
 
 
 @dataclass
 class NavigationConfig:
     """Autonome Wegpunktnavigation (S1-Bearing-Hold).
 
-    Pose-Daten kommen ueber den in ``SensorHubConfig`` gewaehlten Transport.
+    Die Pose kommt aus dem Zwischenspeicher, den ``PoseConfig`` speist.
     """
     enabled: bool = True
-    # Muss spaeter ausloesen als SensorHub.pause_timeout_s (1 s). Die
+    # Muss spaeter ausloesen als pose.pause_timeout_s (1 s). Die
     # zentrale Safety-Logik pausiert und setzt den Plan nach einer kurzen
     # WiFi-Luecke fort; der lokale Navigations-Watchdog bleibt nur als
     # nachgelagerter Fallback bestehen.
@@ -469,8 +551,7 @@ class Config:
     odrive_mower: ODriveMowerConfig = field(default_factory=ODriveMowerConfig)
     battery: BatteryConfig = field(default_factory=BatteryConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
-    can: CANConfig = field(default_factory=CANConfig)
-    sensor_hub: SensorHubConfig = field(default_factory=SensorHubConfig)
+    pose: PoseConfig = field(default_factory=PoseConfig)
     navigation: NavigationConfig = field(default_factory=NavigationConfig)
     mapping: MappingConfig = field(default_factory=MappingConfig)
     web: WebConfig = field(default_factory=WebConfig)
@@ -501,11 +582,13 @@ class Config:
         if 'ramping' in data:
             config.ramping = RampingConfig(**data['ramping'])
         if 'safety' in data:
-            config.safety = SafetyConfig(**data['safety'])
+            config.safety = SafetyConfig(**_migrate_safety_section(data['safety']))
         if 'light' in data:
             config.light = LightConfig(**data['light'])
         if 'odrive_mower' in data:
-            odrive_data = dict(data['odrive_mower'])
+            odrive_data = _drop_obsolete(
+                'odrive_mower', data['odrive_mower'], ('transport',)
+            )
             if 'node_ids' in odrive_data and odrive_data['node_ids'] is None:
                 odrive_data['node_ids'] = []
             if 'usb_axes' in odrive_data and odrive_data['usb_axes'] is None:
@@ -515,10 +598,12 @@ class Config:
             config.battery = BatteryConfig(**data['battery'])
         if 'network' in data:
             config.network = NetworkConfig(**data['network'])
-        if 'can' in data:
-            config.can = CANConfig(**data['can'])
-        if 'sensor_hub' in data:
-            config.sensor_hub = SensorHubConfig(**data['sensor_hub'])
+        # ``can`` und ``sensor_hub`` sind mit dem Bus und dem SensorHub
+        # entfallen. Eine mitgereiste YAML darf daran nicht scheitern: das
+        # Fahrzeug steht dann irgendwo im Feld und der Dienst startet nicht.
+        pose_data = _migrate_pose_section(data)
+        if pose_data is not None:
+            config.pose = PoseConfig(**pose_data)
         if 'navigation' in data:
             config.navigation = NavigationConfig(**data['navigation'])
         if 'mapping' in data:
@@ -561,13 +646,16 @@ class Config:
             # allemal besser als ein Wert, der im Repository nachlesbar ist.
             self.web.secret_key = secrets.token_urlsafe(32)
 
-        hub_password = os.getenv('SENSOR_HUB_TELEMETRY_PASSWORD')
-        if hub_password:
-            self.sensor_hub.auth_password = hub_password
+        # NTRIP-Zugangsdaten des Open RTK-Dienstes M-V. Der Dienst erlaubt nur
+        # eine Verbindung je Kennung; ein zweiter Client mit denselben Daten
+        # wirft den ersten heraus.
+        ntrip_user = os.getenv('UGV_NTRIP_USERNAME')
+        if ntrip_user:
+            self.pose.ntrip_username = ntrip_user
 
-        hub_user = os.getenv('SENSOR_HUB_TELEMETRY_USER')
-        if hub_user:
-            self.sensor_hub.auth_username = hub_user
+        ntrip_password = os.getenv('UGV_NTRIP_PASSWORD')
+        if ntrip_password:
+            self.pose.ntrip_password = ntrip_password
 
         # Bei ntfy.sh darf jeder mitlesen und mitschreiben, der den Topic-Namen
         # kennt. Er ist damit ein Geheimnis und gehoert wie die Passwoerter in
@@ -611,9 +699,9 @@ class Config:
                 'debounce_time': self.safety.debounce_time,
                 'command_timeout': self.safety.command_timeout,
                 'joystick_timeout': self.safety.joystick_timeout,
-                'can_watchdog_enabled': self.safety.can_watchdog_enabled,
-                'can_watchdog_startup_grace_s': self.safety.can_watchdog_startup_grace_s,
-                'can_watchdog_interval_s': self.safety.can_watchdog_interval_s
+                'link_watchdog_enabled': self.safety.link_watchdog_enabled,
+                'link_watchdog_startup_grace_s': self.safety.link_watchdog_startup_grace_s,
+                'link_watchdog_interval_s': self.safety.link_watchdog_interval_s
             },
             'light': {
                 'enabled': self.light.enabled,
@@ -621,7 +709,6 @@ class Config:
             },
             'odrive_mower': {
                 'enabled': self.odrive_mower.enabled,
-                'transport': self.odrive_mower.transport,
                 'node_id': self.odrive_mower.node_id,
                 'node_ids': self.odrive_mower.node_ids,
                 'usb_axes': self.odrive_mower.usb_axes,
@@ -686,23 +773,25 @@ class Config:
                 'auto_switch_interval_s': self.network.auto_switch_interval_s,
                 'auto_rescan_interval_s': self.network.auto_rescan_interval_s
             },
-            'can': {
-                'enabled': self.can.enabled,
-                'interface': self.can.interface,
-                'bitrate': self.can.bitrate,
-                'motor_controller_id': self.can.motor_controller_id,
-                'sensor_hub_id': self.can.sensor_hub_id,
-                'max_frame_size': self.can.max_frame_size,
-                'frame_timeout': self.can.frame_timeout
-            },
-            'sensor_hub': {
-                'transport': self.sensor_hub.transport,
-                'wifi_url': self.sensor_hub.wifi_url,
-                'auth_username': self.sensor_hub.auth_username,
-                'poll_interval_s': self.sensor_hub.poll_interval_s,
-                'request_timeout_s': self.sensor_hub.request_timeout_s,
-                'pause_timeout_s': self.sensor_hub.pause_timeout_s,
-                'telemetry_timeout_s': self.sensor_hub.telemetry_timeout_s
+            # ntrip_password bleibt draussen: es kommt aus UGV_NTRIP_PASSWORD.
+            'pose': {
+                'gps_port': self.pose.gps_port,
+                'gps_baudrate': self.pose.gps_baudrate,
+                'gps_read_timeout_s': self.pose.gps_read_timeout_s,
+                'gps_max_fix_age_s': self.pose.gps_max_fix_age_s,
+                'gps_max_heading_age_s': self.pose.gps_max_heading_age_s,
+                'vehicle_geometry_path': self.pose.vehicle_geometry_path,
+                'pause_timeout_s': self.pose.pause_timeout_s,
+                'resume_stable_s': self.pose.resume_stable_s,
+                'telemetry_timeout_s': self.pose.telemetry_timeout_s,
+                'ntrip_enabled': self.pose.ntrip_enabled,
+                'ntrip_host': self.pose.ntrip_host,
+                'ntrip_port': self.pose.ntrip_port,
+                'ntrip_mountpoint': self.pose.ntrip_mountpoint,
+                'ntrip_username': self.pose.ntrip_username,
+                'ntrip_timeout_s': self.pose.ntrip_timeout_s,
+                'ntrip_reconnect_interval_s': self.pose.ntrip_reconnect_interval_s,
+                'ntrip_stale_timeout_s': self.pose.ntrip_stale_timeout_s
             },
             'navigation': {
                 'enabled': self.navigation.enabled,

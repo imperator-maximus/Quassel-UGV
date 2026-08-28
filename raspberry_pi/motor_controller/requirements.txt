@@ -3,8 +3,8 @@
 # Configuration
 pyyaml>=6.0
 
-# CAN Bus
-python-can>=4.0.0
+# GNSS-Empfaenger am USB-Port
+pyserial>=3.5
 
 # Native USB/Fibre control for ODrive v3.x (works with both installed firmwares)
 odrive==0.5.4

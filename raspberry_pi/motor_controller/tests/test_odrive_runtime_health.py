@@ -40,7 +40,7 @@ class HealthConfig:
 
 class RuntimeHealthTests(unittest.TestCase):
     def setUp(self):
-        self.controller = ODriveMowerController(HealthConfig(), can_handler=None)
+        self.controller = ODriveMowerController(HealthConfig())
 
     def _mark_running(self, *, rpm=3000.0, run_age_s=10.0):
         """Versetzt den Controller in einen gesunden Laufzustand."""

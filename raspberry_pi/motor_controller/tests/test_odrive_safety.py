@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import sys
 from types import SimpleNamespace
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -59,84 +58,78 @@ class FakeSafetyConfig:
     debounce_time: float = 0.2
     command_timeout: float = 100.0
     joystick_timeout: float = 100.0
-    can_watchdog_enabled: bool = False
-    can_watchdog_startup_grace_s: float = 0.0
-    can_watchdog_interval_s: float = 0.02
+    link_watchdog_enabled: bool = False
+    link_watchdog_startup_grace_s: float = 0.0
+    link_watchdog_interval_s: float = 0.02
 
 
-class FakeMessage:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
+class RecordingMower(ODriveMowerController):
+    """Schreibt jeden abgesetzten Befehl mit, statt ihn zu uebertragen.
 
+    Die Basisklasse kennt keinen Transport mehr; welche Achse welchen Befehl
+    in welcher Reihenfolge bekommt, ist aber genau das, was die Ablauf- und
+    Sicherheitslogik hier ausmacht.
+    """
 
-class FakeBus:
-    def __init__(self):
-        self.messages = []
+    def __init__(self, config):
+        super().__init__(config)
+        self.commands = []
+        self.hook = None
 
-    def send(self, message, timeout=None):
-        self.messages.append((message, timeout))
+    def _send(self, node_id, command_id, data=b""):
+        self._record(int(node_id), int(command_id), bytes(data), False)
+
+    def _send_rtr(self, node_id, command_id, dlc=8):
+        self._record(int(node_id), int(command_id), b"", True)
+
+    def _record(self, node_id, command_id, data, rtr):
+        self.commands.append({
+            'node_id': node_id,
+            'command_id': command_id,
+            'data': data,
+            'rtr': rtr,
+        })
+        if self.hook:
+            self.hook(node_id, command_id)
 
 
 class ODriveSafetyTests(unittest.TestCase):
     def setUp(self):
-        self.bus = FakeBus()
-        self.controller = ODriveMowerController(
-            FakeODriveConfig(),
-            SimpleNamespace(can_bus=self.bus),
+        self.controller = RecordingMower(FakeODriveConfig())
+
+    def test_current_poll_asks_every_axis_once(self):
+        self.controller._poll_currents()
+
+        self.assertEqual(
+            [(befehl['node_id'], befehl['command_id']) for befehl in self.controller.commands],
+            [(0, CMD_GET_IQ), (1, CMD_GET_IQ), (2, CMD_GET_IQ)],
         )
-
-    def test_get_iq_uses_classical_can_rtr_with_dlc_8(self):
-        fake_can = SimpleNamespace(Message=FakeMessage)
-        with patch.object(odrive_module, "CAN_AVAILABLE", True), patch.object(
-            odrive_module, "can", fake_can, create=True
-        ):
-            self.controller._poll_currents()
-
-        self.assertEqual(len(self.bus.messages), 3)
-        ids = [entry[0].arbitration_id for entry in self.bus.messages]
-        self.assertEqual(ids, [0x14, 0x34, 0x54])
-        for message, _timeout in self.bus.messages:
-            self.assertTrue(message.is_remote_frame)
-            self.assertFalse(message.is_extended_id)
-            self.assertEqual(message.dlc, 8)
-            self.assertEqual(message.arbitration_id & 0x1F, CMD_GET_IQ)
+        self.assertTrue(all(befehl['rtr'] for befehl in self.controller.commands))
 
     def test_runtime_current_polling_round_robins_nodes(self):
-        fake_can = SimpleNamespace(Message=FakeMessage)
-        with patch.object(odrive_module, "CAN_AVAILABLE", True), patch.object(
-            odrive_module, "can", fake_can, create=True
-        ):
-            polled = [self.controller._poll_next_current() for _ in range(5)]
+        polled = [self.controller._poll_next_current() for _ in range(5)]
 
         self.assertEqual(polled, [0, 1, 2, 0, 1])
         self.assertEqual(
-            [entry[0].arbitration_id for entry in self.bus.messages],
-            [0x14, 0x34, 0x54, 0x14, 0x34],
+            [befehl['node_id'] for befehl in self.controller.commands],
+            [0, 1, 2, 0, 1],
         )
 
     def test_idle_monitor_does_not_poll_without_hardware_watchdog(self):
-        fake_can = SimpleNamespace(Message=FakeMessage)
-        with patch.object(odrive_module, "CAN_AVAILABLE", True), patch.object(
-            odrive_module, "can", fake_can, create=True
-        ):
-            self.controller.start_monitor()
-            time.sleep(0.25)
-            self.controller.stop_monitor()
+        self.controller.start_monitor()
+        time.sleep(0.25)
+        self.controller.stop_monitor()
 
-        self.assertEqual(self.bus.messages, [])
+        self.assertEqual(self.controller.commands, [])
 
     def test_startup_poll_requests_current_and_sensorless_estimate(self):
-        fake_can = SimpleNamespace(Message=FakeMessage)
-        with patch.object(odrive_module, "CAN_AVAILABLE", True), patch.object(
-            odrive_module, "can", fake_can, create=True
-        ):
-            self.controller._poll_node_startup(1)
+        self.controller._poll_node_startup(1)
 
         self.assertEqual(
-            [entry[0].arbitration_id for entry in self.bus.messages],
-            [0x34, 0x35],
+            [(befehl['node_id'], befehl['command_id']) for befehl in self.controller.commands],
+            [(1, CMD_GET_IQ), (1, CMD_GET_SENSORLESS_ESTIMATES)],
         )
-        self.assertTrue(all(entry[0].is_remote_frame for entry in self.bus.messages))
+        self.assertTrue(all(befehl['rtr'] for befehl in self.controller.commands))
 
     def test_sensorless_callback_records_rpm(self):
         self.controller.on_sensorless_estimates(0, 1.25, 10.0)
@@ -150,7 +143,6 @@ class ODriveSafetyTests(unittest.TestCase):
     def test_validated_start_uses_temporary_current_limit(self):
         self.controller.node_ids = [0]
         self.controller.running = True
-        fake_can = SimpleNamespace(Message=FakeMessage)
         injected = threading.Event()
 
         def inject_measurements():
@@ -167,29 +159,24 @@ class ODriveSafetyTests(unittest.TestCase):
 
         worker = threading.Thread(target=inject_measurements, daemon=True)
         worker.start()
-        with patch.object(odrive_module, "CAN_AVAILABLE", True), patch.object(
-            odrive_module, "can", fake_can, create=True
-        ):
-            success, error = self.controller._start_node_with_validation(0, [], 500)
+        success, error = self.controller._start_node_with_validation(0, [], 500)
 
         self.assertTrue(injected.is_set())
         self.assertTrue(success)
         self.assertIsNone(error)
-        limit_messages = [
-            message
-            for message, _ in self.bus.messages
-            if message.arbitration_id & 0x1F == CMD_SET_LIMITS
+        limits = [
+            befehl for befehl in self.controller.commands
+            if befehl['command_id'] == CMD_SET_LIMITS
         ]
-        self.assertEqual(len(limit_messages), 2)
+        self.assertEqual(len(limits), 2)
         self.assertEqual(
-            [round(odrive_module.struct.unpack('<ff', bytes(m.data))[1], 1) for m in limit_messages],
+            [round(odrive_module.struct.unpack('<ff', befehl['data'])[1], 1) for befehl in limits],
             [12.0, 30.0],
         )
 
     def test_startup_aborts_on_first_excessive_current_sample(self):
         self.controller.node_ids = [0]
         self.controller.running = True
-        fake_can = SimpleNamespace(Message=FakeMessage)
 
         def inject_overcurrent():
             while not self.controller.startup_status['active']:
@@ -199,10 +186,7 @@ class ODriveSafetyTests(unittest.TestCase):
             self.controller.on_iq(0, 20.0, 20.0)
 
         threading.Thread(target=inject_overcurrent, daemon=True).start()
-        with patch.object(odrive_module, "CAN_AVAILABLE", True), patch.object(
-            odrive_module, "can", fake_can, create=True
-        ):
-            success, error = self.controller._start_node_with_validation(0, [], 500)
+        success, error = self.controller._start_node_with_validation(0, [], 500)
 
         self.assertFalse(success)
         self.assertIn('20.0 A', error)
@@ -259,26 +243,19 @@ class ODriveSafetyTests(unittest.TestCase):
         self.assertEqual(status['active_axis_nodes'], [0])
 
     def test_emergency_stop_retries_until_heartbeats_confirm_idle(self):
-        fake_can = SimpleNamespace(Message=FakeMessage)
         self.controller.running = True
         self.controller.odrive_states = {0: 5, 1: 5, 2: 5}
         idle_requests = {0: 0, 1: 0, 2: 0}
-        original_send = self.bus.send
 
-        def send_and_confirm_on_retry(message, timeout=None):
-            original_send(message, timeout)
-            if (message.arbitration_id & 0x1F) != CMD_SET_AXIS_STATE:
+        def confirm_on_retry(node_id, command_id):
+            if command_id != CMD_SET_AXIS_STATE:
                 return
-            node_id = message.arbitration_id >> 5
             idle_requests[node_id] += 1
             if idle_requests[node_id] >= 2:
                 self.controller.on_heartbeat(node_id, 0, 1)
 
-        self.bus.send = send_and_confirm_on_retry
-        with patch.object(odrive_module, "CAN_AVAILABLE", True), patch.object(
-            odrive_module, "can", fake_can, create=True
-        ):
-            status = self.controller.emergency_stop('test')
+        self.controller.hook = confirm_on_retry
+        status = self.controller.emergency_stop('test')
 
         self.assertTrue(status['success'])
         self.assertFalse(status['running'])
@@ -301,12 +278,12 @@ class SafetyLatchTests(unittest.TestCase):
         self.assertFalse(self.monitor.is_motion_allowed())
         self.assertEqual(reasons, ["CAN verloren"])
 
-        self.monitor.set_can_health_check(lambda: (False, "Node 2 fehlt"))
+        self.monitor.set_link_health_check(lambda: (False, "Node 2 fehlt"))
         success, error = self.monitor.reset_system_stop()
         self.assertFalse(success)
         self.assertEqual(error, "Node 2 fehlt")
 
-        self.monitor.set_can_health_check(lambda: (True, None))
+        self.monitor.set_link_health_check(lambda: (True, None))
         success, error = self.monitor.reset_system_stop()
         self.assertTrue(success)
         self.assertIsNone(error)

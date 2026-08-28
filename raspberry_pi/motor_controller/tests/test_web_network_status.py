@@ -61,7 +61,7 @@ def build_server(network=None):
     dummy = SimpleNamespace()
     can = SimpleNamespace(
         get_sensor_data=lambda: {},
-        get_status=lambda **_kwargs: {'odrives': {}, 'sensor_hub': {}},
+        get_status=lambda **_kwargs: {'online': True, 'age_s': 0.1, 'source': {}},
     )
     motor = SimpleNamespace(get_status=lambda: {'current_pwm': {'left': 1500, 'right': 1500}})
     joystick = SimpleNamespace(get_status=lambda: {'enabled': False, 'max_speed': 100})

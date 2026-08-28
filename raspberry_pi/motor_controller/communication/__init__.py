@@ -3,8 +3,7 @@
 Communication-Module für Motor Controller
 """
 
-from .can_handler import CANHandler
-from .can_protocol import CANProtocol
+from .network_monitor import NetworkMonitor
+from .push_notifier import PushNotifier
 
-__all__ = ['CANHandler', 'CANProtocol']
-
+__all__ = ['NetworkMonitor', 'PushNotifier']

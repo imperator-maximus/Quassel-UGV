@@ -11,37 +11,27 @@ Modulare, erweiterbare Plattform für autonome Rasenmäher mit:
 - Sicherheitssysteme & Notfallbehandlung
 - Web-Interface & Remote-Steuerung
 
-## Verbindlicher Produktionsstand (24.07.2026)
+## Verbindlicher Produktionsstand
 
-Der Haupt-UGV nutzt keinen aktiven CAN-Bus mehr: Der SensorHub liefert seine
-Pose per HTTP/WiFi, und die beiden ODrive-v3.x-Boards sind ueber zwei direkte
-USB/Fibre-Verbindungen mit dem Raspberry Pi verbunden. Die drei verwendeten
-Achsen werden ueber USB-Seriennummer und Achsindex eindeutig zugeordnet.
+Alles haengt direkt am Raspberry Pi: der GNSS-Empfaenger ueber eine serielle
+USB-Verbindung, die beiden ODrive-v3.x-Boards ueber zwei USB/Fibre-Leitungen.
+Die drei verwendeten Maehachsen werden ueber USB-Seriennummer und Achsindex
+eindeutig zugeordnet.
 
-Der vorhandene Classical-CAN-2.0-Code bleibt ausschliesslich fuer historische
-Tests und eine moegliche spaetere Neuentwicklung erhalten. Er ist **kein
-automatischer Rueckfallpfad** und darf im produktiven UGV-Profil nicht aktiviert
-werden. CAN FD wird nicht verwendet; ein Legacy-Testbus arbeitet mit 250 kbit/s.
+CAN-Bus und SensorHub sind ausgebaut, ihr Code ist aus dem Repository entfernt.
+Sie duerfen nicht wieder als Produktionsabhaengigkeit eingefuehrt werden.
 
 | Einsatz | Aktiver Transport | Profil |
 |---------|-------------------|--------|
-| Orange Pi Zero 2W Sensor Hub → Haupt-UGV | HTTP/WiFi, zwei parallele NDJSON-Streams | `/api/telemetry/stream` |
-| Haupt-UGV → ODrive Board A/B | zwei direkte USB/Fibre-Leitungen | Seriennummer + Axis 0/1 |
-| Ehemaliger UGV-Testrechner (offline) | USB-CAN, SocketCAN `can0` | Classical CAN 2.0, 250 kbit/s |
-| Legacy/Testcode, produktiv inaktiv | ODrive SimpleCAN | Classical CAN 2.0, 250 kbit/s |
+| GNSS-Empfaenger UM982 → Raspberry | serielle USB-Verbindung | Port ueber `/dev/serial/by-id` |
+| RTK-Korrekturen → Raspberry | NTRIP ueber Mobilfunk | Mountpoint `openrtk_mv` |
+| Raspberry → ODrive Board A/B | zwei direkte USB/Fibre-Leitungen | Seriennummer + Axis 0/1 |
 
-Das Produktionsprofil verwendet `sensor_hub.transport: wifi` und
-`odrive_mower.transport: usb`. Der SensorHub-Telemetriepfad kann wahlweise
-ueber WLAN oder einen USB-Gadget-Link (CDC-ECM, 10.66.0.0/24) laufen; die
-Umstellung erfolgt manuell per `sensor_hub.wifi_url`, siehe
-`raspberry_pi/USB_GADGET_LINK.md`. Der Raspberry haelt zwei unabhaengige
-HTTP-Telemetriestroeme offen, damit ein stockender TCP-Strom den zweiten nicht
-blockiert. `can` und `shadow` existieren nur noch fuer Legacy-Tests. Bei
-ausbleibender aktiver
-SensorHub-Telemetrie pausiert der System-Watchdog nach einer kurzen Frist nur
-Fahrantrieb und Route. Erst nach der langen Ausfallfrist verriegelt er den
-Gesamtstopp inklusive Maehdeck. Nach Rueckkehr der Pose wird eine zuvor aktive
-autonome Route automatisch am gespeicherten Resume-Punkt fortgesetzt.
+Die Pose entsteht damit auf dem Fahrzeugrechner selbst. Bleibt sie aus,
+pausiert der System-Watchdog nach einer kurzen Frist nur Fahrantrieb und
+Route. Erst nach der langen Ausfallfrist verriegelt er den Gesamtstopp
+inklusive Maehdeck. Nach Rueckkehr der Pose wird eine zuvor aktive autonome
+Route automatisch am gespeicherten Resume-Punkt fortgesetzt.
 
 ## 📁 Projektstruktur
 
@@ -56,7 +46,7 @@ raspberry_pi/
 │   ├── __init__.py
 │   ├── motor_controller.py  # Orchestrator (vereinfacht)
 │   ├── gpio_manager.py      # GPIO-Abstraktion
-│   └── can_handler.py       # CAN-Bus-Kommunikation
+│   └── pose_cache.py        # Zwischenspeicher der GNSS-Pose
 │
 ├── subsystems/
 │   ├── __init__.py
@@ -97,17 +87,17 @@ MotorController (Orchestrator)
     ├→ LightController (Licht)
     ├→ MowerController (Mäher)
     ├→ SafetyController (Sicherheit)
-    └→ CANHandler (Sensor Hub)
+    └→ PoseCache ← LocalPoseSource (GNSS über USB)
          ↓
-    Sensor-Daten zurück
+    Pose zurück
 ```
 
 ## 🛡️ Sicherheitskonzept
 
 1. **Hierarchische Kontrolle**
    - Safety-Pin hat höchste Priorität
-   - CAN-Disable stoppt autonome Befehle
-   - Joystick nur wenn CAN disabled
+   - Eine veraltete Pose pausiert Fahrantrieb und Route
+   - Manuelles Rangieren bleibt erlaubt, es braucht keine Pose
 
 2. **Timeout-Mechanismen**
    - Joystick-Timeout: 1.0s
@@ -124,7 +114,7 @@ MotorController (Orchestrator)
 - Waypoint-Planung mit GPS
 - Pfad-Optimierung (Dijkstra/A*)
 - Flächenberechnung & Mähbereichsverwaltung
-- RTK-GPS Integration (Sensor Hub)
+- RTK-GPS Integration (NTRIP am Raspberry)
 
 ### Autonomie (Phase 3)
 - Autonome Mährouten
@@ -171,13 +161,11 @@ SAFETY_DEBOUNCE = 0.5
 
 ```
 GET  /api/status              # System-Status
-POST /api/can/toggle          # CAN aktivieren/deaktivieren
 POST /api/joystick            # Joystick-Input
 POST /api/light/toggle        # Licht an/aus
 POST /api/mower/toggle        # Mäher an/aus
 POST /api/mower/speed         # Mäher-Geschwindigkeit
-GET  /api/sensor/status       # Sensor-Daten
-POST /api/sensor/restart      # Sensor Hub neustarten
+GET  /api/sensor/status       # Pose samt Alter
 ```
 
 ## 📊 Implementierungs-Reihenfolge
@@ -186,7 +174,7 @@ POST /api/sensor/restart      # Sensor Hub neustarten
 2. ✅ GPIO-Manager
 3. ✅ Subsystem-Klassen
 4. ✅ PWM-Controller
-5. ✅ CAN-Handler
+5. ✅ Pose-Zwischenspeicher
 6. ✅ Web-Interface
 7. ✅ Hauptklasse vereinfachen
 8. 🚀 Navigation-Module (später)

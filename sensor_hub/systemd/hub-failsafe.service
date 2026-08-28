@@ -1,6 +1,0 @@
-[Unit]
-Description=Rueckfall des SensorHub ins alte WLAN, falls niemand zusagt
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/hub-failsafe.sh

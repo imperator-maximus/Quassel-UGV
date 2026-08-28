@@ -4,15 +4,14 @@
 
 > **Produktionsstand 24.07.2026:** SensorHub-Pose ueber zwei parallele
 > HTTP/WiFi-Streams; beide ODrive-Boards ueber zwei direkte USB/Fibre-Kabel.
-> CAN ist auf Haupt-UGV und SensorHub deaktiviert. Weiter unten enthaltene
-> CAN-Anweisungen sind ausschliesslich historische Teststand-Dokumentation.
+> CAN-Bus und SensorHub sind ausgebaut, ihr Code ist entfernt.
 
 ## 🎯 Project Overview
 
 **Goal:** Implement autonomous UGV with RTK-GPS positioning, IMU orientation, and real-time web interface.
 
 **Hardware:**
-- **Sensor Hub**: Orange Pi Zero 2W, ohne aktiven CAN-Adapter
+- **GNSS**: Holybro UM982 per USB seriell am Raspberry
   - Holybro UM982 (Dual-antenna RTK-GPS, USB)
   - WitMotion USB-IMU (USB)
 - **Motor Controller**: Raspberry Pi 3 + zwei direkte ODrive-USB-Verbindungen
@@ -25,7 +24,7 @@
 **Communication:**
 - SensorHub → Raspberry: zwei persistente HTTP/WiFi-NDJSON-Streams
 - Raspberry → ODrives: direkte USB/Fibre-Verbindungen nach Seriennummer/Achse
-- CAN: nur ehemaliger Offline-Teststand, Classical CAN 2.0 bei 250 kbit/s
+- GNSS → Raspberry: USB seriell; RTK-Korrekturen per NTRIP
 - IMU/GPS telemetry updates
 - WebSocket: Real-time web interface
 
@@ -44,7 +43,7 @@ motor_controller/
 │   └── safety_monitor.py    # Sicherheitsüberwachung + Watchdog
 ├── communication/
 │   ├── __init__.py
-│   ├── can_handler.py       # CAN-Bus-Kommunikation
+│   ├── pose_cache.py        # Zwischenspeicher der GNSS-Pose
 │   └── can_protocol.py      # Multi-Frame JSON-Protokoll
 ├── control/
 │   ├── __init__.py
@@ -69,7 +68,7 @@ less DEPLOY_ORANGE_PI.md
 #### **Installation**
 ```bash
 # Dependencies installieren
-pip3 install pyyaml python-can RPi.GPIO pigpio Flask
+pip3 install pyyaml pyserial RPi.GPIO pigpio Flask
 
 # pigpiod aktivieren
 sudo systemctl enable pigpiod
@@ -98,7 +97,7 @@ cd /home/nicolay/motor_controller
 python3 -m motor_controller.main --config config.yaml
 
 # Oder mit Legacy CLI-Args
-python3 -m motor_controller.main --pwm --pins 18,19 --web --can can0
+python3 -m motor_controller.main --pwm --pins 18,19 --web
 ```
 
 #### **Systemd-Service**
@@ -127,49 +126,26 @@ curl http://raspberrycan/api/status
 
 ### 3. Produktive Hardware-Verbindungen
 
-- SensorHub und Hauptrechner kommunizieren ueber WLAN; kein CAN-Kabel.
+- Der GNSS-Empfaenger haengt per USB am Raspberry; kein Bus, kein zweiter Rechner.
 - ODrive Board A und B sind jeweils direkt per USB mit dem Raspberry verbunden.
-- Die alten CAN-Klemmen und der USB-CAN-Adapter gehoeren nicht zum Produktivpfad.
+- CAN-Klemmen, USB-CAN-Adapter und CAN HAT sind ausgebaut.
 
 ## 🔧 Hardware Configuration
 
-## Historische CAN-Referenz (Offline-Teststand, nicht am UGV anwenden)
-
-### Historische Main-controller USB-CAN Details (nicht produktiv)
-- **Driver:** `gs_usb`
-- **Protocol:** Classical CAN 2.0 (maximum 8 data bytes per frame)
-- **SocketCAN interface:** `can0`
-- **Bitrate:** 250 kbit/s
-- **Termination:** disabled at the central Raspberry Pi participant
-
 ### Sensor Hub (Orange Pi Zero 2W) Boot Configuration
 ```bash
-# Current production sensor hub:
-# - Orange Pi Zero 2W
-# - kein USB-CAN-Adapter im Produktionsbetrieb
-# - HTTP/WiFi-Telemetrie ueber Port 80/extern 8081
-# - Holybro UM982 via USB serial
-# - WitMotion via USB serial
-#
-# See ../sensor_hub/DEPLOY_ORANGE_PI.md for the tested setup.
+# Der separate SensorHub ist ausgebaut. Der GNSS-Empfaenger haengt
+# direkt am Raspberry; der Port steht in config.yaml unter pose.gps_port.
 ```
 
 ### Controller (Pi 3) Boot Configuration
 ```bash
 # /boot/firmware/config.txt
-# No MCP2515 CAN overlay. The USB adapter is detected by gs_usb.
+# Kein MCP2515-CAN-Overlay noetig.
 ```
 
 The retired InnoMaker HAT and its `mcp2515-can*` Device Tree overlay are no
 longer used. SPI may remain enabled for unrelated peripherals.
-
-### Former UGV Test Stand and ODrive
-
-- The now-offline UGV test Raspberry Pi also uses a **USB-CAN adapter**.
-- `ugvtestpi-usbcan0.service` configures its `can0` for **250 kbit/s**.
-- The ODrive/ODESC units provide their own **integrated Classical CAN 2.0**
-  interfaces and communicate via SimpleCAN.
-- Every participant on one physical CAN bus must use the same bitrate.
 
 ### Sensor Configuration
 **GPS (Holybro UM982):**
@@ -207,21 +183,9 @@ ls /dev/serial/by-id/
 cat /dev/serial0
 # Expected: NMEA sentences from UM982
 
-# Check CAN interface
-ip link show can0
-# Expected: "can0: <NOARP,UP,LOWER_UP,ECHO> mtu 16 ... state UP"
 ```
 
-### 2. Basic CAN Communication
-```bash
-# Monitor raw CAN traffic
-candump can0
-
-# Send test message
-cansend can0 123#DEADBEEF
-```
-
-### 3. Sensor Hub Service
+### 2. Sensor Hub Service
 ```bash
 # Start sensor hub service
 sudo systemctl start sensor-hub
@@ -233,7 +197,7 @@ sudo systemctl status sensor-hub
 journalctl -u sensor-hub -f
 ```
 
-### 4. Web Interface
+### 3. Web Interface
 ```bash
 # Start web interface
 python3 web_app.py
@@ -262,17 +226,6 @@ ls /dev/serial/by-id/
 curl http://127.0.0.1:8080/api/imu/status
 ```
 
-### CAN Messages Not Received
-```bash
-# Check CAN interface
-ip link show can0
-
-# Monitor CAN traffic
-candump can0
-
-# Verify bitrate: 250 kbit/s on the production bus
-```
-
 ### Web Interface Not Accessible
 ```bash
 # Check Flask is running
@@ -292,29 +245,21 @@ curl http://localhost:80
 - **GPS Accuracy**: RTK Fixed (cm-level)
 - **Heading Accuracy**: Dual-antenna (±1°)
 - **IMU Sampling**: 200 Hz (5ms)
-- **CAN Protocol**: Classical CAN 2.0; CAN FD is not used
-- **CAN Bitrate**: unified 250 kbit/s on all bus participants
 - **Memory Usage**: Python runtime (~80MB RAM)
 
 ### Communication Latency
-- **GPS → CAN Bus**: <50ms
-- **IMU → CAN Bus**: <10ms
-- **CAN Bus → Web Interface**: <100ms (WebSocket)
+- **Pose → Web Interface**: <100ms (WebSocket)
 - **Web Interface Update**: 20ms (50Hz)
 
 ## 🎉 Success Criteria
 
 ### Hardware Setup Complete
-- ✅ USB-CAN adapter detected by `gs_usb`
-- ✅ Legacy MCP2515 Device Tree overlay disabled
-- ✅ Legacy test stand: CAN interface `can0` UP and ready
 - ✅ WitMotion USB device detected
 - ✅ UART GPS receiving NMEA data
 
 ### Sensor Hub Telemetry Working
 - ✅ GPS position updates at 50 Hz
 - ✅ IMU orientation data available
-- ✅ Legacy test stand: CAN messages visible in `candump`
 - ✅ Web interface displays real-time data
 
 ## 🚀 Ready for Production

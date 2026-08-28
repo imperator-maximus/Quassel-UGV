@@ -41,7 +41,6 @@ $remoteStaticTmp = "/tmp/ugv_deploy_static"
 $remoteApp = "/home/$User/motor_controller"
 $remoteTemplates = "/home/$User/templates"
 $remoteStatic = "/home/$User/static"
-$remoteCanServiceTmp = "/tmp/ugv-can-interface.service"
 $remoteMotorServiceTmp = "/tmp/ugv-motor-controller-v2.service"
 $remoteODriveWatchdogTmp = "/tmp/configure_odrive_watchdog.py"
 $remoteODriveUndervoltageTmp = "/tmp/configure_odrive_undervoltage.py"
@@ -73,9 +72,6 @@ if ($Tests) {
     Invoke-Step "Run motor-controller tests" {
         python -m unittest discover -s raspberry_pi/motor_controller/tests -v
     }
-    Invoke-Step "Run sensor-hub tests" {
-        python -m unittest discover -s sensor_hub/tests -v
-    }
 }
 
 Invoke-Step "Prepare remote staging directory" {
@@ -106,8 +102,6 @@ Invoke-Step "Upload motor-controller package, template, and static assets" {
 
     scp -4 @jumpArgs @scpPort "raspberry_pi/templates/index.html" "${remote}:$remoteTmp/index.html"
     if ($LASTEXITCODE -ne 0) { throw "Template upload failed" }
-    scp -4 @jumpArgs @scpPort "raspberry_pi/can-interface.service" "${remote}:$remoteCanServiceTmp"
-    if ($LASTEXITCODE -ne 0) { throw "CAN service upload failed" }
     scp -4 @jumpArgs @scpPort "raspberry_pi/motor-controller-v2.service" "${remote}:$remoteMotorServiceTmp"
     if ($LASTEXITCODE -ne 0) { throw "Motor service upload failed" }
     scp -4 @jumpArgs @scpPort "scripts/configure_odrive_watchdog.py" "${remote}:$remoteODriveWatchdogTmp"
@@ -147,7 +141,6 @@ ts=`$(date +%Y%m%d_%H%M%S)
 backup=/home/$User/backup/motor_controller_`$ts
 mkdir -p /home/$User/backup
 sudo cp -a $remoteApp "`$backup"
-sudo cp -a /etc/systemd/system/can-interface.service "/home/$User/backup/can-interface_`$ts.service" 2>/dev/null || true
 sudo cp -a /etc/systemd/system/motor-controller-v2.service "/home/$User/backup/motor-controller-v2_`$ts.service" 2>/dev/null || true
 sudo systemctl stop motor-controller-v2.service || true
 sudo find $remoteApp -mindepth 1 -maxdepth 1 ! -name config.yaml -exec rm -rf {} +
@@ -165,20 +158,14 @@ install -m 755 $remoteODriveUndervoltageTmp /home/$User/configure_odrive_undervo
 chown ${User}:${User} /home/$User/configure_odrive_undervoltage.py
 install -m 755 $remoteODriveDcLimitTmp /home/$User/configure_odrive_dc_current_limit.py
 chown ${User}:${User} /home/$User/configure_odrive_dc_current_limit.py
-sudo sed -i -E '/^can:/,/^[^[:space:]]/ s/^([[:space:]]+bitrate:).*/\1 250000/' $remoteApp/config.yaml
-sudo install -m 644 $remoteCanServiceTmp /etc/systemd/system/can-interface.service
 sudo install -m 644 $remoteMotorServiceTmp /etc/systemd/system/motor-controller-v2.service
+# Der Bus ist ausgebaut. Die Einheiten dazu bleiben sonst als aktivierte
+# Leichen auf dem Geraet stehen und ziehen bei jedem Boot einen Fehlversuch.
 sudo systemctl disable --now dronecan-esc.service 2>/dev/null || true
-sudo systemctl stop can-interface.service || true
+sudo systemctl disable --now can-interface.service 2>/dev/null || true
+sudo rm -f /etc/systemd/system/can-interface.service
 sudo systemctl daemon-reload
 sudo systemctl enable motor-controller-v2.service
-can_enabled=`$(python3 -c 'import yaml; print(str(bool(yaml.safe_load(open("/home/$User/motor_controller/config.yaml")).get("can", {}).get("enabled", True))).lower())')
-if [ "`$can_enabled" = true ]; then
-  sudo systemctl enable can-interface.service
-  sudo systemctl start can-interface.service
-else
-  sudo systemctl disable can-interface.service 2>/dev/null || true
-fi
 sudo systemctl start motor-controller-v2.service
 systemctl is-active motor-controller-v2.service
 # Zwei native ODrive/Fibre-Suchlaeufe brauchen beim Start mehrere Sekunden,
@@ -198,13 +185,8 @@ for versuch in `$(seq 1 60); do
   fi
   sleep 1
 done
-if [ "`$can_enabled" = true ]; then
-  systemctl is-active can-interface.service
-  ip -details link show can0
-else
-  ! systemctl is-active --quiet can-interface.service
-fi
-grep -A3 '^can:' $remoteApp/config.yaml
+! systemctl is-active --quiet can-interface.service
+grep -A6 '^pose:' $remoteApp/config.yaml
 # Die Oberflaeche verlangt eine Anmeldung. Die Zugangsdaten stehen in der
 # EnvironmentFile des Dienstes und bleiben damit auf dem Geraet - sie duerfen
 # weder in diesem Skript noch in der Prozessliste auftauchen.

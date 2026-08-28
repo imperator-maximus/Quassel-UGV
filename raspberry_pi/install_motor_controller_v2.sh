@@ -49,18 +49,13 @@ sudo systemctl enable pigpiod
 sudo systemctl start pigpiod
 print_success "pigpiod installiert und gestartet"
 
-# 4. CAN-Tools installieren
-print_info "Installiere CAN-Tools..."
-sudo apt-get install -y can-utils
-print_success "CAN-Tools installiert"
-
-# 5. Verzeichnis erstellen
+# 4. Verzeichnis erstellen
 print_info "Erstelle Verzeichnisstruktur..."
 mkdir -p /home/$USER/motor_controller
 cp -r motor_controller/* /home/$USER/motor_controller/
 print_success "Dateien kopiert nach /home/$USER/motor_controller/"
 
-# 6. Konfiguration erstellen
+# 5. Konfiguration erstellen
 print_info "Erstelle Konfigurationsdatei..."
 if [ ! -f /home/$USER/motor_controller/config.yaml ]; then
     cp /home/$USER/motor_controller/config.yaml.example \
@@ -70,15 +65,14 @@ else
     print_info "config.yaml existiert bereits (nicht überschrieben)"
 fi
 
-# 7. Berechtigungen setzen
+# 6. Berechtigungen setzen
 print_info "Setze Berechtigungen..."
 chmod +x /home/$USER/motor_controller/main.py
 print_success "Berechtigungen gesetzt"
 
-# 8. Systemd-Services installieren
+# 7. Systemd-Services installieren
 print_info "Installiere Systemd-Services..."
 sudo cp motor_controller_v2.service /etc/systemd/system/motor-controller-v2.service
-sudo cp can-interface.service /etc/systemd/system/can-interface.service
 
 # Service-Datei anpassen (User ersetzen)
 sudo sed -i "s/User=nicolay/User=$USER/g" /etc/systemd/system/motor-controller-v2.service
@@ -87,29 +81,21 @@ sudo sed -i "s|WorkingDirectory=/home/nicolay|WorkingDirectory=/home/$USER|g" /e
 sudo sed -i "s|/home/nicolay/motor_controller|/home/$USER/motor_controller|g" /etc/systemd/system/motor-controller-v2.service
 
 sudo systemctl daemon-reload
-sudo systemctl enable can-interface.service
 print_success "Systemd-Services installiert"
 
-# 9. Altes InnoMaker/MCP2515-Overlay deaktivieren
-print_info "Deaktiviere alte MCP2515 Device-Tree-Einträge..."
+# 8. Reste des ausgebauten CAN-Busses entfernen
+print_info "Entferne CAN-Reste..."
+sudo systemctl disable --now can-interface.service 2>/dev/null || true
+sudo rm -f /etc/systemd/system/can-interface.service
 for boot_config in /boot/firmware/config.txt /boot/config.txt; do
     if [ -f "$boot_config" ]; then
         sudo sed -i -E 's|^([[:space:]]*dtoverlay=mcp2515-can.*)|# \1|' "$boot_config"
     fi
 done
-print_success "USB-CAN benötigt kein MCP2515 Device-Tree-Overlay"
+sudo systemctl daemon-reload
+print_success "CAN-Reste entfernt"
 
-# 10. USB-CAN-Interface aktivieren
-if ip link show can0 &> /dev/null; then
-    print_info "Aktiviere USB-CAN-Interface..."
-    sudo systemctl restart can-interface.service
-    print_success "USB-CAN als can0 aktiviert (250 kbit/s)"
-else
-    print_error "USB-CAN-Interface can0 nicht verfügbar"
-    print_info "USB-Adapter und gs_usb-Treiber mit lsusb und dmesg prüfen"
-fi
-
-# 11. Test-Ausführung
+# 9. Test-Ausführung
 print_info "Teste Installation..."
 cd /home/$USER/motor_controller
 if python3 -c "import motor_controller; print('Import OK')"; then
@@ -118,7 +104,7 @@ else
     print_error "Import-Test fehlgeschlagen"
 fi
 
-# 12. Zusammenfassung
+# 10. Zusammenfassung
 echo ""
 echo "============================================================"
 echo "Installation abgeschlossen!"
@@ -148,8 +134,3 @@ echo "   http://$(hostname)/api/status"
 echo ""
 echo "============================================================"
 
-# USB-CAN-Check
-if ! ip link show can0 &> /dev/null; then
-    echo ""
-    print_info "⚠️  USB-CAN-Adapter wurde nicht als can0 erkannt"
-fi

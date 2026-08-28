@@ -1111,13 +1111,13 @@
                 <div class="status-dot" id="rtkInfoStatus"></div>
                 <span id="rtkInfoStatusText">RTK unbekannt</span>
             </div>
-            <div class="status-indicator" id="sensorHubCanIndicator">
-                <div class="status-dot" id="sensorHubCanStatus"></div>
-                <span id="sensorHubCanStatusText">SensorHub</span>
+            <div class="status-indicator" id="poseIndicator">
+                <div class="status-dot" id="poseStatus"></div>
+                <span id="poseStatusText">Pose</span>
             </div>
-            <div class="status-indicator" id="odriveCanIndicator">
-                <div class="status-dot" id="odriveCanStatus"></div>
-                <span id="odriveCanStatusText">ODrive 0/3</span>
+            <div class="status-indicator" id="odriveIndicator">
+                <div class="status-dot" id="odriveStatus"></div>
+                <span id="odriveStatusText">ODrive 0/3</span>
             </div>
             <div class="status-indicator" id="safetyIndicator" onclick="resetSafetyStop()" style="cursor: pointer;">
                 <div class="status-dot" id="safetyStatus"></div>
@@ -1459,7 +1459,6 @@
             statusResyncPending = true;
             socket.emit('request_status_full');
         }
-        let canEnabled = true;
         let connectionStartTime = Date.now();
 
         // Joystick-Variablen (Phase 2)
@@ -1680,28 +1679,44 @@
         }
 
         function updateStatus(data) {
-            canEnabled = data.can_enabled;
-
-            const canStatus = data.can_status || {};
-            const sensorHubStatus = canStatus.sensor_hub || {};
-            const odriveStatus = canStatus.odrives || {};
+            const linkStatus = data.link_status || {};
+            const poseStatus = linkStatus.pose || {};
+            const odriveStatus = linkStatus.odrives || {};
             const safetyStatus = data.safety_status || {};
             const expectedOdrives = odriveStatus.expected_count || 0;
             const onlineOdrives = odriveStatus.online_count || 0;
-            // Status-Dots aktualisieren
-            document.getElementById('sensorHubCanStatus').className =
-                'status-dot ' + (sensorHubStatus.online ? 'active' : 'inactive');
-            document.getElementById('sensorHubCanStatusText').textContent =
-                sensorHubStatus.online ? 'SensorHub OK' : 'SensorHub offline';
-            document.getElementById('sensorHubCanIndicator').title = sensorHubStatus.age_s == null
-                ? 'Noch keine SensorHub-Telemetrie empfangen'
-                : `Letzte SensorHub-Telemetrie vor ${sensorHubStatus.age_s.toFixed(2)} s`;
+            // Status-Dots aktualisieren. Die Pose kommt vom GNSS-Empfaenger
+            // direkt am Raspberry; SensorHub und CAN-Bus sind ausgebaut.
+            document.getElementById('poseStatus').className =
+                'status-dot ' + (poseStatus.online ? 'active' : 'inactive');
+            document.getElementById('poseStatusText').textContent =
+                poseStatus.online ? 'GNSS OK' : 'GNSS offline';
+            const poseDetail = poseStatus.source || {};
+            const poseTitleParts = [
+                poseStatus.age_s == null
+                    ? 'Noch keine Pose empfangen'
+                    : `Letzte Pose vor ${poseStatus.age_s.toFixed(2)} s`
+            ];
+            // Ein fehlendes Heading laesst die Pose weiterlaufen, stoppt aber
+            // jede autonome Fahrt. Das muss man hier ablesen koennen.
+            if (poseDetail.heading_source && poseDetail.heading_source !== 'dual_gnss') {
+                poseTitleParts.push(`Kein Dual-GNSS-Kurs (${poseDetail.heading_source})`);
+            }
+            if (poseDetail.ntrip) {
+                poseTitleParts.push(poseDetail.ntrip.connected
+                    ? `NTRIP verbunden (${poseDetail.ntrip.mountpoint})`
+                    : `NTRIP getrennt: ${poseDetail.ntrip.last_error || 'unbekannt'}`);
+            }
+            if (poseDetail.geometry_loaded === false) {
+                poseTitleParts.push('Fahrzeuggeometrie fehlt – Kurs ohne Baseline-Offset!');
+            }
+            document.getElementById('poseIndicator').title = poseTitleParts.join(' · ');
 
             const odriveDotState = odriveStatus.all_healthy
                 ? 'active'
                 : (onlineOdrives > 0 ? 'warning' : 'inactive');
-            document.getElementById('odriveCanStatus').className = `status-dot ${odriveDotState}`;
-            document.getElementById('odriveCanStatusText').textContent =
+            document.getElementById('odriveStatus').className = `status-dot ${odriveDotState}`;
+            document.getElementById('odriveStatusText').textContent =
                 `ODrive ${onlineOdrives}/${expectedOdrives || '?'}${(odriveStatus.error_node_ids || []).length ? ' ⚠' : ''}`;
             const nodeDetails = Object.entries(odriveStatus.nodes || {}).map(([nodeId, node]) => {
                 const age = node.age_s == null ? 'nie' : `${node.age_s.toFixed(2)} s`;
@@ -1709,9 +1724,9 @@
                 const iq = node.iq_measured_a == null ? '?' : `${node.iq_measured_a.toFixed(1)} A`;
                 return `Node ${nodeId}: ${node.online ? 'online' : 'offline'}, Alter ${age}, Fehler ${error}, State ${node.state ?? '?'}, Iq ${iq}`;
             });
-            document.getElementById('odriveCanIndicator').title = nodeDetails.length
+            document.getElementById('odriveIndicator').title = nodeDetails.length
                 ? nodeDetails.join('\n')
-                : 'Noch keine ODrive-Heartbeats empfangen';
+                : 'Noch keine ODrive-Zustaende gelesen';
             const safetyLatched = safetyStatus.system_stop_latched === true;
             const motionHeld = safetyStatus.motion_hold_active === true;
             document.getElementById('safetyStatus').className =
@@ -1721,7 +1736,7 @@
             document.getElementById('safetyIndicator').title = safetyLatched
                 ? `${safetyStatus.system_stop_reason || 'Sicherheitsstopp'} – zum Rücksetzen klicken`
                 : (motionHeld
-                    ? `${safetyStatus.motion_hold_reason || 'Fahrpause'} – wartet auf SensorHub`
+                    ? `${safetyStatus.motion_hold_reason || 'Fahrpause'} – wartet auf Pose`
                     : 'Sicherheitsüberwachung aktiv');
             updateBatteryStatus(data.battery_status || {});
             updateNetworkStatus(data.network_status || {});
@@ -1757,7 +1772,7 @@
                 console.log('🎚️ Max Speed initial vom Server gesetzt:', maxSpeed + '%');
             }
 
-            // Joystick neu zeichnen falls CAN-Status geändert
+            // Joystick neu zeichnen falls sich der Status geändert hat
             if (joystickCtx) {
                 drawJoystick();
             }

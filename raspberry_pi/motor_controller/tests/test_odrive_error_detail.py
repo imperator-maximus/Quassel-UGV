@@ -99,9 +99,8 @@ class HeartbeatMitEinzelheitenTests(unittest.TestCase):
             enabled=True, node_id=0, node_ids=[0], default_rpm=500,
             min_rpm=500, max_rpm=5000, axis_state=5, ramp_rate_rpm_s=300,
             command_interval_s=0.1, heartbeat_timeout_s=1.0,
-            transport='can',
         )
-        return ODriveMowerController(config, can_handler=None)
+        return ODriveMowerController(config)
 
     def test_einzelheiten_landen_im_klartext_des_fehlers(self):
         controller = self._controller()
