@@ -171,6 +171,12 @@ class BatteryConfig:
     connect_timeout_s: float = 30.0
     reconnect_delay_s: float = 5.0
     reconnect_max_delay_s: float = 60.0
+    # Der Zaehler laesst nur eine Verbindung zu und schweigt, sobald eine
+    # besteht. Bleibt nach einem Neustart eine im Betriebssystem haengen,
+    # findet ihn kein Scan mehr. Dann wird sie aktiv getrennt - sonst steht
+    # die Ladezustandsueberwachung endlos still.
+    stale_link_recovery_enabled: bool = True
+    stale_link_min_interval_s: float = 60.0
 
 
 @dataclass

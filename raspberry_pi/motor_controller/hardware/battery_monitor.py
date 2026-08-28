@@ -23,6 +23,7 @@ voltage times current.
 
 import asyncio
 import logging
+import subprocess
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
@@ -129,9 +130,14 @@ class BatteryMonitor:
     controller is thread based while bleak is asyncio based.
     """
 
-    def __init__(self, config, logger: Optional[logging.Logger] = None):
+    def __init__(self, config, logger: Optional[logging.Logger] = None,
+                 link_dropper: Optional[Callable[[str], bool]] = None):
         self.config = config
         self.logger = logger or logging.getLogger(__name__)
+        # Trennt eine im Betriebssystem haengengebliebene BLE-Verbindung.
+        # Injizierbar, damit die Tests nicht bluetoothctl aufrufen.
+        self._drop_link = link_dropper or self._bluetoothctl_disconnect
+        self._last_link_drop_monotonic: Optional[float] = None
 
         self._lock = threading.Lock()
         self._values: Dict[str, Any] = {}
@@ -300,6 +306,61 @@ class BatteryMonitor:
                 snapshot = dict(self._values)
             self._check_thresholds(self._state_of_charge(snapshot))
 
+    # -------------------------------------------------- haengende Verbindung
+
+    def _bluetoothctl_disconnect(self, address: str) -> bool:
+        """Trennt eine im Betriebssystem stehende Verbindung zur Adresse."""
+        try:
+            ergebnis = subprocess.run(
+                ["bluetoothctl", "disconnect", address],
+                capture_output=True, text=True, timeout=10.0,
+            )
+        except FileNotFoundError:
+            self.logger.debug("bluetoothctl nicht vorhanden - kein Trennversuch")
+            return False
+        except subprocess.TimeoutExpired:
+            self.logger.warning("bluetoothctl antwortet nicht")
+            return False
+        except Exception as exc:
+            self.logger.warning("Trennversuch fehlgeschlagen: %s", exc)
+            return False
+        ausgabe = f"{ergebnis.stdout} {ergebnis.stderr}".lower()
+        return "successful" in ausgabe or ergebnis.returncode == 0
+
+    def _recover_stale_link(self, address: str) -> bool:
+        """Loest eine Verbindung, die das System haelt, aber niemand liest.
+
+        Der Zaehler laesst nur eine Verbindung zu und stellt das Advertising
+        ein, sobald eine besteht. Bleibt nach einem Neustart des Dienstes eine
+        alte Verbindung im Betriebssystem stehen, sucht der neue Prozess ein
+        Geraet, das genau deswegen schweigt - und die Uebernahme ueber die
+        Adresse scheitert, wenn die alte Verbindung halb tot ist
+        (``ServicesResolved: no``). Ohne diesen Schritt dreht sich der
+        Monitor endlos im Kreis: am 28.08.2026 acht Minuten lang, waehrend die
+        Ladezustandsueberwachung stillstand und damit auch die Abschaltung von
+        Maehdeck und Fahrt bei leerer Batterie.
+
+        Nur nach einem gescheiterten Uebernahmeversuch und mit Mindestabstand,
+        damit ein tatsaechlich abgeschalteter Zaehler nicht dauernd
+        bluetoothctl aufruft.
+        """
+        if not getattr(self.config, "stale_link_recovery_enabled", True):
+            return False
+        mindestabstand = float(
+            getattr(self.config, "stale_link_min_interval_s", 60.0)
+        )
+        jetzt = time.monotonic()
+        letzter = self._last_link_drop_monotonic
+        if letzter is not None and (jetzt - letzter) < mindestabstand:
+            return False
+        self._last_link_drop_monotonic = jetzt
+        self.logger.warning(
+            "Batteriemonitor: Uebernahme von %s gescheitert - trenne die im "
+            "System haengende Verbindung und baue sie neu auf",
+            address,
+        )
+        return bool(self._drop_link(address))
+
     def _run(self) -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -318,6 +379,7 @@ class BatteryMonitor:
         backoff = float(self.config.reconnect_delay_s)
 
         while not self._stop_event.is_set():
+            uebernahme_versucht = False
             try:
                 device = await BleakScanner.find_device_by_address(
                     address, timeout=float(self.config.scan_timeout_s)
@@ -342,6 +404,7 @@ class BatteryMonitor:
                         address,
                     )
                     ziel = address
+                    uebernahme_versucht = True
 
                 async with BleakClient(
                     ziel, timeout=float(self.config.connect_timeout_s)
@@ -365,6 +428,15 @@ class BatteryMonitor:
                 with self._lock:
                     self._last_error = str(exc)
                 self.logger.warning("Batteriemonitor getrennt: %s", exc)
+                # Kein Advertisement und die Uebernahme scheitert auch: dann
+                # haelt das Betriebssystem eine Verbindung, aus der niemand
+                # mehr liest. Sie aufzuloesen ist das Einzige, was hilft -
+                # danach funkt der Zaehler wieder und wird gefunden.
+                if uebernahme_versucht and self._recover_stale_link(address):
+                    # Gleich noch einmal versuchen statt den Backoff
+                    # weiterzuzaehlen: Die Ursache ist beseitigt, jede weitere
+                    # Wartezeit waere Zeit ohne Ladezustandsueberwachung.
+                    backoff = float(self.config.reconnect_delay_s)
             finally:
                 with self._lock:
                     self._connected = False
