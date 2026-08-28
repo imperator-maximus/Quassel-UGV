@@ -114,8 +114,6 @@ class WebServer:
         
         # Zusätzliche Hardware-Referenzen (für Light/Mower)
         self.light_config = None
-        self.mower_config = None
-        self.pwm_controller = None
         self.odrive_mower = None
         
         # Status
@@ -170,18 +168,15 @@ class WebServer:
         if self.flask_available:
             self._init_flask()
     
-    def set_hardware_refs(self, light_config, mower_config, pwm_controller, odrive_mower=None):
+    def set_hardware_refs(self, light_config, odrive_mower=None):
         """
         Setzt Hardware-Referenzen für Light/Mower-Steuerung
-        
+
         Args:
             light_config: LightConfig-Instanz
-            mower_config: MowerConfig-Instanz
-            pwm_controller: PWMController-Instanz
+            odrive_mower: ODrive-Mähdeck-Instanz
         """
         self.light_config = light_config
-        self.mower_config = mower_config
-        self.pwm_controller = pwm_controller
         self.odrive_mower = odrive_mower
     
     def _init_flask(self):
@@ -617,17 +612,10 @@ class WebServer:
                 self.mower_state = status['running']
                 return jsonify(self._mower_api_status(success=status.get('success', True), error=status.get('error')))
 
-            if self.mower_config and self.mower_config.enabled:
-                self.mower_state = desired_state
-                self.gpio.output(self.mower_config.relay_pin, self.mower_state)
-
-                # Wenn ausgeschaltet, PWM auf 0
-                if not self.mower_state and self.pwm_controller:
-                    self.pwm_controller.stop_mower()
-
-                self.logger.info(f"Mäher {'ein' if self.mower_state else 'aus'}")
-
-            return jsonify(self._mower_api_status())
+            return jsonify(self._mower_api_status(
+                success=False,
+                error="Kein Mähdeck konfiguriert",
+            )), 503
         
         @self.app.route('/api/mower/speed', methods=['POST'])
         def api_mower_speed():
@@ -640,14 +628,10 @@ class WebServer:
                 self.mower_state = status['running']
                 return jsonify(self._mower_api_status(success=status.get('success', True), error=status.get('error')))
 
-            if self.mower_config and self.mower_config.enabled and 'speed' in data:
-                speed = max(0, min(100, int(data['speed'])))
-
-                if self.pwm_controller:
-                    self.pwm_controller.set_mower_speed(speed)
-                    self.logger.info(f"Mäher-Geschwindigkeit: {speed}%")
-
-            return jsonify(self._mower_api_status())
+            return jsonify(self._mower_api_status(
+                success=False,
+                error="Kein Mähdeck konfiguriert",
+            )), 503
         
         @self.app.route('/api/joystick', methods=['POST'])
         def api_joystick():
@@ -1530,12 +1514,6 @@ class WebServer:
                         status.get('error'),
                     )
                     return
-            elif self.mower_config and self.mower_config.enabled:
-                self.mower_state = False
-                if self.gpio:
-                    self.gpio.output(self.mower_config.relay_pin, False)
-                if self.pwm_controller:
-                    self.pwm_controller.stop_mower()
             else:
                 return
             self.logger.info('🌾 Mähdeck ausgeschaltet: %s', reason)
@@ -2557,21 +2535,23 @@ class WebServer:
                 'mower_current_trip_duration_s': status.get('current_trip_duration_s'),
             }
 
-        speed = self.pwm_controller.get_mower_speed() if self.pwm_controller else 0
+        # Ohne ODrive-Mähdeck gibt es keinen zweiten Antriebsweg mehr: der
+        # GPIO-PWM-Pfad ist entfallen. Der Status meldet dann schlicht, dass
+        # kein Deck konfiguriert ist.
         return {
             'success': success,
-            'mower_mode': 'gpio_pwm',
-            'mower_enabled': self.mower_config.enabled if self.mower_config else False,
-            'mower_state': self.mower_state,
-            'mower_command_running': self.mower_state,
-            'mower_commanded': self.mower_state,
+            'mower_mode': 'none',
+            'mower_enabled': False,
+            'mower_state': False,
+            'mower_command_running': False,
+            'mower_commanded': False,
             'mower_fault': False,
             'mower_stale': False,
             'mower_transport_stall': None,
             'mower_command_loop_age_s': None,
             'mower_starting': False,
             'mower_active_axis_nodes': [],
-            'mower_speed': speed,
+            'mower_speed': 0,
             'mower_rpm': None,
             'mower_commanded_rpm': None,
             'mower_min_rpm': None,

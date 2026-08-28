@@ -146,8 +146,6 @@ Alle Einstellungen in `config/settings.py`:
 GPIO_PWM_LEFT = 19
 GPIO_PWM_RIGHT = 18
 GPIO_LIGHT = 22
-GPIO_MOWER_RELAY = 23
-GPIO_MOWER_PWM = 12
 GPIO_SAFETY = 17
 
 # PWM-Parameter
@@ -161,10 +159,7 @@ ACCELERATION_RATE = 25      # μs/s
 DECELERATION_RATE = 800     # μs/s
 BRAKE_RATE = 1500           # μs/s
 
-# Mäher-Parameter
-MOWER_DUTY_MIN = 16
-MOWER_DUTY_MAX = 84
-MOWER_PWM_FREQUENCY = 1000
+# Mähdeck: läuft über die ODrives (odrive_mower), nicht über GPIO-PWM
 
 # Timeouts
 JOYSTICK_TIMEOUT = 1.0

@@ -36,15 +36,6 @@ light:
   enabled: false
   pin: 22
 
-mower:
-  enabled: false
-  relay_pin: 23
-  pwm_pin: 12
-  pwm_frequency: 1000
-  duty_min: 16
-  duty_max: 84
-  duty_off: 0
-
 odrive_mower:
   enabled: true
   node_id: 0

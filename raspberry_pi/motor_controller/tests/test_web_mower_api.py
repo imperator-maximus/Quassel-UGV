@@ -75,7 +75,7 @@ class MowerApiSafetyTests(unittest.TestCase):
         can = SimpleNamespace(get_sensor_data=lambda: {})
         self.server = WebServer(web_config(), dummy, dummy, can, dummy)
         self.mower = FakeODriveMower()
-        self.server.set_hardware_refs(None, None, None, self.mower)
+        self.server.set_hardware_refs(None, self.mower)
         self.client = authenticated_client(self.server)
 
     def test_missing_json_cannot_toggle_or_start_mower(self):
@@ -526,7 +526,7 @@ class MowerApiAuthenticationTests(unittest.TestCase):
         can = SimpleNamespace(get_sensor_data=lambda: {})
         self.server = WebServer(web_config(), dummy, dummy, can, dummy)
         self.mower = FakeODriveMower()
-        self.server.set_hardware_refs(None, None, None, self.mower)
+        self.server.set_hardware_refs(None, self.mower)
         self.client = self.server.app.test_client()
 
     def test_unauthenticated_request_cannot_start_the_mower(self):
@@ -579,7 +579,7 @@ class MowerApiAuthenticationTests(unittest.TestCase):
             web_config(auth_password=''), dummy, dummy, can, dummy,
         )
         mower = FakeODriveMower()
-        server.set_hardware_refs(None, None, None, mower)
+        server.set_hardware_refs(None, mower)
 
         response = server.app.test_client().post(
             '/api/mower/toggle', json={'state': True},

@@ -2173,7 +2173,7 @@
             currentMowerState = data.mower_commanded !== undefined
                 ? !!data.mower_commanded
                 : mowerState;
-            const mowerMode = data.mower_mode || 'gpio_pwm';
+            const mowerMode = data.mower_mode || 'none';
             const isOdrive = mowerMode.startsWith('odrive_');
             const minRpm = data.mower_min_rpm || 0;
             const maxRpm = data.mower_max_rpm || 100;

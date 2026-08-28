@@ -131,20 +131,15 @@ class MotorControllerApp:
             self.logger.info("Initialisiere GPIO-Controller...")
             self.gpio = GPIOController()
 
-            # GPIO-Pins für Licht und Mäher-Relais initialisieren
+            # GPIO-Pin für Licht initialisieren
             if self.config.light.enabled:
                 self.gpio.setup_output(self.config.light.pin, initial_state=0)  # GPIO.LOW
                 self.logger.info(f"✅ Licht-Relais initialisiert (GPIO{self.config.light.pin})")
-
-            if self.config.mower.enabled:
-                self.gpio.setup_output(self.config.mower.relay_pin, initial_state=0)  # GPIO.LOW
-                self.logger.info(f"✅ Mäher-Relais initialisiert (GPIO{self.config.mower.relay_pin})")
 
             # PWM-Controller
             self.logger.info("Initialisiere PWM-Controller...")
             self.pwm = PWMController(
                 self.config.pwm,
-                self.config.mower,
                 self.gpio
             )
             
@@ -271,8 +266,6 @@ class MotorControllerApp:
                 # Hardware-Referenzen setzen
                 self.web.set_hardware_refs(
                     self.config.light,
-                    self.config.mower,
-                    self.pwm,
                     self.odrive_mower
                 )
             

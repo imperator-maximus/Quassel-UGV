@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
 """
-PWM Controller - Hardware-PWM-Steuerung für Motoren und Mäher
+PWM Controller - Hardware-PWM-Steuerung für die Fahrmotoren
 Verwendet pigpio für präzise Hardware-PWM-Signale
+
+Das Mähdeck läuft über die ODrives (siehe hardware/odrive_mower.py) und nicht
+mehr über GPIO-PWM.
 """
 
 import logging
 import threading
 from typing import Dict, Optional
-from ..config import PWMConfig, MowerConfig
+from ..config import PWMConfig
 
 
 class PWMController:
     """
-    PWM-Controller für Motor- und Mäher-Steuerung
-    Verwendet pigpio für Hardware-PWM (GPIO 18/19 für Motoren, GPIO 12 für Mäher)
+    PWM-Controller für die Fahrmotoren
+    Verwendet pigpio für Hardware-PWM (GPIO 18/19)
     """
-    
-    def __init__(self, pwm_config: PWMConfig, mower_config: MowerConfig, gpio_controller):
+
+    def __init__(self, pwm_config: PWMConfig, gpio_controller):
         """
         Initialisiert PWM-Controller
         
         Args:
             pwm_config: PWM-Konfiguration
-            mower_config: Mäher-Konfiguration
             gpio_controller: GPIO-Controller-Instanz (Singleton)
         """
         self.logger = logging.getLogger(__name__)
         self.config = pwm_config
-        self.mower_config = mower_config
         self.gpio = gpio_controller
         self.pi = gpio_controller.get_pigpio()
         
@@ -39,16 +40,9 @@ class PWMController:
             'left': pwm_config.neutral_value,
             'right': pwm_config.neutral_value
         }
-        
-        # Mäher-PWM-Status
-        self.mower_enabled = mower_config.enabled
-        self.mower_speed = 0  # 0-100%
-        
+
         if self.motor_enabled:
             self._init_motor_pwm()
-        
-        if self.mower_enabled:
-            self._init_mower_pwm()
     
     def _init_motor_pwm(self):
         """Initialisiert Hardware-PWM für Motoren"""
@@ -72,26 +66,6 @@ class PWMController:
         except Exception as e:
             self.logger.error(f"❌ Motor-PWM Initialisierung fehlgeschlagen: {e}")
             self.motor_enabled = False
-    
-    def _init_mower_pwm(self):
-        """Initialisiert Hardware-PWM für Mäher"""
-        if not self.pi:
-            self.logger.error("❌ pigpio nicht verfügbar - Mäher-PWM deaktiviert")
-            self.mower_enabled = False
-            return
-        
-        try:
-            # Hardware-PWM für Mäher: 1000Hz, 0% Duty Cycle (aus)
-            self.pi.hardware_PWM(
-                self.mower_config.pwm_pin,
-                self.mower_config.pwm_frequency,
-                0  # 0% Duty Cycle
-            )
-            self.logger.info(f"✅ Mäher-PWM initialisiert: GPIO{self.mower_config.pwm_pin}")
-        
-        except Exception as e:
-            self.logger.error(f"❌ Mäher-PWM Initialisierung fehlgeschlagen: {e}")
-            self.mower_enabled = False
     
     def set_motor_pwm(self, side: str, value: int) -> bool:
         """
@@ -178,81 +152,13 @@ class PWMController:
         with self._lock:
             return self.current_values.copy()
     
-    def set_mower_speed(self, speed: int) -> bool:
-        """
-        Setzt Mäher-Geschwindigkeit (Thread-Safe)
-        
-        Args:
-            speed: Geschwindigkeit 0-100%
-            
-        Returns:
-            True bei Erfolg, False bei Fehler
-        """
-        if not self.mower_enabled or not self.pi:
-            return False
-        
-        # Geschwindigkeit begrenzen
-        speed = max(0, min(100, speed))
-        
-        try:
-            with self._lock:
-                # Duty Cycle berechnen: 0% -> duty_off, 100% -> duty_max
-                if speed == 0:
-                    duty_cycle = self.mower_config.duty_off
-                else:
-                    # Linear mapping: 1-100% -> duty_min-duty_max
-                    duty_cycle = self.mower_config.duty_min + (
-                        (speed / 100.0) * (self.mower_config.duty_max - self.mower_config.duty_min)
-                    )
-                
-                # Duty Cycle in Hardware-PWM-Format konvertieren (0-1000000)
-                duty_cycle_hw = int(duty_cycle * 10000)  # % -> 0-1000000
-                
-                self.pi.hardware_PWM(
-                    self.mower_config.pwm_pin,
-                    self.mower_config.pwm_frequency,
-                    duty_cycle_hw
-                )
-                
-                self.mower_speed = speed
-                self.logger.debug(f"Mäher-Geschwindigkeit: {speed}% (Duty: {duty_cycle:.1f}%)")
-            
-            return True
-        
-        except Exception as e:
-            self.logger.error(f"❌ Mäher-PWM Fehler: {e}")
-            return False
-    
-    def get_mower_speed(self) -> int:
-        """
-        Gibt aktuelle Mäher-Geschwindigkeit zurück (Thread-Safe)
-        
-        Returns:
-            Geschwindigkeit 0-100%
-        """
-        with self._lock:
-            return self.mower_speed
-    
-    def stop_mower(self) -> bool:
-        """
-        Stoppt Mäher (0% Duty Cycle)
-        
-        Returns:
-            True bei Erfolg, False bei Fehler
-        """
-        return self.set_mower_speed(0)
-    
     def cleanup(self):
         """Cleanup PWM-Ressourcen"""
         try:
             if self.motor_enabled and self.pi:
                 self.set_motor_neutral()
                 self.logger.info("Motoren auf Neutral gesetzt")
-            
-            if self.mower_enabled and self.pi:
-                self.stop_mower()
-                self.logger.info("Mäher gestoppt")
-        
+
         except Exception as e:
             self.logger.error(f"❌ PWM cleanup fehlgeschlagen: {e}")
     

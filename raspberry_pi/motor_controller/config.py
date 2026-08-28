@@ -57,18 +57,6 @@ class LightConfig:
 
 
 @dataclass
-class MowerConfig:
-    """Mäher-Konfiguration"""
-    enabled: bool = True
-    relay_pin: int = 23
-    pwm_pin: int = 12
-    pwm_frequency: int = 1000  # Hz
-    duty_min: int = 16  # %
-    duty_max: int = 84  # %
-    duty_off: int = 0  # %
-
-
-@dataclass
 class BatteryConfig:
     """Junctek KG110F Coulomb-Zähler über BLE.
 
@@ -461,7 +449,6 @@ class Config:
     ramping: RampingConfig = field(default_factory=RampingConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     light: LightConfig = field(default_factory=LightConfig)
-    mower: MowerConfig = field(default_factory=MowerConfig)
     odrive_mower: ODriveMowerConfig = field(default_factory=ODriveMowerConfig)
     battery: BatteryConfig = field(default_factory=BatteryConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
@@ -500,8 +487,6 @@ class Config:
             config.safety = SafetyConfig(**data['safety'])
         if 'light' in data:
             config.light = LightConfig(**data['light'])
-        if 'mower' in data:
-            config.mower = MowerConfig(**data['mower'])
         if 'odrive_mower' in data:
             odrive_data = dict(data['odrive_mower'])
             if 'node_ids' in odrive_data and odrive_data['node_ids'] is None:
@@ -616,15 +601,6 @@ class Config:
             'light': {
                 'enabled': self.light.enabled,
                 'pin': self.light.pin
-            },
-            'mower': {
-                'enabled': self.mower.enabled,
-                'relay_pin': self.mower.relay_pin,
-                'pwm_pin': self.mower.pwm_pin,
-                'pwm_frequency': self.mower.pwm_frequency,
-                'duty_min': self.mower.duty_min,
-                'duty_max': self.mower.duty_max,
-                'duty_off': self.mower.duty_off
             },
             'odrive_mower': {
                 'enabled': self.odrive_mower.enabled,
