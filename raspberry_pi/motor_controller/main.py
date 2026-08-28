@@ -268,6 +268,15 @@ class MotorControllerApp:
                     self.config.light,
                     self.odrive_mower
                 )
+                # Der Netzwaechter darf nicht mitten in eine Planfahrt
+                # umschalten: Der Wechsel kappt die Verbindung fuer Sekunden,
+                # und ueber sie kommt die Pose.
+                if self.network:
+                    self.network.set_busy_probe(
+                        lambda: bool(
+                            self.web.get_plan_execution_status().get('running')
+                        )
+                    )
             
             # Callbacks verbinden
             self._setup_callbacks()

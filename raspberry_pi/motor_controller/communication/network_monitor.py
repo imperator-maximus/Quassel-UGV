@@ -13,6 +13,14 @@ selbst ab: Vor dem Umschalten wird ein Rueckfall ins alte Netz scharf
 gestellt, der nur dann wieder entschaerft wird, wenn das Wunschnetz danach
 wirklich steht. Bleibt die Verbindung aus, holt der Rueckfall das Fahrzeug von
 allein zurueck, statt es unerreichbar zu lassen.
+
+Am 28.08.2026 kam der zweite Fall dazu: Der Mobilfunkrouter braucht nach dem
+Einschalten laenger als der Pi. Beim Hochfahren stand seine SSID noch nicht in
+der Scan-Liste, NetworkManager nahm das Hausnetz - und blieb dort, obwohl das
+Wunschprofil die hoechste Prioritaet hat. Eine stehende Verbindung wird eben
+nie zugunsten eines besseren Profils aufgegeben. Deshalb fasst der Waechter
+jetzt von allein nach, wenn das Fahrzeug auf einem Netz haengt, das weder das
+Wunsch- noch das Notnetz ist.
 """
 
 import logging
@@ -93,6 +101,13 @@ class NetworkMonitor:
         }
         self._reading_monotonic: Optional[float] = None
         self._error: Optional[str] = None
+        self._visible_ssids: List[str] = []
+        self._preferred_ssid: Optional[str] = None
+        self._preferred_ssid_resolved = False
+        self._last_auto_attempt: Optional[float] = None
+        self._last_rescan: Optional[float] = None
+        self._auto_skip_reason: Optional[str] = None
+        self._busy_probe = None
 
     # -- Betrieb ---------------------------------------------------------
 
@@ -116,9 +131,21 @@ class NetworkMonitor:
         while not self._stop_event.is_set():
             try:
                 self.refresh()
+                self.nudge_if_stranded()
             except Exception as error:  # pragma: no cover - Schutz des Threads
                 self.logger.warning(f"Netzabfrage fehlgeschlagen: {error}")
             self._stop_event.wait(float(self.config.poll_interval_s))
+
+    def set_busy_probe(self, probe):
+        """Hinterlegt die Frage "faehrt das Fahrzeug gerade?".
+
+        Ein Netzwechsel kappt die Verbindung fuer Sekunden. Solange ein Plan
+        laeuft, traegt sie die Pose - dann wird nicht von allein umgeschaltet,
+        auch wenn das Fahrzeug im falschen Netz haengt. Der Knopf in der
+        Oberflaeche bleibt davon unberuehrt: Wer ihn drueckt, weiss, was er
+        tut.
+        """
+        self._busy_probe = probe
 
     # -- Lesen -----------------------------------------------------------
 
@@ -163,25 +190,31 @@ class NetworkMonitor:
              '--rescan', 'no'],
             timeout,
         )
+        visible: List[str] = []
         if code == 0:
             for line in out.splitlines():
                 fields = split_terse(line)
-                if len(fields) < 2 or fields[0] not in ACTIVE_MARKERS:
+                if len(fields) < 2:
+                    continue
+                if fields[1]:
+                    visible.append(fields[1])
+                if fields[0] not in ACTIVE_MARKERS or reading['ssid']:
                     continue
                 reading['ssid'] = fields[1] or None
                 if len(fields) > 2 and fields[2].isdigit():
                     reading['signal_percent'] = int(fields[2])
-                break
 
         with self._lock:
             self._reading = reading
             self._reading_monotonic = time.monotonic()
             self._error = None
+            self._visible_ssids = visible
         return self.get_status()
 
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
             reading = dict(self._reading)
+            skip_reason = self._auto_skip_reason
             age = (
                 None if self._reading_monotonic is None
                 else time.monotonic() - self._reading_monotonic
@@ -203,11 +236,152 @@ class NetworkMonitor:
         status['on_preferred'] = bool(
             status['profile'] and status['profile'] == self.config.preferred_profile
         )
+        status['auto_switch_enabled'] = bool(
+            getattr(self.config, 'auto_switch_enabled', True)
+        )
+        status['stranded'] = self._is_stranded(status['profile'])
+        status['auto_switch_skipped'] = skip_reason
         return status
+
+    def _is_stranded(self, profile) -> bool:
+        """Haengt das Fahrzeug auf einem Netz, das so nicht vorgesehen ist?
+
+        Das Notnetz zaehlt ausdruecklich nicht dazu. Es wird von Hand
+        angesteckt, wenn der Mobilfunk nicht geht - da waere ein selbsttaetiger
+        Wechsel zurueck genau das Falsche.
+        """
+        if not profile:
+            return False
+        return profile not in (
+            self.config.preferred_profile,
+            self.config.fallback_profile,
+        )
 
     # -- Umschalten ------------------------------------------------------
 
-    def switch_to_preferred(self) -> Dict[str, Any]:
+    def nudge_if_stranded(self) -> Optional[Dict[str, Any]]:
+        """Holt das Fahrzeug von allein ins Wunschnetz, wenn es dort hingehoert.
+
+        Angefasst wird nur der Fall, der sonst bis zum naechsten Neustart
+        bestehen bleibt: Das Fahrzeug haengt auf einem fremden Netz, das
+        Wunschnetz ist inzwischen in Reichweite, und niemand faehrt gerade.
+        Ist die SSID nicht zu sehen, wird es gar nicht erst versucht - ein
+        `nmcli connection up` ins Leere kappt die bestehende Verbindung fuer
+        nichts.
+        """
+        if not self.enabled or not getattr(self.config, 'auto_switch_enabled', True):
+            return None
+
+        status = self.get_status()
+        if not status['stranded'] or status['switching']:
+            return self._note_auto_skip(None)
+
+        probe = self._busy_probe
+        if probe is not None:
+            try:
+                if probe():
+                    return self._note_auto_skip('Fahrt laeuft')
+            except Exception as error:  # pragma: no cover - Schutz des Threads
+                self.logger.warning(f"Fahrtabfrage fehlgeschlagen: {error}")
+                return self._note_auto_skip('Fahrtabfrage fehlgeschlagen')
+
+        now = time.monotonic()
+        interval = float(getattr(self.config, 'auto_switch_interval_s', 300.0))
+        with self._lock:
+            last = self._last_auto_attempt
+        if last is not None and now - last < interval:
+            return self._note_auto_skip('Wartezeit laeuft noch')
+
+        ssid = self._resolve_preferred_ssid()
+        with self._lock:
+            visible = list(self._visible_ssids)
+        if ssid and ssid not in visible:
+            # Die Liste oben ist der Zwischenspeicher von NetworkManager, und
+            # der wird von allein nur alle paar Minuten aufgefrischt. Beim
+            # Hochfahren ist das genau der Fall: Der Router sendet laengst,
+            # steht dort aber noch nicht. Also gezielt nachsehen - das kostet
+            # ein bis zwei Sekunden Verbindung, was in dieser Lage der
+            # bessere Preis ist als eine Nacht im falschen Netz.
+            if not self._rescan_now(now):
+                return self._note_auto_skip(f'{ssid} nicht in Reichweite')
+            with self._lock:
+                visible = list(self._visible_ssids)
+            if ssid not in visible:
+                return self._note_auto_skip(f'{ssid} nicht in Reichweite')
+
+        with self._lock:
+            self._last_auto_attempt = now
+        self.logger.warning(
+            "Fahrzeug haengt auf '%s' statt auf '%s' - schalte selbsttaetig um",
+            status['profile'],
+            self.config.preferred_profile,
+        )
+        self._note_auto_skip(None)
+        # Ohne scharfen Rueckfall: Wir kommen aus einem Netz, das erreichbar
+        # ist. Scheitert der Wechsel, holt NetworkManager es von selbst
+        # zurueck - ein Timer ins Notnetz waere hier das groessere Risiko.
+        return self.switch_to_preferred(arm_fallback=False, automatic=True)
+
+    def _rescan_now(self, now: float) -> bool:
+        """Sucht aktiv nach Netzen und aktualisiert die Sichtbarkeitsliste.
+
+        Gibt zurueck, ob gesucht wurde - zu dicht hintereinander waere es
+        weder noetig noch harmlos.
+        """
+        interval = float(getattr(self.config, 'auto_rescan_interval_s', 45.0))
+        with self._lock:
+            last = self._last_rescan
+        if last is not None and now - last < interval:
+            return False
+        with self._lock:
+            self._last_rescan = now
+        code, out, _err = self._run(
+            ['nmcli', '-t', '-f', 'ACTIVE,SSID,SIGNAL', 'device', 'wifi', 'list',
+             '--rescan', 'yes'],
+            float(self.config.switch_timeout_s),
+        )
+        if code != 0:
+            return False
+        found: List[str] = []
+        for line in out.splitlines():
+            fields = split_terse(line)
+            if len(fields) >= 2 and fields[1]:
+                found.append(fields[1])
+        with self._lock:
+            self._visible_ssids = found
+        return True
+
+    def _note_auto_skip(self, reason: Optional[str]) -> None:
+        with self._lock:
+            self._auto_skip_reason = reason
+        return None
+
+    def _resolve_preferred_ssid(self) -> Optional[str]:
+        """Liest einmalig, welche SSID hinter dem Wunschprofil steht.
+
+        Profilname und Netzname sind zwei verschiedene Dinge - das Profil
+        heisst `HUAWEI`, das Netz `HUAWEI-E5180-E406`. Ohne diese Aufloesung
+        liesse sich die Reichweite nicht pruefen.
+        """
+        if self._preferred_ssid_resolved:
+            return self._preferred_ssid
+        code, out, _err = self._run(
+            ['nmcli', '-t', '-f', '802-11-wireless.ssid', 'connection', 'show',
+             self.config.preferred_profile],
+            float(self.config.command_timeout_s),
+        )
+        self._preferred_ssid_resolved = True
+        if code != 0:
+            return None
+        for line in out.splitlines():
+            fields = split_terse(line)
+            if len(fields) >= 2 and fields[1] and fields[1] != '--':
+                self._preferred_ssid = fields[1]
+                break
+        return self._preferred_ssid
+
+    def switch_to_preferred(self, arm_fallback: bool = True,
+                            automatic: bool = False) -> Dict[str, Any]:
         """Stoesst den Wechsel ins Wunschnetz an und kehrt sofort zurueck.
 
         Der Wechsel dauert Sekunden bis zu einer halben Minute und kappt dabei
@@ -226,16 +400,18 @@ class NetworkMonitor:
                 'success': None,
                 'error': None,
                 'fallback_armed': False,
+                'automatic': automatic,
                 'started_at': time.time(),
             }
         self._switch_thread = threading.Thread(
-            target=self._switch_worker, name='network-switch', daemon=True
+            target=self._switch_worker, name='network-switch', daemon=True,
+            kwargs={'arm_fallback': arm_fallback},
         )
         self._switch_thread.start()
         return {'success': True, 'switching': True}
 
-    def _switch_worker(self):
-        armed = self._arm_fallback()
+    def _switch_worker(self, arm_fallback: bool = True):
+        armed = self._arm_fallback() if arm_fallback else False
         with self._lock:
             if self._last_switch is not None:
                 self._last_switch['fallback_armed'] = armed
@@ -252,7 +428,7 @@ class NetworkMonitor:
             self.logger.warning(f"Netzabfrage nach dem Wechsel fehlgeschlagen: {refresh_error}")
 
         arrived = self.get_status().get('on_preferred', False)
-        if arrived:
+        if arrived and armed:
             # Erst jetzt darf der Rueckfall weg: Das Wunschnetz steht, und der
             # Bediener soll nicht in zehn Minuten ohne Vorwarnung im alten Netz
             # landen.

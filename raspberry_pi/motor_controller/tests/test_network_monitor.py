@@ -37,6 +37,21 @@ WIFI_LIST_HUAWEI = (
 
 WIFI_LIST_UGV = 'yes:UGV:58\n'
 
+# Der Fall vom 28.08.2026: Der Pi haengt im Hausnetz, weil der
+# Mobilfunkrouter beim Hochfahren noch nicht sendete. Inzwischen ist er da.
+DEVICE_ON_FRITZBOX = (
+    'GENERAL.CONNECTION:fritzbox7330\n'
+    'GENERAL.STATE:100 (verbunden)\n'
+    'IP4.ADDRESS[1]:192.168.178.147/24\n'
+)
+
+WIFI_LIST_FRITZBOX_WITH_HUAWEI = (
+    'yes:fritzbox7330:62\n'
+    'no:HUAWEI-E5180-E406:44\n'
+)
+
+WIFI_LIST_FRITZBOX_ALONE = 'yes:fritzbox7330:62\n'
+
 # So antwortet nmcli auf dem Fahrzeug: die Oberflaeche dort ist deutsch.
 WIFI_LIST_GERMAN = 'ja:HUAWEI-E5180-E406:94\n'
 
@@ -52,6 +67,9 @@ def network_config(**overrides):
         switch_timeout_s=45.0,
         fallback_unit='ugv-netz-rueckfall',
         fallback_delay_min=10,
+        auto_switch_enabled=True,
+        auto_switch_interval_s=60.0,
+        auto_rescan_interval_s=45.0,
     )
     config.update(overrides)
     return SimpleNamespace(**config)
@@ -60,10 +78,17 @@ def network_config(**overrides):
 class FakeNmcli:
     """Spielt nmcli/systemctl und merkt sich, was aufgerufen wurde."""
 
-    def __init__(self, device=DEVICE_ON_HUAWEI, wifi=WIFI_LIST_HUAWEI, switch_result=0):
+    def __init__(self, device=DEVICE_ON_HUAWEI, wifi=WIFI_LIST_HUAWEI, switch_result=0,
+                 profile_ssid='HUAWEI-E5180-E406'):
         self.device = device
         self.wifi = wifi
         self.switch_result = switch_result
+        # Profilname und Netzname sind nicht dasselbe.
+        self.profile_ssid = profile_ssid
+        # Was ein gezielter Suchlauf zutage foerdert - im Gegensatz zu dem,
+        # was im Zwischenspeicher steht.
+        self.wifi_after_rescan = None
+        self.rescans = 0
         self.calls = []
         # Womit das Geraet nach einem erfolgreichen Wechsel antwortet.
         self.device_after_switch = None
@@ -74,7 +99,15 @@ class FakeNmcli:
         if args[:2] == ['nmcli', '-t'] and 'device' in args and 'show' in args:
             return 0, self.device, ''
         if args[:2] == ['nmcli', '-t'] and 'wifi' in args:
+            if 'yes' in args:
+                self.rescans += 1
+                if self.wifi_after_rescan is not None:
+                    self.wifi = self.wifi_after_rescan
             return 0, self.wifi, ''
+        if args[:2] == ['nmcli', '-t'] and 'connection' in args and 'show' in args:
+            if self.profile_ssid is None:
+                return 10, '', 'Error: unknown connection\n'
+            return 0, f'802-11-wireless.ssid:{self.profile_ssid}\n', ''
         if args[:3] == ['nmcli', 'connection', 'up']:
             if self.switch_result == 0:
                 if self.device_after_switch is not None:
@@ -231,6 +264,179 @@ class SwitchingBackTests(unittest.TestCase):
 
         self.assertFalse(result['success'])
         self.assertIn('laeuft bereits', result['error'])
+
+
+class ComingBackFromAStrandedNetworkTests(unittest.TestCase):
+    """Der Fall vom 28.08.2026: beim Hochfahren ins falsche Netz gerutscht.
+
+    Der Mobilfunkrouter braucht laenger als der Pi. Steht seine SSID beim
+    Verbindungsaufbau noch nicht in der Liste, nimmt NetworkManager das
+    naechstbeste Netz - und bleibt dort, weil eine stehende Verbindung nie
+    zugunsten eines hoeher priorisierten Profils aufgegeben wird. Ohne
+    Nachfassen haengt das Fahrzeug bis zum naechsten Neustart im Hausnetz.
+    """
+
+    def _monitor(self, nmcli, **overrides):
+        return NetworkMonitor(network_config(**overrides), runner=nmcli)
+
+    def _settle(self, monitor):
+        """Wartet auf den Wechsel-Thread, damit die Aufrufe vollstaendig sind."""
+        thread = monitor._switch_thread
+        if thread:
+            thread.join(timeout=2.0)
+
+    def test_a_foreign_network_is_flagged_as_stranded(self):
+        nmcli = FakeNmcli(DEVICE_ON_FRITZBOX, WIFI_LIST_FRITZBOX_WITH_HUAWEI)
+        status = self._monitor(nmcli).refresh()
+        self.assertEqual(status['profile'], 'fritzbox7330')
+        self.assertFalse(status['on_preferred'])
+        self.assertTrue(status['stranded'])
+
+    def test_the_vehicle_comes_back_on_its_own(self):
+        nmcli = FakeNmcli(DEVICE_ON_FRITZBOX, WIFI_LIST_FRITZBOX_WITH_HUAWEI)
+        nmcli.device_after_switch = DEVICE_ON_HUAWEI
+        nmcli.wifi_after_switch = WIFI_LIST_HUAWEI
+        monitor = self._monitor(nmcli)
+        monitor.refresh()
+        monitor.nudge_if_stranded()
+        self._settle(monitor)
+        self.assertIn(
+            ['nmcli', 'connection', 'up', 'HUAWEI'],
+            nmcli.calls,
+        )
+        self.assertTrue(monitor.get_status()['on_preferred'])
+
+    def test_the_emergency_network_is_left_alone(self):
+        """Das Notnetz wird von Hand angesteckt - da faehrt niemand dazwischen."""
+        nmcli = FakeNmcli(DEVICE_ON_UGV, WIFI_LIST_UGV)
+        monitor = self._monitor(nmcli)
+        monitor.refresh()
+        self.assertFalse(monitor.get_status()['stranded'])
+        monitor.nudge_if_stranded()
+        self._settle(monitor)
+        self.assertEqual(
+            [call for call in nmcli.calls if call[:3] == ['nmcli', 'connection', 'up']],
+            [],
+        )
+
+    def test_a_network_out_of_range_is_not_attempted(self):
+        """Ein Wechsel ins Leere kappt die bestehende Verbindung fuer nichts."""
+        nmcli = FakeNmcli(DEVICE_ON_FRITZBOX, WIFI_LIST_FRITZBOX_ALONE)
+        monitor = self._monitor(nmcli)
+        monitor.refresh()
+        monitor.nudge_if_stranded()
+        self._settle(monitor)
+        self.assertEqual(
+            [call for call in nmcli.calls if call[:3] == ['nmcli', 'connection', 'up']],
+            [],
+        )
+        self.assertEqual(
+            monitor.get_status()['auto_switch_skipped'],
+            'HUAWEI-E5180-E406 nicht in Reichweite',
+        )
+
+    def test_nothing_is_switched_while_the_vehicle_drives(self):
+        """Der Wechsel kappt die Verbindung - und ueber sie kommt die Pose."""
+        nmcli = FakeNmcli(DEVICE_ON_FRITZBOX, WIFI_LIST_FRITZBOX_WITH_HUAWEI)
+        monitor = self._monitor(nmcli)
+        monitor.set_busy_probe(lambda: True)
+        monitor.refresh()
+        monitor.nudge_if_stranded()
+        self._settle(monitor)
+        self.assertEqual(
+            [call for call in nmcli.calls if call[:3] == ['nmcli', 'connection', 'up']],
+            [],
+        )
+        self.assertEqual(monitor.get_status()['auto_switch_skipped'], 'Fahrt laeuft')
+
+    def test_a_failed_attempt_is_not_repeated_immediately(self):
+        """Sonst haemmert der Waechter alle zehn Sekunden auf die Verbindung."""
+        nmcli = FakeNmcli(DEVICE_ON_FRITZBOX, WIFI_LIST_FRITZBOX_WITH_HUAWEI,
+                          switch_result=4)
+        monitor = self._monitor(nmcli)
+        monitor.refresh()
+        monitor.nudge_if_stranded()
+        self._settle(monitor)
+        monitor.refresh()
+        monitor.nudge_if_stranded()
+        self._settle(monitor)
+        self.assertEqual(
+            len([call for call in nmcli.calls if call[:3] == ['nmcli', 'connection', 'up']]),
+            1,
+        )
+
+    def test_the_automatic_attempt_arms_no_fallback(self):
+        """Wir kommen aus einem erreichbaren Netz.
+
+        Ein Timer, der spaeter blind ins Notnetz schaltet, waere hier das
+        groessere Risiko - dieses Netz haengt nicht einmal am Fahrzeug, solange
+        es niemand ansteckt.
+        """
+        nmcli = FakeNmcli(DEVICE_ON_FRITZBOX, WIFI_LIST_FRITZBOX_WITH_HUAWEI,
+                          switch_result=4)
+        monitor = self._monitor(nmcli)
+        monitor.refresh()
+        monitor.nudge_if_stranded()
+        self._settle(monitor)
+        self.assertEqual(nmcli.commands('systemd-run'), [])
+
+    def test_the_button_still_arms_the_fallback(self):
+        """Der Knopf bleibt, wie er war - nur das Nachfassen ist neu."""
+        nmcli = FakeNmcli(DEVICE_ON_FRITZBOX, WIFI_LIST_FRITZBOX_WITH_HUAWEI,
+                          switch_result=4)
+        monitor = self._monitor(nmcli)
+        monitor.refresh()
+        monitor.switch_to_preferred()
+        self._settle(monitor)
+        self.assertEqual(len(nmcli.commands('systemd-run')), 1)
+
+    def test_a_router_that_woke_up_late_is_found_by_searching(self):
+        """Der eigentliche Fall vom 28.08.2026.
+
+        Der Router sendet inzwischen, steht aber noch nicht im
+        Zwischenspeicher von NetworkManager - der wird von allein nur alle
+        paar Minuten aufgefrischt. Ohne gezielte Suche haette das Fahrzeug
+        bis zum naechsten Neustart im Hausnetz gehangen.
+        """
+        nmcli = FakeNmcli(DEVICE_ON_FRITZBOX, WIFI_LIST_FRITZBOX_ALONE)
+        nmcli.wifi_after_rescan = WIFI_LIST_FRITZBOX_WITH_HUAWEI
+        nmcli.device_after_switch = DEVICE_ON_HUAWEI
+        monitor = self._monitor(nmcli)
+        monitor.refresh()
+        monitor.nudge_if_stranded()
+        self._settle(monitor)
+        self.assertEqual(nmcli.rescans, 1)
+        self.assertIn(['nmcli', 'connection', 'up', 'HUAWEI'], nmcli.calls)
+
+    def test_the_search_is_not_repeated_on_every_poll(self):
+        """Ein Suchlauf legt die Verbindung kurz lahm - nicht alle zehn Sekunden."""
+        nmcli = FakeNmcli(DEVICE_ON_FRITZBOX, WIFI_LIST_FRITZBOX_ALONE)
+        monitor = self._monitor(nmcli)
+        for _ in range(5):
+            monitor.refresh()
+            monitor.nudge_if_stranded()
+        self._settle(monitor)
+        self.assertEqual(nmcli.rescans, 1)
+
+    def test_the_display_alone_never_searches(self):
+        """Wer nur zusieht, stoert die Verbindung nicht."""
+        nmcli = FakeNmcli(DEVICE_ON_HUAWEI, WIFI_LIST_HUAWEI)
+        monitor = self._monitor(nmcli)
+        for _ in range(5):
+            monitor.refresh()
+            monitor.nudge_if_stranded()
+        self.assertEqual(nmcli.rescans, 0)
+
+    def test_the_watchdog_can_be_switched_off(self):
+        nmcli = FakeNmcli(DEVICE_ON_FRITZBOX, WIFI_LIST_FRITZBOX_WITH_HUAWEI)
+        monitor = self._monitor(nmcli, auto_switch_enabled=False)
+        monitor.refresh()
+        monitor.nudge_if_stranded()
+        self._settle(monitor)
+        self.assertEqual(
+            [call for call in nmcli.calls if call[:3] == ['nmcli', 'connection', 'up']],
+            [],
+        )
 
 
 if __name__ == '__main__':

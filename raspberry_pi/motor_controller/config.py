@@ -101,6 +101,23 @@ class NetworkConfig:
     # von allein ins alte WLAN zurueck, statt es unerreichbar zu lassen.
     fallback_unit: str = 'ugv-netz-rueckfall'
     fallback_delay_min: int = 10
+    # Der Mobilfunkrouter braucht nach dem Einschalten laenger als der Pi.
+    # Beim Hochfahren ist seine SSID deshalb regelmaessig noch nicht da,
+    # NetworkManager nimmt das naechstbeste Netz - und bleibt dort, denn eine
+    # stehende Verbindung wird nie zugunsten eines hoeher priorisierten
+    # Profils aufgegeben. Ohne Nachfassen haengt das Fahrzeug bis zum
+    # naechsten Neustart im falschen Netz.
+    auto_switch_enabled: bool = True
+    # Abstand zwischen zwei tatsaechlichen Umschaltversuchen. Gezaehlt wird
+    # nur, was auch versucht wurde - beim Hochfahren wartet also niemand.
+    auto_switch_interval_s: float = 60.0
+    # Die Anzeige liest die zwischengespeicherte Scan-Liste, damit sie die
+    # Verbindung nicht dauernd fuer ein, zwei Sekunden lahmlegt. Haengt das
+    # Fahrzeug aber im falschen Netz, ist genau dieser Cache das Problem:
+    # NetworkManager frischt ihn von allein nur alle paar Minuten auf, und
+    # solange taucht der gerade hochgefahrene Router dort nicht auf. Dann
+    # wird gezielt gesucht - hoechstens so oft wie hier angegeben.
+    auto_rescan_interval_s: float = 45.0
 
 
 @dataclass
@@ -664,7 +681,10 @@ class Config:
                 'command_timeout_s': self.network.command_timeout_s,
                 'switch_timeout_s': self.network.switch_timeout_s,
                 'fallback_unit': self.network.fallback_unit,
-                'fallback_delay_min': self.network.fallback_delay_min
+                'fallback_delay_min': self.network.fallback_delay_min,
+                'auto_switch_enabled': self.network.auto_switch_enabled,
+                'auto_switch_interval_s': self.network.auto_switch_interval_s,
+                'auto_rescan_interval_s': self.network.auto_rescan_interval_s
             },
             'can': {
                 'enabled': self.can.enabled,
