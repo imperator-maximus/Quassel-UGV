@@ -98,7 +98,7 @@ M4_CLEAR_D = 4.5       # ... dahinter Ø4,5 durch bis zur Plattenrueckseite.
                        # Durchgehend, damit eine zu lange Schraube nicht aufsetzt
                        # und wahlweise eine Durchgangsschraube mit Mutter geht.
 
-EXPORT_DIR = r"C:\Users\mausz\Documents\PlatformIO\Projects\UGV ESP32CAN\cad"
+EXPORT_DIR = r"C:\Users\mausz\Documents\PlatformIO\Projects\quassel-ugv\cad"
 
 
 def mm(v):

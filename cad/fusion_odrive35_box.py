@@ -79,7 +79,7 @@ FLANGE_HOLE_D = 5.5     # M5 Durchgang
 FLANGE_HOLE_Y = [-34.0, 0.0, 34.0]
 FLANGE_HOLE_X_OFF = 8.0  # Lochmitte hinter der Wandaussenflaeche
 
-EXPORT_DIR = r"C:\Users\mausz\Documents\PlatformIO\Projects\UGV ESP32CAN\cad"
+EXPORT_DIR = r"C:\Users\mausz\Documents\PlatformIO\Projects\quassel-ugv\cad"
 
 
 def mm(v):

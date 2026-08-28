@@ -93,7 +93,7 @@ INSERT_M4_D = 5.6      # M4-Einschmelzgewinde: Ø5,6 x 9 als Sitz ...
 INSERT_M4_DEPTH = 9.0
 M4_CLEAR_D = 4.5       # ... dahinter Ø4,5 durch bis zur Plattenrueckseite
 
-EXPORT_DIR = r"C:\Users\mausz\Documents\PlatformIO\Projects\UGV ESP32CAN\cad"
+EXPORT_DIR = r"C:\Users\mausz\Documents\PlatformIO\Projects\quassel-ugv\cad"
 
 
 def mm(v):

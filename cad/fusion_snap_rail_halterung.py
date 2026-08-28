@@ -62,7 +62,7 @@ STATIONS = [
      "xz", 0.5, lambda u, v: (10.18 + v, 0.5 + u)),
 ]
 
-EXPORT_DIR = r"C:\Users\mausz\Documents\PlatformIO\Projects\UGV ESP32CAN\cad"
+EXPORT_DIR = r"C:\Users\mausz\Documents\PlatformIO\Projects\quassel-ugv\cad"
 
 
 def mm(v):

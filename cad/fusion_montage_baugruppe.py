@@ -35,7 +35,7 @@ import adsk.fusion
 # (v4 -> v5 -> ...), ein fester Name wuerde jedes Mal fehlschlagen.
 DOC_PREFIX = "Halterung Batterie"
 
-CAD_DIR = r"C:\Users\mausz\Documents\PlatformIO\Projects\UGV ESP32CAN\cad"
+CAD_DIR = r"C:\Users\mausz\Documents\PlatformIO\Projects\quassel-ugv\cad"
 
 # (Praefix, Koerpername, Teiledatei, Station)
 PARTS = [

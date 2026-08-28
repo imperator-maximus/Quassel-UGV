@@ -52,7 +52,7 @@ SLOT_W = 13.0          # Breite (tangential)
 SLOT_H = 8.0           # Hoehe ab Unterkante
 SLOT_X0, SLOT_X1 = 40.0, 66.0  # radial durch Wand und Flansch
 
-EXPORT_DIR = r"C:\Users\mausz\Documents\PlatformIO\Projects\UGV ESP32CAN\cad"
+EXPORT_DIR = r"C:\Users\mausz\Documents\PlatformIO\Projects\quassel-ugv\cad"
 
 
 def mm(v):

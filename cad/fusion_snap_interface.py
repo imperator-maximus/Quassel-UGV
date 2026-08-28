@@ -89,7 +89,7 @@ INSERT_DEPTH = 6.5
 INSERT_X = 9.5
 INSERT_Z = (13.0, 25.0)
 
-EXPORT_DIR = r"C:\Users\mausz\Documents\PlatformIO\Projects\UGV ESP32CAN\cad"
+EXPORT_DIR = r"C:\Users\mausz\Documents\PlatformIO\Projects\quassel-ugv\cad"
 
 
 def mm(v):
