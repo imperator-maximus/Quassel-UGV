@@ -1,0 +1,44 @@
+{
+  "reference_frame": {
+    "origin": "vehicle_center",
+    "x_axis": "forward",
+    "y_axis": "right",
+    "z_axis": "up",
+    "notes": "Bezugspunkt ist der Fahrzeugmittelpunkt. Der Hebelarm der Primaerantenne wird angewendet (correct_to_vehicle_center), die uebrigen Positionen dienen der Darstellung."
+  },
+  "dimensions_m": {
+    "length": 1.15,
+    "width": 0.79,
+    "body_height": 0.6,
+    "overall_height": 0.6
+  },
+  "capabilities": {
+    "ride_on": true
+  },
+  "gnss": {
+    "heading_source": "dual_antenna",
+    "antenna_baseline_m": 0.508,
+    "side_inset_m": 0.14,
+    "rear_inset_m": 0.10,
+    "heading_offset_deg": 90.0,
+    "notes": "Beide Antennen sitzen 0.10 m vor der Hinterkante und je 0.14 m innerhalb ihrer Seitenkante; bei 0.79 m Breite ergibt das eine quer liegende Baseline von 0.51 m. Der UM982 misst sie selbst zu 0.508 m. heading_offset_deg gleicht den Winkel zwischen Baseline und Vorwaertsachse aus und wird auf das rohe Heading addiert. Seit dem Ausbau des Masts (28.08.2026) liegen beide Antennen auf gleicher Hoehe; die Baseline verlaeuft damit waagerecht statt um 54 Grad geneigt. Ihre Lage in x und y hat sich nicht geaendert, deshalb bleibt der Offset bei 90.0. OFFEN: ob beim Umsetzen die Antennenkabel auf denselben Empfaengereingaengen geblieben sind, ist nicht sicher bestaetigt. Falls vertauscht, dreht sich das Heading um 180 Grad und der Wert muss 270.0 lauten - im Stand gegen eine bekannte Richtung pruefen, bevor autonom gefahren wird."
+  },
+  "sensors": {
+    "gps_primary": {
+      "label": "GPS 1",
+      "mount_position": "rear_right_body_top",
+      "height_m": 0.6,
+      "visual_anchor": "rear_right",
+      "side_inset_m": 0.14,
+      "rear_inset_m": 0.10
+    },
+    "gps_secondary": {
+      "label": "GPS 2",
+      "mount_position": "rear_left_body_top",
+      "height_m": 0.6,
+      "visual_anchor": "rear_left",
+      "side_inset_m": 0.14,
+      "rear_inset_m": 0.10
+    }
+  }
+}
