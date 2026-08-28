@@ -460,11 +460,14 @@ existing test files rather than creating throwaway ad-hoc scripts.**
 .\tools\deploy_motor_controller.ps1
 ```
 
-The script installs local dev dependencies, runs both local test suites, uploads
-the motor-controller code, web template, and static assets to `raspberrycan`,
-preserves the remote `config.yaml`, creates a timestamped backup under
-`/home/nicolay/backup/`, runs the remote motor-controller tests, restarts
-`motor-controller-v2.service`, and checks `/` plus `/api/status`.
+The script uploads the motor-controller code, web template, and static assets
+to `raspberrycan`, preserves the remote `config.yaml`, creates a timestamped
+backup under `/home/nicolay/backup/`, restarts `motor-controller-v2.service`,
+waits for the web server to answer, and checks `/` plus `/api/status`.
+
+Tests are opt-in and deliberately not part of every deploy: `-Tests` runs both
+suites locally (under a minute), `-RemoteTests` additionally runs them on the Pi
+(about ten minutes — for when dependencies or the device Python changed).
 
 **Mapping UI browser smoke test:**
 

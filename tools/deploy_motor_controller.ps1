@@ -4,21 +4,19 @@ param(
     # Steht das Fahrzeug nicht im LAN, laeuft der Zugang ueber die Portfreigabe
     # des Routers - dort liegt SSH nicht auf 22.
     [int]$Port = 22,
-    [switch]$SkipTests,
-    # Ueberspringt die Testlaeufe auf dem Pi. Die dauern dort rund zehn
-    # Minuten, waehrend dieselbe Suite auf dem Entwicklungsrechner unter einer
-    # Minute braucht - ein Teil Rechenleistung, ein Teil Tests, die auf echte
-    # Zeitgrenzen warten.
+    # Ein Ausrollvorgang laedt hoch und startet neu, sonst nichts. Tests sind
+    # ausdruecklich anzufordern - sie gehoeren in den Arbeitsablauf davor und
+    # nicht in jeden einzelnen Ausrollvorgang.
     #
-    # Ihr Nutzen ist echt: Der Pi laeuft mit Python 3.11, der Arbeitsrechner
-    # mit 3.13, und genau so ein Unterschied hat schon einen Ladefehler
-    # aufgedeckt, der lokal nicht auffiel. Deshalb bleiben sie die Vorgabe.
-    #
-    # Fuer mehrere Ausrollvorgaenge hintereinander, bei denen sich weder
-    # Abhaengigkeiten noch Konfiguration geaendert haben, ist der Preis aber
-    # unverhaeltnismaessig. Dann diesen Schalter setzen - und ihn beim
-    # naechsten Mal, wenn sich an der Umgebung etwas tut, wieder weglassen.
-    [switch]$SkipRemoteTests
+    # -Tests laesst beide Suiten hier auf dem Entwicklungsrechner laufen
+    # (unter einer Minute).
+    [switch]$Tests,
+    # -RemoteTests laesst dieselbe Suite zusaetzlich auf dem Pi laufen. Das
+    # dauert dort rund zehn Minuten und ist der ausgesprochene Sonderfall:
+    # sinnvoll, wenn sich an Abhaengigkeiten oder Python-Version auf dem
+    # Geraet etwas geaendert hat. Schlaegt sie fehl, bleibt die laufende
+    # Installation unberuehrt.
+    [switch]$RemoteTests
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,7 +51,7 @@ function Invoke-Step {
 
 Set-Location $repoRoot
 
-if (-not $SkipTests) {
+if ($Tests) {
     Invoke-Step "Install local dev dependencies" {
         python -m pip install -r requirements-dev.txt
     }
@@ -89,9 +87,8 @@ Invoke-Step "Upload motor-controller package, template, and static assets" {
 
 # Der Testblock wird vor dem Here-String zusammengesetzt, damit der Schalter
 # nur ueber diese eine Stelle entscheidet.
-if ($SkipRemoteTests) {
-    $remoteTestBlock = "echo 'Testlauf auf dem Pi uebersprungen (-SkipRemoteTests).'"
-    Write-Host "Hinweis: Tests auf dem Pi werden uebersprungen." -ForegroundColor Yellow
+if (-not $RemoteTests) {
+    $remoteTestBlock = "echo 'Kein Testlauf auf dem Pi (-RemoteTests nicht gesetzt).'"
 } else {
     $remoteTestBlock = @'
 if ! PYTHONPATH="$staging_test_root:/home/USERPLATZHALTER/.venvs/odrive056/lib/python3.11/site-packages" python3 -m unittest discover -s motor_controller/tests -v; then
@@ -151,9 +148,24 @@ else
   sudo systemctl disable can-interface.service 2>/dev/null || true
 fi
 sudo systemctl start motor-controller-v2.service
-# Two native ODrive/Fibre discoveries take several seconds during startup.
-sleep 15
 systemctl is-active motor-controller-v2.service
+# Zwei native ODrive/Fibre-Suchlaeufe brauchen beim Start mehrere Sekunden,
+# der Webserver lauscht erst danach. Ein fester sleep hat genau an dieser
+# Grenze gestanden und die Pruefung unten in ein "connection refused"
+# laufen lassen, obwohl der Dienst sauber hochkam. Also warten, bis der
+# Port antwortet - und nur aufgeben, wenn er es innerhalb einer Minute
+# nicht tut.
+for versuch in `$(seq 1 60); do
+  if curl -s -o /dev/null --max-time 2 http://localhost/; then
+    echo "Webserver antwortet nach `${versuch}s"
+    break
+  fi
+  if [ "`$versuch" = 60 ]; then
+    echo 'FEHLER: Webserver antwortet nach 60s nicht' >&2
+    exit 1
+  fi
+  sleep 1
+done
 if [ "`$can_enabled" = true ]; then
   systemctl is-active can-interface.service
   ip -details link show can0
