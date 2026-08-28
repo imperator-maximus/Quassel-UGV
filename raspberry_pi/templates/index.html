@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="/static/js/mapping_editor.js?v=20260729-19"></script>
+    <script src="/static/js/mapping_editor.js?v=20260828-2"></script>
     <style>
         * {
             margin: 0;
@@ -1226,9 +1226,12 @@
                             <input type="checkbox" id="mainMapsOnlyToggle" onchange="toggleMainMapsOnly()" checked>
                             <span>Hauptkarten anzeigen und Sub-Flächen abziehen</span>
                         </label>
-                        <div class="map-row map-edit-control">
+                        <!-- Bewusst ohne map-edit-control: der Kartenhintergrund
+                             gehoert in beide Modi. Gerade im Plan-Modus will man
+                             sehen, wo die Bahnen ueber die echte Flaeche laufen. -->
+                        <div class="map-row map-layer-row">
                             <button class="mapping-btn primary" id="osmLayerBtn" onclick="setMapBaseLayer('osm')">OSM</button>
-                            <button class="mapping-btn" id="bingLayerBtn" onclick="setMapBaseLayer('bing')">Bing Satellit</button>
+                            <button class="mapping-btn" id="bingLayerBtn" onclick="setMapBaseLayer('bing')">Satellit</button>
                         </div>
                         <div class="map-row map-edit-control">
                             <button class="mapping-btn danger" onclick="deleteSelectedPoint()">Punkt löschen</button>

@@ -81,12 +81,23 @@ function initMapEditor() {
             return `https://ecn.t${subdomain}.tiles.virtualearth.net/tiles/a${quad}.jpeg?g=14328`;
         }
     });
+    // maxNativeZoom ist am Standplatz nachgemessen, nicht geschaetzt: darueber
+    // liefert der Dienst zwar HTTP 200, aber fuer jede Kachel dasselbe
+    // Platzhalterbild. Mit der Angabe skaliert Leaflet die letzte echte
+    // Zoomstufe hoch - unscharf, aber es zeigt die Flaeche. Ohne sie waere die
+    // Karte beim Feinschliff auf Zoom 21/22 einfarbig grau.
+    //
+    // Esri (ArcGIS World_Imagery) stand hier als zweite Luftbildquelle und ist
+    // wieder entfallen: sein Bild endet an dieser Stelle schon bei Zoom 19 und
+    // war auf den Planungsstufen nur noch hochskalierter Brei. Zwei Quellen
+    // lohnen sich erst, wenn die zweite auch etwas zeigt.
     mapLayers.bing = new BingLayer('', {
-        maxZoom: 21,
+        maxNativeZoom: 20,
+        maxZoom: 22,
         attribution: '&copy; Microsoft Bing'
     });
 
-    mapLayers.osm.addTo(mapEditor);
+    setMapBaseLayer(loadPreferredBaseLayer());
 
     document.addEventListener('mousemove', handleManualPointDrag);
     document.addEventListener('mouseup', finishManualPointDrag);
@@ -104,16 +115,52 @@ function tileToQuadKey(x, y, z) {
     return quad;
 }
 
+// Kartenhintergruende und die Knoepfe, die sie schalten.
+var BASE_LAYER_BUTTONS = {
+    osm: 'osmLayerBtn',
+    bing: 'bingLayerBtn'
+};
+var BASE_LAYER_STORAGE_KEY = 'ugv.mapBaseLayer';
+
+function loadPreferredBaseLayer() {
+    // Die Wahl ueberlebt das Neuladen. Wer auf dem Feld steht und den Plan
+    // gegen das Luftbild prueft, will nach jedem Seitenwechsel nicht erneut
+    // umschalten.
+    try {
+        const gespeichert = window.localStorage.getItem(BASE_LAYER_STORAGE_KEY);
+        // Wer zuletzt Esri gewaehlt hatte, wollte ein Luftbild und keine
+        // Strassenkarte. Den entfallenen Namen deshalb auf Bing umbiegen,
+        // statt still auf OSM zurueckzufallen.
+        if (gespeichert === 'esri') return 'bing';
+        if (gespeichert && BASE_LAYER_BUTTONS[gespeichert]) return gespeichert;
+    } catch (e) {
+        // Privates Fenster oder gesperrter Speicher - dann eben OSM.
+    }
+    return 'osm';
+}
+
 function setMapBaseLayer(layerName) {
     initMapEditor();
     if (!mapEditor || !mapLayers[layerName]) return;
-    if (mapLayers[activeBaseLayer]) {
+    if (mapLayers[activeBaseLayer] && mapEditor.hasLayer(mapLayers[activeBaseLayer])) {
         mapEditor.removeLayer(mapLayers[activeBaseLayer]);
     }
     activeBaseLayer = layerName;
     mapLayers[layerName].addTo(mapEditor);
-    document.getElementById('osmLayerBtn').classList.toggle('primary', layerName === 'osm');
-    document.getElementById('bingLayerBtn').classList.toggle('primary', layerName === 'bing');
+    // Der Hintergrund gehoert unter alles andere. Ohne das legt sich eine
+    // spaeter zugeschaltete Kachelebene ueber Grenze, Bahnen und Fahrzeug.
+    if (mapLayers[layerName].bringToBack) mapLayers[layerName].bringToBack();
+
+    Object.keys(BASE_LAYER_BUTTONS).forEach(function(name) {
+        const btn = document.getElementById(BASE_LAYER_BUTTONS[name]);
+        if (btn) btn.classList.toggle('primary', name === layerName);
+    });
+
+    try {
+        window.localStorage.setItem(BASE_LAYER_STORAGE_KEY, layerName);
+    } catch (e) {
+        // Nicht speichern zu koennen ist kein Grund, die Karte nicht zu zeigen.
+    }
 }
 
 // Map list, loading, and boundary editing
