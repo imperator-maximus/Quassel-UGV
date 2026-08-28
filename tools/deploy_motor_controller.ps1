@@ -16,7 +16,17 @@ param(
     # sinnvoll, wenn sich an Abhaengigkeiten oder Python-Version auf dem
     # Geraet etwas geaendert hat. Schlaegt sie fehl, bleibt die laufende
     # Installation unberuehrt.
-    [switch]$RemoteTests
+    [switch]$RemoteTests,
+    # Sprungrechner, falls das Fahrzeug nicht direkt erreichbar ist. Am
+    # Mobilfunkrouter ist es das immer: Die SIM haengt hinter CGNAT, es gibt
+    # keine eingehende Verbindung. Der Weg fuehrt dann ueber den
+    # Rueckwaertstunnel - der bindet auf 127.0.0.1 des Zielrechners, also
+    # muss von dort gesprungen werden.
+    #
+    #   -Jump ugvtunnel@schloss.fdog.de:2224 -HostName 127.0.0.1 -Port 12222
+    #
+    # Steht das Fahrzeug im LAN, bleibt der Schalter weg.
+    [string]$Jump = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +35,7 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $remote = "$User@$HostName"
 $sshPort = @("-p", "$Port")
 $scpPort = @("-P", "$Port")
+$jumpArgs = if ($Jump) { @("-J", "$Jump") } else { @() }
 $remoteTmp = "/tmp/ugv_deploy_motor_controller"
 $remoteStaticTmp = "/tmp/ugv_deploy_static"
 $remoteApp = "/home/$User/motor_controller"
@@ -35,6 +46,10 @@ $remoteMotorServiceTmp = "/tmp/ugv-motor-controller-v2.service"
 $remoteODriveWatchdogTmp = "/tmp/configure_odrive_watchdog.py"
 $remoteODriveUndervoltageTmp = "/tmp/configure_odrive_undervoltage.py"
 $remoteODriveDcLimitTmp = "/tmp/configure_odrive_dc_current_limit.py"
+$remotePackageTar = "/tmp/ugv_deploy_motor_controller.tar.gz"
+$remoteStaticTar = "/tmp/ugv_deploy_static.tar.gz"
+$localPackageTar = Join-Path ([System.IO.Path]::GetTempPath()) "ugv_deploy_motor_controller.tar.gz"
+$localStaticTar = Join-Path ([System.IO.Path]::GetTempPath()) "ugv_deploy_static.tar.gz"
 
 function Invoke-Step {
     param(
@@ -64,25 +79,42 @@ if ($Tests) {
 }
 
 Invoke-Step "Prepare remote staging directory" {
-    ssh -4 @sshPort $remote "rm -rf $remoteTmp $remoteStaticTmp && mkdir -p $remoteTmp $remoteStaticTmp"
+    ssh -4 @jumpArgs @sshPort $remote "rm -rf $remoteTmp $remoteStaticTmp && mkdir -p $remoteTmp $remoteStaticTmp"
 }
 
+# Verzeichnisse gehen gepackt ueber die Leitung, nicht Datei fuer Datei. Am
+# Mobilfunkrouter ist das der Unterschied zwischen Sekunden und einer
+# Viertelstunde: Das Paket wiegt roh 6,1 MB, wovon 3 MB kompilierter
+# Bytecode sind, den der Pi ohnehin neu erzeugt, und rund 1 MB eine
+# eingefrorene Planaufzeichnung fuer die Tests. Gepackt und ohne
+# __pycache__ bleiben davon knapp 500 KB.
+#
+# Die Tests bleiben bewusst drin - sonst laeuft `-RemoteTests` ins Leere,
+# wenn es doch einmal gebraucht wird.
 Invoke-Step "Upload motor-controller package, template, and static assets" {
-    scp -4 @scpPort -r "raspberry_pi/motor_controller/." "${remote}:$remoteTmp/"
+    tar -czf $localPackageTar --exclude=__pycache__ -C "raspberry_pi/motor_controller" .
+    if ($LASTEXITCODE -ne 0) { throw "Packing the motor-controller package failed" }
+    tar -czf $localStaticTar -C "raspberry_pi/static" .
+    if ($LASTEXITCODE -ne 0) { throw "Packing the static assets failed" }
+
+    scp -4 @jumpArgs @scpPort "$localPackageTar" "${remote}:$remotePackageTar"
     if ($LASTEXITCODE -ne 0) { throw "Motor-controller upload failed" }
-    scp -4 @scpPort "raspberry_pi/templates/index.html" "${remote}:$remoteTmp/index.html"
-    if ($LASTEXITCODE -ne 0) { throw "Template upload failed" }
-    scp -4 @scpPort -r "raspberry_pi/static/." "${remote}:$remoteStaticTmp/"
+    scp -4 @jumpArgs @scpPort "$localStaticTar" "${remote}:$remoteStaticTar"
     if ($LASTEXITCODE -ne 0) { throw "Static asset upload failed" }
-    scp -4 @scpPort "raspberry_pi/can-interface.service" "${remote}:$remoteCanServiceTmp"
+    ssh -4 @jumpArgs @sshPort $remote "tar -xzf $remotePackageTar -C $remoteTmp && tar -xzf $remoteStaticTar -C $remoteStaticTmp && rm -f $remotePackageTar $remoteStaticTar"
+    if ($LASTEXITCODE -ne 0) { throw "Unpacking on the remote failed" }
+
+    scp -4 @jumpArgs @scpPort "raspberry_pi/templates/index.html" "${remote}:$remoteTmp/index.html"
+    if ($LASTEXITCODE -ne 0) { throw "Template upload failed" }
+    scp -4 @jumpArgs @scpPort "raspberry_pi/can-interface.service" "${remote}:$remoteCanServiceTmp"
     if ($LASTEXITCODE -ne 0) { throw "CAN service upload failed" }
-    scp -4 @scpPort "raspberry_pi/motor-controller-v2.service" "${remote}:$remoteMotorServiceTmp"
+    scp -4 @jumpArgs @scpPort "raspberry_pi/motor-controller-v2.service" "${remote}:$remoteMotorServiceTmp"
     if ($LASTEXITCODE -ne 0) { throw "Motor service upload failed" }
-    scp -4 @scpPort "scripts/configure_odrive_watchdog.py" "${remote}:$remoteODriveWatchdogTmp"
+    scp -4 @jumpArgs @scpPort "scripts/configure_odrive_watchdog.py" "${remote}:$remoteODriveWatchdogTmp"
     if ($LASTEXITCODE -ne 0) { throw "ODrive watchdog script upload failed" }
-    scp -4 @scpPort "scripts/configure_odrive_undervoltage.py" "${remote}:$remoteODriveUndervoltageTmp"
+    scp -4 @jumpArgs @scpPort "scripts/configure_odrive_undervoltage.py" "${remote}:$remoteODriveUndervoltageTmp"
     if ($LASTEXITCODE -ne 0) { throw "ODrive undervoltage script upload failed" }
-    scp -4 @scpPort "scripts/configure_odrive_dc_current_limit.py" "${remote}:$remoteODriveDcLimitTmp"
+    scp -4 @jumpArgs @scpPort "scripts/configure_odrive_dc_current_limit.py" "${remote}:$remoteODriveDcLimitTmp"
 }
 
 # Der Testblock wird vor dem Here-String zusammengesetzt, damit der Schalter
@@ -201,12 +233,14 @@ echo backup=`$backup
 $deployCommand = $deployCommand -replace "`r`n", "`n"
 $remoteScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($deployCommand))
 Invoke-Step "Install, verify, and restart on remote" {
-    ssh -4 @sshPort $remote "echo $remoteScript | base64 -d | bash"
+    ssh -4 @jumpArgs @sshPort $remote "echo $remoteScript | base64 -d | bash"
 }
 
 Invoke-Step "Check recent service errors" {
-    ssh -4 @sshPort $remote "journalctl -u motor-controller-v2.service --since '2 minutes ago' --no-pager -p err..alert || true"
+    ssh -4 @jumpArgs @sshPort $remote "journalctl -u motor-controller-v2.service --since '2 minutes ago' --no-pager -p err..alert || true"
 }
+
+Remove-Item -Force -ErrorAction SilentlyContinue $localPackageTar, $localStaticTar
 
 Write-Host ""
 Write-Host "Deploy complete." -ForegroundColor Green
