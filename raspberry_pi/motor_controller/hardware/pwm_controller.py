@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
 """
-PWM Controller - Hardware-PWM-Steuerung für die Fahrmotoren
-Verwendet pigpio für präzise Hardware-PWM-Signale
+PWM Controller - Servosignal fuer die Fahrmotoren
 
-Das Mähdeck läuft über die ODrives (siehe hardware/odrive_mower.py) und nicht
-mehr über GPIO-PWM.
+Erzeugt wird es von pigpio als Soft-PWM (`set_servo_pulsewidth`) statt wie
+zuvor ueber die beiden Hardware-PWM-Kanaele des Pi. Der Grund ist die
+Pinbindung: Hardware-PWM gibt es nur auf GPIO 12/13/18/19, und genau diese
+Pins werden anderweitig gebraucht. pigpio erzeugt die Pulse per DMA - der
+Jitter liegt im einstelligen Mikrosekundenbereich und damit weit unter dem,
+was eine Endstufe an einem 1000-2000-us-Puls aufloest. (Der Soft-PWM aus
+RPi.GPIO waere etwas anderes: ein Python-Thread, der unter Last um
+Millisekunden verrutscht.)
+
+Nach aussen aendert sich nichts - die Schnittstelle bleibt der Wert in
+Mikrosekunden.
+
+Das Maehdeck laeuft ueber die ODrives (siehe hardware/odrive_mower.py) und
+nicht mehr ueber GPIO-PWM.
 """
 
 import logging
@@ -15,9 +26,18 @@ from ..config import PWMConfig
 
 class PWMController:
     """
-    PWM-Controller für die Fahrmotoren
-    Verwendet pigpio für Hardware-PWM (GPIO 18/19)
+    PWM-Controller fuer die Fahrmotoren
+
+    Verwendet pigpio-Soft-PWM; der Pin kommt aus der Konfiguration und ist
+    nicht mehr auf die Hardware-PWM-Kanaele beschraenkt.
     """
+
+    # Grenzen, die pigpio fuer `set_servo_pulsewidth` zulaesst. Ein Wert
+    # ausserhalb davon wird nicht etwa begrenzt, sondern als Fehler
+    # abgewiesen - und ein abgewiesener Puls heisst: Der Motor laeuft mit
+    # dem alten Wert weiter.
+    PIGPIO_MIN_US = 500
+    PIGPIO_MAX_US = 2500
 
     def __init__(self, pwm_config: PWMConfig, gpio_controller):
         """
@@ -45,27 +65,35 @@ class PWMController:
             self._init_motor_pwm()
     
     def _init_motor_pwm(self):
-        """Initialisiert Hardware-PWM für Motoren"""
+        """Legt beide Ausgaenge auf Neutral"""
         if not self.pi:
             self.logger.error("❌ pigpio nicht verfügbar - Motor-PWM deaktiviert")
             self.motor_enabled = False
             return
 
+        # pigpio erzeugt Servopulse fest im 20-ms-Raster. Eine abweichende
+        # Frequenz in der Konfiguration wuerde also stillschweigend ignoriert
+        # - lieber einmal laut sagen als spaeter raten.
+        if int(self.config.frequency) != 50:
+            self.logger.warning(
+                "PWM-Frequenz %s Hz aus der Konfiguration wird nicht verwendet: "
+                "pigpio sendet Servopulse fest mit 50 Hz",
+                self.config.frequency,
+            )
+
         try:
             for side, pin in self.config.pins.items():
-                # Hardware-PWM: 50Hz, 1500μs (neutral)
-                # Duty cycle berechnen: (1500μs / 20000μs) * 1000000 = 75000
-                duty_cycle = int((self.config.neutral_value / 20000.0) * 1000000)
-                self.pi.hardware_PWM(
-                    pin,
-                    self.config.frequency,
-                    duty_cycle  # 0-1000000 (0-100%)
-                )
+                self.pi.set_servo_pulsewidth(pin, self._pulse(self.config.neutral_value))
                 self.logger.info(f"✅ Motor-PWM initialisiert: {side.upper()}=GPIO{pin}")
 
         except Exception as e:
             self.logger.error(f"❌ Motor-PWM Initialisierung fehlgeschlagen: {e}")
             self.motor_enabled = False
+
+    def _pulse(self, value: int) -> int:
+        """Begrenzt den Wert auf das, was Konfiguration und pigpio hergeben."""
+        value = max(self.config.min_value, min(self.config.max_value, value))
+        return int(max(self.PIGPIO_MIN_US, min(self.PIGPIO_MAX_US, value)))
     
     def set_motor_pwm(self, side: str, value: int) -> bool:
         """
@@ -85,15 +113,12 @@ class PWMController:
             self.logger.error(f"❌ Ungültige Motor-Seite: {side}")
             return False
         
-        # Wert begrenzen
-        value = max(self.config.min_value, min(self.config.max_value, value))
+        value = self._pulse(value)
 
         try:
             with self._lock:
                 pin = self.config.pins[side]
-                # Duty cycle berechnen: (value_μs / 20000μs) * 1000000
-                duty_cycle = int((value / 20000.0) * 1000000)
-                self.pi.hardware_PWM(pin, self.config.frequency, duty_cycle)
+                self.pi.set_servo_pulsewidth(pin, value)
                 self.current_values[side] = value
             return True
         
