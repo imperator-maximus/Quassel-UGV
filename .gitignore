@@ -125,3 +125,7 @@ logs/*.log
 
 # Documentation build
 _build/
+
+# Arbeitsverzeichnis: Datenblaetter, Firmware-Klone, Textauszüge.
+# Nichts davon gehört in die Historie des Fahrzeugs.
+tmp/
