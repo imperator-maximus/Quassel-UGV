@@ -116,8 +116,13 @@ class WebServer:
         self.light_config = None
         self.odrive_mower = None
         
+        # Die Lampe kapselt das Relais. Ohne sie wuerde eine laufende
+        # Signalfolge gegen den Knopf in der Oberflaeche arbeiten und die
+        # Anzeige danach nicht mehr zum tatsaechlichen Zustand passen.
+        self.lamp = None
+
         # Status
-        self.light_state = False
+        self._light_state = False
         self.mower_state = False
         self._plan_lock = threading.Lock()
         self._resume_lock = threading.Lock()
@@ -167,16 +172,29 @@ class WebServer:
         if self.flask_available:
             self._init_flask()
     
-    def set_hardware_refs(self, light_config, odrive_mower=None):
+    @property
+    def light_state(self) -> bool:
+        """Tatsaechlicher Zustand des Relais, nicht der zuletzt gewuenschte.
+
+        Waehrend einer Signalfolge schaltet die Lampe selbst; die Anzeige muss
+        ihr folgen und darf keinen eigenen Merker fuehren.
+        """
+        if self.lamp is not None:
+            return self.lamp.state
+        return self._light_state
+
+    def set_hardware_refs(self, light_config, odrive_mower=None, lamp=None):
         """
         Setzt Hardware-Referenzen für Light/Mower-Steuerung
 
         Args:
             light_config: LightConfig-Instanz
             odrive_mower: ODrive-Mähdeck-Instanz
+            lamp: StatusLamp-Instanz, ueber die das Relais geschaltet wird
         """
         self.light_config = light_config
         self.odrive_mower = odrive_mower
+        self.lamp = lamp
     
     def _init_flask(self):
         """Initialisiert Flask-App mit Socket.IO"""
@@ -539,10 +557,16 @@ class WebServer:
         @self.app.route('/api/light/toggle', methods=['POST'])
         def api_light_toggle():
             """Schaltet Licht Ein/Aus"""
-            if self.light_config and self.light_config.enabled:
-                self.light_state = not self.light_state
-                self.gpio.output(self.light_config.pin, self.light_state)
-                self.logger.info(f"Licht {'ein' if self.light_state else 'aus'}")
+            if self.lamp is not None and self.lamp.enabled:
+                # Die Lampe bricht dabei eine laufende Startsequenz ab: wer
+                # selbst schaltet, soll nicht Sekunden spaeter ueberstimmt
+                # werden.
+                zustand = self.lamp.toggle()
+                self.logger.info(f"Licht {'ein' if zustand else 'aus'}")
+            elif self.light_config and self.light_config.enabled:
+                self._light_state = not self._light_state
+                self.gpio.output(self.light_config.pin, self._light_state)
+                self.logger.info(f"Licht {'ein' if self._light_state else 'aus'}")
 
             return jsonify({'success': True, 'light_state': self.light_state})
         

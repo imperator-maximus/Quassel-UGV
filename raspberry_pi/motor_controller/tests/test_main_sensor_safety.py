@@ -9,6 +9,16 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+# pyserial gibt es nur auf dem Fahrzeug, main.py zieht es ueber die GNSS-Kette
+# beim Import mit. Ohne diesen Ersatz laeuft diese Datei nur dann, wenn zufaellig
+# vorher ein anderer Test denselben Ersatz gesetzt hat - die Suite haenge damit
+# an der alphabetischen Reihenfolge ihrer Dateien.
+if 'serial' not in sys.modules:
+    import types as _types
+    _serial = _types.ModuleType('serial')
+    _serial.Serial = object
+    sys.modules['serial'] = _serial
+
 from motor_controller.hardware.odrive_mower import ODriveMowerController
 from motor_controller.hardware.safety_monitor import SafetyMonitor
 from motor_controller.main import MotorControllerApp

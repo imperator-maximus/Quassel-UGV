@@ -124,9 +124,28 @@ class SafetyConfig:
 
 @dataclass
 class LightConfig:
-    """Licht-Konfiguration"""
+    """Licht-Relais und die Lebenszeichen, die darueber laufen.
+
+    Am Fahrzeug steht man ohne Laptop davor. Ob der Dienst hochgekommen ist
+    und ob das Netz steht, war sonst nur ueber die Oberflaeche zu sehen - also
+    ueber genau den Weg, der noch fehlt, solange das Netz nicht da ist.
+    """
     enabled: bool = True
     pin: int = 22
+    # Einmal kurz an, sobald der Dienst steht.
+    boot_signal_enabled: bool = True
+    boot_on_s: float = 1.0
+    # Zweimal blinken, sobald die Netzverbindung eine IP-Adresse hat. Der
+    # Mobilfunkrouter braucht nach dem Einschalten laenger als der Pi, deshalb
+    # ein eigenes, spaeteres Signal statt eines gemeinsamen.
+    network_signal_enabled: bool = True
+    network_blinks: int = 2
+    network_on_s: float = 0.25
+    network_off_s: float = 0.25
+    # Kommt bis dahin kein Netz, bleibt es still. Ohne diese Grenze koennte
+    # das Signal Stunden spaeter mitten im Maehen losblinken.
+    network_wait_timeout_s: float = 600.0
+    network_poll_interval_s: float = 2.0
 
 
 @dataclass

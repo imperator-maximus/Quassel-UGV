@@ -19,6 +19,7 @@ from .hardware.gpio_controller import GPIOController
 from .hardware.pwm_controller import PWMController
 from .hardware.odrive_usb_mower import ODriveUSBMowerController
 from .hardware.safety_monitor import SafetyMonitor
+from .hardware.status_lamp import StatusLamp
 from .hardware.battery_monitor import BatteryMonitor
 from .communication.network_monitor import NetworkMonitor
 from .communication.push_notifier import PushNotifier
@@ -55,6 +56,7 @@ class MotorControllerApp:
         self.gpio: GPIOController = None
         self.pwm: PWMController = None
         self.safety: SafetyMonitor = None
+        self.lamp: StatusLamp = None
         self.pose_cache: PoseCache = None
         self.local_pose: LocalPoseSource = None
         self.odrive_mower: ODriveMowerController = None
@@ -130,10 +132,11 @@ class MotorControllerApp:
             self.logger.info("Initialisiere GPIO-Controller...")
             self.gpio = GPIOController()
 
-            # GPIO-Pin für Licht initialisieren
-            if self.config.light.enabled:
-                self.gpio.setup_output(self.config.light.pin, initial_state=0)  # GPIO.LOW
-                self.logger.info(f"✅ Licht-Relais initialisiert (GPIO{self.config.light.pin})")
+            # Licht-Relais. Laeuft ueber die Lampe statt direkt ueber den
+            # GPIO, damit Handbedienung und Signalfolgen sich nicht
+            # gegenseitig ueberschreiben.
+            self.lamp = StatusLamp(self.config.light, self.gpio, self.logger)
+            self.lamp.initialize()
 
             # PWM-Controller
             self.logger.info("Initialisiere PWM-Controller...")
@@ -237,7 +240,8 @@ class MotorControllerApp:
                 # Hardware-Referenzen setzen
                 self.web.set_hardware_refs(
                     self.config.light,
-                    self.odrive_mower
+                    self.odrive_mower,
+                    lamp=self.lamp,
                 )
                 # Der Netzwaechter darf nicht mitten in eine Planfahrt
                 # umschalten: Der Wechsel kappt die Verbindung fuer Sekunden,
@@ -489,11 +493,81 @@ class MotorControllerApp:
             self.running = True
             self.logger.info("✅ Alle Komponenten gestartet")
             self.logger.info("Motor Controller läuft - Drücke Ctrl+C zum Beenden")
+
+            # Erst ganz zum Schluss: das Licht meldet, dass der Dienst steht.
+            # Es darf nichts davon aufhalten, deshalb laeuft es nebenher.
+            self._start_boot_signals()
         
         except Exception as e:
             self.logger.critical(f"❌ Start fehlgeschlagen: {e}", exc_info=True)
             raise
     
+    def _start_boot_signals(self):
+        """Meldet ueber das Licht, dass der Dienst steht und spaeter das Netz.
+
+        Zwei getrennte Zeitpunkte, weil sie weit auseinanderliegen: der Dienst
+        ist in Sekunden da, der Mobilfunkrouter braucht nach dem Einschalten
+        deutlich laenger. Ein gemeinsames Signal wuerde entweder zu frueh
+        kommen und nichts ueber das Netz aussagen, oder so spaet, dass man
+        vorher nicht weiss, ob ueberhaupt etwas laeuft.
+        """
+        light = self.config.light
+        if not self.lamp or not self.lamp.enabled:
+            return
+
+        if getattr(light, 'boot_signal_enabled', True):
+            self.lamp.signal(
+                blinks=1,
+                on_s=float(getattr(light, 'boot_on_s', 1.0)),
+                reason='Dienst gestartet',
+            )
+
+        if not getattr(light, 'network_signal_enabled', True) or not self.network:
+            return
+        threading.Thread(
+            target=self._await_network_signal,
+            name='lamp-network-wait',
+            daemon=True,
+        ).start()
+
+    def _await_network_signal(self):
+        """Wartet auf eine Netzverbindung mit Adresse und blinkt dann einmalig.
+
+        Geprueft wird auf die IPv4-Adresse, nicht auf die reine Verbindung: mit
+        SSID, aber ohne Adresse ist noch nichts erreichbar, und das Signal soll
+        heissen "du kommst jetzt drauf".
+
+        Das Warten endet mit dem Zeitfenster. Ohne diese Grenze koennte das
+        Blinken Stunden spaeter mitten im Maehen losgehen und dort wie eine
+        Stoerungsmeldung wirken. Kommt das Netz erst danach, bleibt es still -
+        wer so lange wartet, schaut ohnehin in die Oberflaeche.
+        """
+        light = self.config.light
+        timeout_s = float(getattr(light, 'network_wait_timeout_s', 600.0))
+        interval_s = max(0.5, float(getattr(light, 'network_poll_interval_s', 2.0)))
+        deadline = time.monotonic() + timeout_s
+
+        while self.running and time.monotonic() < deadline:
+            try:
+                status = self.network.get_status()
+            except Exception as exc:
+                self.logger.debug("Netzstatus fuer das Lichtsignal nicht lesbar: %s", exc)
+                status = {}
+            if status.get('ipv4'):
+                self.lamp.signal(
+                    blinks=int(getattr(light, 'network_blinks', 2)),
+                    on_s=float(getattr(light, 'network_on_s', 0.25)),
+                    off_s=float(getattr(light, 'network_off_s', 0.25)),
+                    reason=f"Netz steht ({status.get('ssid') or 'unbekannt'})",
+                )
+                return
+            time.sleep(interval_s)
+
+        if self.running:
+            self.logger.info(
+                "Kein Netz innerhalb von %.0fs - kein Lichtsignal", timeout_s
+            )
+
     def run(self):
         """Haupt-Loop"""
         try:
@@ -638,6 +712,11 @@ class MotorControllerApp:
                 self.logger.info("PWM-Controller cleanup...")
                 self.pwm.cleanup()
             
+            # Laufende Lichtsignale beenden, bevor der GPIO wegfaellt - sonst
+            # schaltet der Signalthread auf einen bereits aufgeraeumten Pin.
+            if self.lamp:
+                self.lamp.stop()
+
             # GPIO-Controller cleanup
             if self.gpio:
                 self.logger.info("GPIO-Controller cleanup...")
