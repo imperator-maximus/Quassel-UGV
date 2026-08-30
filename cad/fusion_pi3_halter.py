@@ -100,6 +100,16 @@ ROOT_Y0 = AD_WALL_Y    # Wurzelrunge bindet an die Adapterrueckwand an
 ROOT_Y1 = ROOT_Y0 + WALL_T
 RAIL_Y1 = HOLE_Y2 + BOSS / 2.0       # 96.0, hinteres Ende der Holme
 RUNG_X = HOLE_X + WALL_T / 2.0       # 32.0, Rungen bis Holm-Aussenkante
+FRAME_X = HOLE_X + BOSS / 2.0        # 37.0, Aussenkante der Bosse
+
+# Adaptermitte auf der Vorderkante. 0 waere mittig; auf Wunsch ans +x-Ende
+# gerueckt, der Pi haengt damit komplett auf der -x-Seite neben der Schiene.
+# Der Adapter ist AD_W=26 breit, bei +24 reicht er also von +11 bis +37 und
+# schliesst aussen buendig mit dem Rahmen ab. Deshalb laeuft die Wurzelrunge
+# jetzt ueber die volle Breite (+/-FRAME_X statt +/-RUNG_X): sonst stuende die
+# aeussere Konsole ueber x 32..37 in der Luft und Fusion wuerde sie beim
+# Join verwerfen.
+ADAPTER_X = 24.0
 
 # --- Konsolen an der Adapterwand ---
 GUSSET_X0 = 8.0        # neben Zunge (+/-4) und Freischnitt (bis +/-5,5)
@@ -188,11 +198,12 @@ def build(comp, body_name="pi3_halter"):
     slope = (ft - fr) / fu
 
     pl_z8 = offset_plane(comp, xy, RAIL_Z0, "z")
+    pl_ax = yz if abs(ADAPTER_X) < 1e-9 else offset_plane(comp, yz, ADAPTER_X, "x")
 
     # --- Adapterblock ---
     sk = comp.sketches.add(pl_z8)
     sk.name = "adapter_block"
-    rect_xy(sk, -ahw, ahw, AD_Y0, AD_WALL_Y, RAIL_Z0)
+    rect_xy(sk, ADAPTER_X - ahw, ADAPTER_X + ahw, AD_Y0, AD_WALL_Y, RAIL_Z0)
     part = extrude(comp, sk.profiles.item(0), AD_Z1 - RAIL_Z0, new_body).bodies.item(0)
     part.name = body_name
     parts = [part]
@@ -200,8 +211,9 @@ def build(comp, body_name="pi3_halter"):
     # --- Schwalbenschwanznut ---
     sk = comp.sketches.add(pl_z8)
     sk.name = "adapter_nut"
-    poly(sk, [(-(fr - slope), -1.0, RAIL_Z0), (fr - slope, -1.0, RAIL_Z0),
-              (ft, fu, RAIL_Z0), (-ft, fu, RAIL_Z0)])
+    ax = ADAPTER_X
+    poly(sk, [(ax - (fr - slope), -1.0, RAIL_Z0), (ax + (fr - slope), -1.0, RAIL_Z0),
+              (ax + ft, fu, RAIL_Z0), (ax - ft, fu, RAIL_Z0)])
     extrude(comp, sk.profiles.item(0), AD_Z1 - RAIL_Z0, cut, parts)
 
     # --- Freischnitt der Federzunge ---
@@ -211,37 +223,37 @@ def build(comp, body_name="pi3_halter"):
     sk = comp.sketches.add(pl_y)
     sk.name = "adapter_freischnitt"
     for sx in (-1.0, 1.0):
-        x0, x1 = sx * thw, sx * (thw + SLIT_W)
+        x0, x1 = ADAPTER_X + sx * thw, ADAPTER_X + sx * (thw + SLIT_W)
         poly(sk, [(min(x0, x1), y_mid, SLIT_Z0), (max(x0, x1), y_mid, SLIT_Z0),
                   (max(x0, x1), y_mid, AD_Z1 + 0.5), (min(x0, x1), y_mid, AD_Z1 + 0.5)])
         sk.sketchCurves.sketchCircles.addByCenterRadius(
             sk.modelToSketchSpace(adsk.core.Point3D.create(
-                mm(sx * (thw + sr)), mm(y_mid), mm(SLIT_Z0))), mm(sr))
+                mm(ADAPTER_X + sx * (thw + sr)), mm(y_mid), mm(SLIT_Z0))), mm(sr))
     extrude(comp, all_profiles(sk), (AD_WALL_Y - RAIL_H) + 1.0, cut, parts, symmetric=True)
 
     # --- Zunge ausduennen (vor dem Rahmen, sonst kerbt der Schnitt die Rungen an) ---
     ty = fu + TONGUE_T
-    sk = comp.sketches.add(yz)
+    sk = comp.sketches.add(pl_ax)
     sk.name = "adapter_zunge_duenn"
-    poly(sk, [(0, AD_WALL_Y + 0.5, TAPER_Z0), (0, ty, TAPER_Z1),
-              (0, ty, AD_Z1 + 1.0), (0, AD_WALL_Y + 0.5, AD_Z1 + 1.0)])
+    poly(sk, [(ax, AD_WALL_Y + 0.5, TAPER_Z0), (ax, ty, TAPER_Z1),
+              (ax, ty, AD_Z1 + 1.0), (ax, AD_WALL_Y + 0.5, AD_Z1 + 1.0)])
     extrude(comp, sk.profiles.item(0), TONGUE_W, cut, parts, symmetric=True)
 
     # --- Rastnase ---
     nose_base = fu + 0.5
     ramp = nose_base - NOSE_TIP_Y
-    sk = comp.sketches.add(yz)
+    sk = comp.sketches.add(pl_ax)
     sk.name = "adapter_rastnase"
-    poly(sk, [(0, nose_base, NOSE_Z0 - 0.5), (0, NOSE_TIP_Y, NOSE_Z0 - 0.5 + ramp),
-              (0, NOSE_TIP_Y, NOSE_Z1 + 0.5 - ramp), (0, nose_base, NOSE_Z1 + 0.5)])
+    poly(sk, [(ax, nose_base, NOSE_Z0 - 0.5), (ax, NOSE_TIP_Y, NOSE_Z0 - 0.5 + ramp),
+              (ax, NOSE_TIP_Y, NOSE_Z1 + 0.5 - ramp), (ax, nose_base, NOSE_Z1 + 0.5)])
     extrude(comp, sk.profiles.item(0), NOSE_W, join, parts, symmetric=True)
 
     # --- Zuglasche (liegt ab Z=29 komplett ueber dem Deck, kein Freigang noetig) ---
-    sk = comp.sketches.add(yz)
+    sk = comp.sketches.add(pl_ax)
     sk.name = "adapter_zuglasche"
-    poly(sk, [(0, fu, TAB_Z0), (0, AD_WALL_Y, TAB_Z0),
-              (0, TAB_Y, TAB_Z0 + (TAB_Y - AD_WALL_Y)),
-              (0, TAB_Y, TAB_Z1), (0, fu, TAB_Z1)])
+    poly(sk, [(ax, fu, TAB_Z0), (ax, AD_WALL_Y, TAB_Z0),
+              (ax, TAB_Y, TAB_Z0 + (TAB_Y - AD_WALL_Y)),
+              (ax, TAB_Y, TAB_Z1), (ax, fu, TAB_Z1)])
     extrude(comp, sk.profiles.item(0), TONGUE_W, join, parts, symmetric=True)
 
     # --- Leiterrahmen: zwei Holme in Y, drei Rungen in X, vier Bosse ---
@@ -254,7 +266,7 @@ def build(comp, body_name="pi3_halter"):
     # Wurzelrunge (haengt an der Adapterrueckwand), dann die Holme (haengen an
     # der Wurzelrunge), dann die restlichen Rungen und zuletzt die Bosse.
     hw, bh = WALL_T / 2.0, BOSS / 2.0
-    members = [("runge_wurzel", -RUNG_X, RUNG_X, ROOT_Y0, ROOT_Y1)]
+    members = [("runge_wurzel", -FRAME_X, FRAME_X, ROOT_Y0, ROOT_Y1)]
     for sx in (-HOLE_X, HOLE_X):
         members.append(("holm_%+d" % int(sx), sx - hw, sx + hw, ROOT_Y0, RAIL_Y1))
     for i, yc in enumerate((HOLE_Y1, HOLE_Y2)):
@@ -271,7 +283,7 @@ def build(comp, body_name="pi3_halter"):
 
     # --- 45-Grad-Konsolen von der Adapterwand auf die Wurzelrunge ---
     g_c = (GUSSET_X0 + GUSSET_X1) / 2.0
-    for sx in (-g_c, g_c):
+    for sx in (ADAPTER_X - g_c, ADAPTER_X + g_c):
         pl_g = offset_plane(comp, yz, sx, "x")
         sk = comp.sketches.add(pl_g)
         sk.name = "konsole_%+d" % int(sx)
@@ -333,14 +345,17 @@ def run(_context):
         return part.pointContainment(p) == adsk.fusion.PointContainment.PointInsidePointContainment
 
     checks = [
-        ('Nut leer            (0, 2.0, 20)', 0.0, 2.0, 20.0, False),
-        ('Zunge 1,6 mm        (0, 5.0, 20)', 0.0, 5.0, 20.0, True),
-        ('hinter der Zunge    (0, 6.8, 20)', 0.0, 6.8, 20.0, False),
-        ('Schlitz offen       (4.75, 5.0, 20)', 4.75, 5.0, 20.0, False),
-        ('Adapterwand seitl.  (10, 6.0, 20)', 10.0, 6.0, 20.0, True),
-        ('Rastnase            (0, 3.3, 24.5)', 0.0, 3.3, 24.5, True),
-        ('Zuglasche           (0, 9.5, 32)', 0.0, 9.5, 32.0, True),
+        ('Nut leer            (24, 2.0, 20)', 24.0, 2.0, 20.0, False),
+        ('Zunge 1,6 mm        (24, 5.0, 20)', 24.0, 5.0, 20.0, True),
+        ('hinter der Zunge    (24, 6.8, 20)', 24.0, 6.8, 20.0, False),
+        ('Schlitz offen       (19.25, 5.0, 20)', 19.25, 5.0, 20.0, False),
+        ('Adapterwand seitl.  (14, 6.0, 20)', 14.0, 6.0, 20.0, True),
+        ('Adapter-Aussenkante (36, 6.0, 20)', 36.0, 6.0, 20.0, True),
+        ('neben dem Adapter   (10, 6.0, 20)', 10.0, 6.0, 20.0, False),
+        ('Rastnase            (24, 3.3, 24.5)', 24.0, 3.3, 24.5, True),
+        ('Zuglasche           (24, 9.5, 32)', 24.0, 9.5, 32.0, True),
         ('Wurzelrunge         (0, 10.5, 14)', 0.0, 10.5, 14.0, True),
+        ('Wurzelrunge aussen  (34, 10.5, 14)', 34.0, 10.5, 14.0, True),
         ('Rahmen offen        (0, 25, 14)', 0.0, 25.0, 14.0, False),
         ('Seitenholm          (29, 25, 14)', 29.0, 25.0, 14.0, True),
         ('neben dem Holm frei (15, 25, 14)', 15.0, 25.0, 14.0, False),
@@ -354,10 +369,11 @@ def run(_context):
         ('Kammer bis 14       (29, 39, 13)', 29.0, 39.0, 13.0, False),
         ('Decke am 2. Boss    (31, 88, 15)', 31.0, 88.0, 15.0, True),
         ('ueber dem Deck frei (31, 88, 17)', 31.0, 88.0, 17.0, False),
-        ('Konsolenfuss        (10, 10, 17)', 10.0, 10.0, 17.0, True),
-        ('Konsole             (10, 10, 26)', 10.0, 10.0, 26.0, True),
-        ('ueber Konsole frei  (10, 10, 28)', 10.0, 10.0, 28.0, False),
-        ('neben Konsole frei  (6, 10, 26)', 6.0, 10.0, 26.0, False),
+        ('Konsolenfuss        (14, 10, 17)', 14.0, 10.0, 17.0, True),
+        ('Konsole innen       (14, 10, 26)', 14.0, 10.0, 26.0, True),
+        ('Konsole aussen      (34, 10, 26)', 34.0, 10.0, 26.0, True),
+        ('ueber Konsole frei  (14, 10, 28)', 14.0, 10.0, 28.0, False),
+        ('neben Konsole frei  (20, 10, 26)', 20.0, 10.0, 26.0, False),
         ('Platinenebene frei  (29, 60, 30)', 29.0, 60.0, 30.0, False),
         ('Hinterkante Rahmen  (29, 95, 14)', 29.0, 95.0, 14.0, True),
         ('hinter dem Rahmen   (29, 97, 14)', 29.0, 97.0, 14.0, False),
