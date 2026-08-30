@@ -129,3 +129,6 @@ _build/
 # Arbeitsverzeichnis: Datenblaetter, Firmware-Klone, Textauszüge.
 # Nichts davon gehört in die Historie des Fahrzeugs.
 tmp/
+
+# Die Testansagen legt setUp() selbst an - sie sind kein Inhalt.
+raspberry_pi/motor_controller/tests/fixtures/audio/
