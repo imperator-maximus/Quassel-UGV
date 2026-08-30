@@ -233,12 +233,18 @@ class NetzwaechterTests(unittest.TestCase):
         app.lamp = lamp
         app.logger = logging.getLogger('test')
         app.config = SimpleNamespace(
-            light=FakeLightConfig(network_wait_timeout_s=timeout_s)
+            light=FakeLightConfig(network_wait_timeout_s=timeout_s),
+            voice=SimpleNamespace(boot_announcements=True),
         )
         app.network = SimpleNamespace(get_status=netz_status)
-        app._await_network_signal = (
-            MotorControllerApp._await_network_signal.__get__(app, SimpleNamespace)
-        )
+        # Das Licht und die Ansage haengen an derselben Stelle; die Tests
+        # halten beide fest, damit keins von beidem unbemerkt wegfaellt.
+        app.gesagt = []
+        app.voice = SimpleNamespace(say=lambda key: app.gesagt.append(key))
+        for name in ('_await_network_signal', '_announce_boot'):
+            setattr(app, name, getattr(MotorControllerApp, name).__get__(
+                app, SimpleNamespace
+            ))
         return app
 
     def test_blinkt_erst_wenn_eine_adresse_da_ist(self):
@@ -261,6 +267,7 @@ class NetzwaechterTests(unittest.TestCase):
 
         self.assertGreaterEqual(aufrufe['n'], 3, 'Ohne Adresse darf nicht geblinkt werden')
         self.assertEqual(gpio.states, [True, False, True, False])
+        self.assertEqual(['system_bereit'], app.gesagt)
 
     def test_ohne_netz_bleibt_es_still(self):
         """Ohne Zeitfenster koennte es Stunden spaeter im Maehen losblinken."""
@@ -274,6 +281,9 @@ class NetzwaechterTests(unittest.TestCase):
 
         self.assertLess(time.monotonic() - begonnen, 2.0, 'Warten muss enden')
         self.assertEqual(gpio.writes, [], 'Kein Netz, kein Signal')
+        # Das Licht schweigt hier - die Ansage nicht: genau in dieser Lage
+        # steht man ratlos davor und weiss nicht, ob noch etwas kommt.
+        self.assertEqual(['system_kein_netz'], app.gesagt)
 
     def test_fehler_im_netzstatus_beendet_das_warten_nicht(self):
         gpio = FakeGPIO()

@@ -153,8 +153,24 @@ class BatteryMonitor:
 
         self._low_callback: Optional[Callable[[str, float], None]] = None
         self._notified_levels: set = set()
+        # Sprachansagen am Fahrzeug, optional.
+        self.voice = None
 
     # ------------------------------------------------------------------ API
+
+    def set_voice(self, voice) -> None:
+        """Setzt den Ansager fuer die Sprachausgabe am Fahrzeug."""
+        self.voice = voice
+
+    def _say(self, key: str) -> None:
+        """Sagt an, ohne die Ueberwachung zu stoeren."""
+        voice = getattr(self, 'voice', None)
+        if not voice:
+            return
+        try:
+            voice.say(key)
+        except Exception as exc:  # noqa: BLE001 - Ansagen sind Nebensache
+            self.logger.error("Ansage fehlgeschlagen: %s", exc)
 
     def set_low_battery_callback(self, callback: Callable[[str, float], None]) -> None:
         self._low_callback = callback
@@ -426,8 +442,14 @@ class BatteryMonitor:
                     await client.stop_notify(notify_uuid)
             except Exception as exc:
                 with self._lock:
+                    war_verbunden = self._connected
                     self._last_error = str(exc)
                 self.logger.warning("Batteriemonitor getrennt: %s", exc)
+                # Nur der Abriss einer stehenden Verbindung wird angesagt.
+                # Ein fehlgeschlagener Verbindungsversuch wiederholt sich im
+                # Backoff und wuerde sonst dauernd dasselbe sagen.
+                if war_verbunden:
+                    self._say('batterie_getrennt')
                 # Kein Advertisement und die Uebernahme scheitert auch: dann
                 # haelt das Betriebssystem eine Verbindung, aus der niemand
                 # mehr liest. Sie aufzuloesen ist das Einzige, was hilft -

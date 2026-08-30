@@ -38,6 +38,15 @@ light:
   enabled: true
   pin: 22                  # GPIO22 für Licht-Relais
 
+# Sprachansagen über den USB-Audiostick. Sagen dasselbe wie die
+# Start-Blinkzeichen, nur in Worten - wer davorsteht, muss nicht hinsehen.
+# Die Dateien liegen fertig in audio/, erzeugt mit tools/voice/generate_voice.py.
+voice:
+  enabled: false                        # erst einschalten, wenn ein Stick steckt
+  device: plughw:CARD=Device,DEV=0      # plughw, nicht hw: der Stick will Stereo
+  min_interval_s: 30.0                  # dieselbe Ansage nicht im Sekundentakt
+  boot_announcements: true              # die beiden Startsignale mitsprechen
+
 # Mäher-Konfiguration
 mower:
   enabled: false           # Haupt-UGV: Mähdeck wird ausschließlich per ODrive-USB gesteuert

@@ -65,6 +65,9 @@ class SafetyMonitor:
         # Push-Meldungen. Ein Sicherheitsstopp faerbt die Oberflaeche rot, aber
         # niemand sieht hin, waehrend das Fahrzeug im Garten steht.
         self.notifier = None
+        # Sprachansagen am Fahrzeug. Sagen dieselbe Ursache demjenigen, der
+        # danebensteht - unabhaengig davon, ob ein Push-Ziel eingerichtet ist.
+        self.voice = None
         self._motion_hold_monotonic: Optional[float] = None
         self._motion_hold_notified = False
         self._motion_hold_notify_after_s = 20.0
@@ -127,7 +130,9 @@ class SafetyMonitor:
             self.last_safety_trigger = current_time
         
         self.logger.warning("🚨 SICHERHEITSSCHALTER AUSGELÖST!")
-        self.trigger_system_stop("Sicherheitsschalter ausgeloest")
+        self.trigger_system_stop(
+            "Sicherheitsschalter ausgeloest", voice_key='sicherheitsschalter'
+        )
     
     def set_emergency_stop_callback(self, callback: Callable):
         """
@@ -163,6 +168,24 @@ class SafetyMonitor:
         """Setzt den Callback fuer die Fortsetzung nach Telemetrie-Rueckkehr."""
         self.motion_resume_callback = callback
 
+    def set_voice(self, voice):
+        """Setzt den Ansager fuer die Sprachausgabe am Fahrzeug.
+
+        Getrennt vom Notifier: Wer neben dem Fahrzeug steht, soll die Ursache
+        hoeren, auch wenn gar kein Push-Ziel eingerichtet ist.
+        """
+        self.voice = voice
+
+    def _say(self, key: str, urgent: bool = False) -> None:
+        """Sagt an, ohne die Sicherheitslogik zu stoeren."""
+        voice = getattr(self, 'voice', None)
+        if not voice:
+            return
+        try:
+            voice.say(key, urgent=urgent)
+        except Exception as exc:  # noqa: BLE001 - Ansagen sind Nebensache
+            self.logger.error("Ansage fehlgeschlagen: %s", exc)
+
     def set_notifier(self, notifier):
         """Setzt den PushNotifier fuer Stoerungsmeldungen aufs Telefon."""
         self.notifier = notifier
@@ -179,7 +202,7 @@ class SafetyMonitor:
         sichtbaren Fehler - genau der Fall, den man sonst erst Stunden spaeter
         bemerkt.
         """
-        if not self.notifier:
+        if not self.notifier and not getattr(self, 'voice', None):
             return
         with self._lock:
             started = self._motion_hold_monotonic
@@ -195,6 +218,7 @@ class SafetyMonitor:
                 return
             self._motion_hold_notified = True
             reason = self.motion_hold_reason or "Telemetrie unterbrochen"
+        self._say('fahrpause')
         self._notify(
             'fault',
             'motion_hold',
@@ -248,6 +272,7 @@ class SafetyMonitor:
             system_stop_latched = self.system_stop_latched
         self.logger.info("▶️ SensorHub-Telemetrie wieder da; Fahrpause freigegeben")
         if was_notified:
+            self._say('fahrpause_beendet')
             self._notify(
                 'recovery',
                 'motion_hold',
@@ -260,8 +285,13 @@ class SafetyMonitor:
             except Exception as exc:
                 self.logger.exception("Fahrfortsetzung-Callback Fehler: %s", exc)
 
-    def trigger_system_stop(self, reason: str):
-        """Verriegelt die Bewegung und stoppt Fahrantrieb sowie Maehdeck."""
+    def trigger_system_stop(self, reason: str, voice_key: str = 'sicherheitsstopp'):
+        """Verriegelt die Bewegung und stoppt Fahrantrieb sowie Maehdeck.
+
+        ``voice_key`` waehlt die Ansage. Der Sicherheitsschalter nennt so seine
+        eigene Ursache, statt sie hinter dem allgemeinen "Sicherheitsstopp" zu
+        verstecken - wer davorsteht, weiss dann, wo er greifen muss.
+        """
         with self._lock:
             if self.system_stop_latched:
                 return
@@ -270,6 +300,8 @@ class SafetyMonitor:
             self.system_stop_time = time.time()
 
         self.logger.critical("🚨 SYSTEM-SICHERHEITSSTOPP: %s", reason)
+        # Dringend: Diese Ansage darf nicht hinter einer laufenden warten.
+        self._say(voice_key, urgent=True)
         self._notify(
             'fault', 'system_stop', 'UGV: Sicherheitsstopp', str(reason)
         )
@@ -303,6 +335,7 @@ class SafetyMonitor:
             self.system_stop_reason = None
             self.system_stop_time = None
         self.logger.info("✅ System-Sicherheitsstopp zurueckgesetzt")
+        self._say('sicherheitsstopp_frei')
         self._notify(
             'recovery',
             'system_stop',

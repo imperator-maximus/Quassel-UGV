@@ -91,6 +91,8 @@ class NetworkMonitor:
         self._thread: Optional[threading.Thread] = None
         self._switch_thread: Optional[threading.Thread] = None
         self._switching = False
+        # Sprachansagen am Fahrzeug, optional.
+        self.voice = None
         self._last_switch: Optional[Dict[str, Any]] = None
         self._reading: Dict[str, Any] = {
             'profile': None,
@@ -205,11 +207,31 @@ class NetworkMonitor:
                     reading['signal_percent'] = int(fields[2])
 
         with self._lock:
+            had_address = bool((self._reading or {}).get('ipv4'))
             self._reading = reading
             self._reading_monotonic = time.monotonic()
             self._error = None
             self._visible_ssids = visible
+        self._announce_link_change(had_address, bool(reading['ipv4']))
         return self.get_status()
+
+    def _announce_link_change(self, had_address: bool, has_address: bool):
+        """Sagt an, wenn die Verbindung kippt - und nur dann.
+
+        Geprueft wird die Adresse, nicht die reine Verbindung: mit SSID, aber
+        ohne Adresse ist die Oberflaeche nicht erreichbar. Das ist dieselbe
+        Schwelle, an der beim Start zweimal geblinkt wird.
+        """
+        if had_address == has_address or not self.voice:
+            return
+        try:
+            self.voice.say('funk_zurueck' if has_address else 'funk_verloren')
+        except Exception as exc:  # noqa: BLE001 - Ansagen sind Nebensache
+            self.logger.error('Ansage zum Netzstatus fehlgeschlagen: %s', exc)
+
+    def set_voice(self, voice):
+        """Setzt den Ansager fuer die Sprachausgabe am Fahrzeug."""
+        self.voice = voice
 
     def get_status(self) -> Dict[str, Any]:
         with self._lock:

@@ -31,6 +31,9 @@ class GPSNTRIPBridge:
         self.running = False
         self.monitor_thread: Optional[threading.Thread] = None
 
+        # Sprachansagen am Fahrzeug, optional.
+        self.voice = None
+
         self.rtk_fix_count = 0
         self.rtk_float_count = 0
         self.gps_fix_count = 0
@@ -101,7 +104,10 @@ class GPSNTRIPBridge:
             try:
                 # Reihenfolge zaehlt: erst den stehenden Strom erkennen, dann
                 # neu verbinden. So erledigt derselbe Durchlauf beides.
-                self.ntrip.check_stalled_stream()
+                if self.ntrip.check_stalled_stream():
+                    # Der stille Socket ist der heimtueckische Fall: der Fix
+                    # zerfaellt erst Minuten spaeter und ohne sichtbaren Grund.
+                    self._say('ntrip_stillstand')
                 self.ntrip.reconnect_if_needed()
 
                 status = self.gps.get_status()
@@ -148,12 +154,34 @@ class GPSNTRIPBridge:
                 self._gga_due = False
                 self._gga_sent += 1
 
+    def set_voice(self, voice):
+        """Setzt den Ansager fuer die Sprachausgabe am Fahrzeug."""
+        self.voice = voice
+
+    def _say(self, key: str):
+        """Sagt an, ohne die Ueberwachung zu stoeren."""
+        if not self.voice:
+            return
+        try:
+            self.voice.say(key)
+        except Exception as exc:  # noqa: BLE001 - Ansagen sind Nebensache
+            logger.error("Ansage fehlgeschlagen: %s", exc)
+
     def _on_rtk_status_changed(self, old_status: str, new_status: str):
         logger.info("RTK-Status: %s -> %s", old_status, new_status)
         if new_status == 'RTK FIXED':
             self.rtk_fix_count += 1
         elif new_status == 'RTK FLOAT':
             self.rtk_float_count += 1
+
+        # Angesagt wird nur der grobe Uebergang. FLOAT ist ein Zwischenschritt
+        # auf dem Weg in beide Richtungen - wer den mitspricht, redet dauernd.
+        if new_status == 'NO GPS':
+            self._say('gps_verloren')
+        elif old_status == 'RTK FIXED' and new_status != 'RTK FIXED':
+            self._say('rtk_verloren')
+        elif old_status != 'RTK FIXED' and new_status == 'RTK FIXED':
+            self._say('rtk_zurueck')
         elif new_status == 'GPS FIX':
             self.gps_fix_count += 1
 

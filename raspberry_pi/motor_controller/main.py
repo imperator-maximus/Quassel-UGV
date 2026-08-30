@@ -20,6 +20,7 @@ from .hardware.pwm_controller import PWMController
 from .hardware.odrive_usb_mower import ODriveUSBMowerController
 from .hardware.safety_monitor import SafetyMonitor
 from .hardware.status_lamp import StatusLamp
+from .hardware.voice_announcer import VoiceAnnouncer
 from .hardware.battery_monitor import BatteryMonitor
 from .communication.network_monitor import NetworkMonitor
 from .communication.push_notifier import PushNotifier
@@ -57,6 +58,7 @@ class MotorControllerApp:
         self.pwm: PWMController = None
         self.safety: SafetyMonitor = None
         self.lamp: StatusLamp = None
+        self.voice: VoiceAnnouncer = None
         self.pose_cache: PoseCache = None
         self.local_pose: LocalPoseSource = None
         self.odrive_mower: ODriveMowerController = None
@@ -137,6 +139,12 @@ class MotorControllerApp:
             # gegenseitig ueberschreiben.
             self.lamp = StatusLamp(self.config.light, self.gpio, self.logger)
             self.lamp.initialize()
+
+            # Sprachansagen. Sagen dasselbe wie das Licht, nur in Worten -
+            # wer davorsteht, muss dafuer nicht hinsehen.
+            self.voice = VoiceAnnouncer(self.config.voice, self.logger)
+            if self.voice.initialize():
+                self.voice.start()
 
             # PWM-Controller
             self.logger.info("Initialisiere PWM-Controller...")
@@ -234,6 +242,7 @@ class MotorControllerApp:
                     self.mapping,
                     self.safety,
                     notifier=self.notifier,
+                    voice=self.voice,
                     battery=self.battery,
                     network=self.network,
                 )
@@ -273,6 +282,21 @@ class MotorControllerApp:
         self.safety.set_motion_hold_check(self._sensor_motion_health_check)
         self.safety.set_motion_hold_callback(self._sensor_motion_pause)
         self.safety.set_motion_resume_callback(self._sensor_motion_resume)
+        # Der Sicherheitsstopp sagt seine Ursache auch dem, der danebensteht.
+        self.safety.set_voice(self.voice)
+        # Dasselbe fuer die Quellen, die ihre Flanken selbst erkennen: die
+        # NTRIP-Bruecke sieht den RTK-Wechsel, der Netzwaechter die Adresse.
+        if self.local_pose:
+            self.local_pose.set_voice(self.voice)
+        if self.network:
+            self.network.set_voice(self.voice)
+
+        # Die Ladeschwellen liefen bisher ins Leere: den Callback hat niemand
+        # gesetzt, also blieb der Schwellenvergleich im Batteriemonitor ohne
+        # Wirkung. Jetzt sagt er den Ladezustand an.
+        if self.battery:
+            self.battery.set_low_battery_callback(self._announce_battery_level)
+            self.battery.set_voice(self.voice)
 
         # Pose -> Logging + Navigation
         self.pose_cache.set_pose_callback(self._on_sensor_data)
@@ -281,6 +305,24 @@ class MotorControllerApp:
         # Messer - sonst faehrt der Plan mit stehendem Deck weiter.
         if self.odrive_mower:
             self.odrive_mower.set_system_stop_callback(self.safety.trigger_system_stop)
+
+    # Welche Ladeschwelle was sagt. Gestaffelt wie die Schwellen selbst:
+    # erst warnen, dann das Maehdeck als groessten Verbraucher abschalten,
+    # zuletzt die Fahrt beenden.
+    BATTERY_VOICE_LEVELS = {
+        'warn': ('batterie_schwach', False),
+        'low': ('batterie_maehstopp', False),
+        'critical': ('batterie_kritisch', True),
+    }
+
+    def _announce_battery_level(self, level: str, soc: float):
+        """Sagt eine erreichte Ladeschwelle an. Darf nie hochschlagen."""
+        entry = self.BATTERY_VOICE_LEVELS.get(str(level))
+        if not entry or not self.voice:
+            return
+        key, urgent = entry
+        self.logger.warning('Batterie %s bei %.0f%%', level, soc)
+        self.voice.say(key, urgent=urgent)
 
     def _on_sensor_data(self, data: dict):
         """Verteilt eingehende Pose auf Logging und Navigation."""
@@ -512,15 +554,15 @@ class MotorControllerApp:
         vorher nicht weiss, ob ueberhaupt etwas laeuft.
         """
         light = self.config.light
-        if not self.lamp or not self.lamp.enabled:
-            return
 
         if getattr(light, 'boot_signal_enabled', True):
-            self.lamp.signal(
-                blinks=1,
-                on_s=float(getattr(light, 'boot_on_s', 1.0)),
-                reason='Dienst gestartet',
-            )
+            if self.lamp and self.lamp.enabled:
+                self.lamp.signal(
+                    blinks=1,
+                    on_s=float(getattr(light, 'boot_on_s', 1.0)),
+                    reason='Dienst gestartet',
+                )
+            self._announce_boot('system_gestartet')
 
         if not getattr(light, 'network_signal_enabled', True) or not self.network:
             return
@@ -529,6 +571,18 @@ class MotorControllerApp:
             name='lamp-network-wait',
             daemon=True,
         ).start()
+
+    def _announce_boot(self, key: str) -> None:
+        """Sagt ein Startsignal an, wenn Ansagen dafuer eingeschaltet sind.
+
+        Getrennt vom Licht schaltbar: Wer nachts im Hof startet, will
+        womoeglich das Blinken, aber nicht die Stimme.
+        """
+        if not self.voice:
+            return
+        if not getattr(self.config.voice, 'boot_announcements', True):
+            return
+        self.voice.say(key)
 
     def _await_network_signal(self):
         """Wartet auf eine Netzverbindung mit Adresse und blinkt dann einmalig.
@@ -554,12 +608,14 @@ class MotorControllerApp:
                 self.logger.debug("Netzstatus fuer das Lichtsignal nicht lesbar: %s", exc)
                 status = {}
             if status.get('ipv4'):
-                self.lamp.signal(
-                    blinks=int(getattr(light, 'network_blinks', 2)),
-                    on_s=float(getattr(light, 'network_on_s', 0.25)),
-                    off_s=float(getattr(light, 'network_off_s', 0.25)),
-                    reason=f"Netz steht ({status.get('ssid') or 'unbekannt'})",
-                )
+                if self.lamp and self.lamp.enabled:
+                    self.lamp.signal(
+                        blinks=int(getattr(light, 'network_blinks', 2)),
+                        on_s=float(getattr(light, 'network_on_s', 0.25)),
+                        off_s=float(getattr(light, 'network_off_s', 0.25)),
+                        reason=f"Netz steht ({status.get('ssid') or 'unbekannt'})",
+                    )
+                self._announce_boot('system_bereit')
                 return
             time.sleep(interval_s)
 
@@ -567,6 +623,11 @@ class MotorControllerApp:
             self.logger.info(
                 "Kein Netz innerhalb von %.0fs - kein Lichtsignal", timeout_s
             )
+            # Das Licht schweigt hier, und genau das ist die Lage, in der man
+            # ratlos davorsteht: Der Dienst laeuft, die Oberflaeche ist nicht
+            # erreichbar, und ob noch etwas kommt, sagt niemand. Die Ansage
+            # sagt es.
+            self._announce_boot('system_kein_netz')
 
     def run(self):
         """Haupt-Loop"""
@@ -581,6 +642,7 @@ class MotorControllerApp:
                     # independent ODrive watchdog has already disarmed any
                     # blade whose command stream stopped.
                     self.logger.critical("ODrive USB haengt: %s", hang_reason)
+                    self._say_before_exit('odrive_usb')
                     self._halt_for_transport_hang(hang_reason)
                     os._exit(70)
                 time.sleep(0.1)
@@ -590,6 +652,21 @@ class MotorControllerApp:
         
         finally:
             self.shutdown()
+
+    def _say_before_exit(self, key: str) -> None:
+        """Sagt an und wartet kurz, bevor der Prozess hart endet.
+
+        ``os._exit`` schneidet die Ansage sonst mitten im Wort ab - und das
+        waere genau die Ansage, die den Neustart erklaert. Die Wartezeit ist
+        gedeckelt: Anhalten geht vor Ausreden.
+        """
+        if not self.voice:
+            return
+        try:
+            self.voice.say(key, urgent=True)
+            self.voice.flush(timeout_s=6.0)
+        except Exception as exc:  # noqa: BLE001 - Ansagen sind Nebensache
+            self.logger.error("Ansage vor dem Neustart fehlgeschlagen: %s", exc)
 
     def _halt_for_transport_hang(self, reason: str):
         """Bringt Fahrzeug und Plan zum Stehen, bevor der Prozess endet.
@@ -669,7 +746,11 @@ class MotorControllerApp:
         self.logger.info("=" * 60)
         self.logger.info("Shutdown wird durchgeführt...")
         self.logger.info("=" * 60)
-        
+
+        # Vor dem Aufraeumen: wer danebensteht, soll wissen, dass das
+        # Fahrzeug absichtlich verstummt und nicht abgestuerzt ist.
+        self._say_before_exit('system_herunterfahren')
+
         try:
             # Web-Server stoppen
             if self.web:
@@ -716,6 +797,9 @@ class MotorControllerApp:
             # schaltet der Signalthread auf einen bereits aufgeraeumten Pin.
             if self.lamp:
                 self.lamp.stop()
+
+            if self.voice:
+                self.voice.stop()
 
             # GPIO-Controller cleanup
             if self.gpio:

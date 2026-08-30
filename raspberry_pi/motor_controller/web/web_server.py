@@ -76,7 +76,40 @@ class WebServer:
         'watchdog': 'Navigations-Watchdog',
     }
 
-    def __init__(self, config, motor_control, joystick_handler, pose_cache, gpio_controller, navigation_controller=None, mapping_recorder=None, safety_monitor=None, notifier=None, battery=None, network=None):
+    # Welcher Planzustand welche Ansage ausloest. Was hier fehlt, faellt in
+    # ``PLAN_VOICE_DEFAULT`` - lieber allgemein als stumm. Ausgenommen sind die
+    # leisen Zustaende: 'stopped' und 'idle' hat der Benutzer selbst ausgeloest
+    # und steht ohnehin am Knopf, 'rtk_wait' loest sich meist in Sekunden.
+    PLAN_VOICE_STATES = {
+        'completed': 'plan_fertig',
+        'running': 'plan_fortgesetzt',
+        'paused': 'plan_pausiert',
+        'repositioning': 'rangiert',
+        'error': 'plan_fehler',
+        'mower_fault': 'maehdeck_fehler',
+        'nogo_stop': 'nogo_erreicht',
+        'rtk_lost': 'rtk_verloren',
+        'geofence': 'rand_erreicht',
+        'service_restart': 'system_neustart',
+    }
+    PLAN_VOICE_DEFAULT = 'plan_fehler'
+
+    # Kein Anlass fuer eine Ansage: 'stopped' und 'idle' hat der Benutzer
+    # selbst ausgeloest und steht am Knopf, 'rtk_wait' loest sich meist in
+    # Sekunden, und beim Herunterfahren spricht die Abschaltansage.
+    PLAN_VOICE_SILENT = frozenset({
+        'idle', 'rtk_wait', 'stopped', 'stopping', 'shutdown', 'cleared',
+    })
+
+    # Diese Zustaende halten das Fahrzeug an: die Ansage darf nicht hinter
+    # einer laufenden warten.
+    PLAN_VOICE_URGENT = frozenset({
+        'error', 'mower_fault', 'nogo_stop', 'rtk_lost', 'geofence',
+        'divergence_stop', 'cross_track_stop', 'heading_block',
+        'align_stall', 'track_stall', 'watchdog',
+    })
+
+    def __init__(self, config, motor_control, joystick_handler, pose_cache, gpio_controller, navigation_controller=None, mapping_recorder=None, safety_monitor=None, notifier=None, battery=None, network=None, voice=None):
         """
         Initialisiert Web-Server
 
@@ -87,6 +120,7 @@ class WebServer:
             pose_cache: PoseCache-Instanz
             gpio_controller: GPIOController-Instanz
             notifier: optionaler PushNotifier fuer Stoerungsmeldungen
+            voice: optionaler VoiceAnnouncer fuer Ansagen am Fahrzeug
             battery: optionaler BatteryMonitor fuer den Ladezustand
             network: optionaler NetworkMonitor fuer das aktive WLAN
         """
@@ -100,6 +134,7 @@ class WebServer:
         self.mapping = mapping_recorder
         self.safety = safety_monitor
         self.notifier = notifier
+        self.voice = voice
         self.battery = battery
         self.network = network
 
@@ -497,6 +532,11 @@ class WebServer:
                     }), 409
                 time.sleep(0.25)
             success, error = self.safety.reset_system_stop()
+            if not success:
+                # Der Entriegeln-Knopf sitzt in der Oberflaeche, gedrueckt wird
+                # er aber meist neben dem Fahrzeug. Ohne Ansage sieht man dort
+                # nur, dass nichts passiert.
+                self._say('nicht_betriebsbereit')
             payload = {
                 'success': success,
                 'error': error,
@@ -615,7 +655,17 @@ class WebServer:
                     status = self.odrive_mower.start(rpm) if rpm is not None else self.odrive_mower.start()
                 else:
                     status = self.odrive_mower.stop()
+                was_running = bool(self.mower_state)
                 self.mower_state = status['running']
+                # Die Messer laufen an, waehrend jemand danebensteht: das
+                # gehoert angesagt. Nur bei echtem Wechsel und nur, wenn das
+                # Schalten auch geklappt hat.
+                if status.get('success', True) and bool(self.mower_state) != was_running:
+                    self._say(
+                        'maehdeck_an' if self.mower_state else 'maehdeck_aus',
+                        urgent=bool(self.mower_state),
+                        force=True,
+                    )
                 return jsonify(self._mower_api_status(success=status.get('success', True), error=status.get('error')))
 
             return jsonify(self._mower_api_status(
@@ -1933,11 +1983,14 @@ class WebServer:
         Flanke, nicht der Dauerzustand - ``_set_plan_status`` laeuft im
         Sekundentakt (RTK-Countdown) und wuerde sonst dauernd dasselbe melden.
         """
-        if not self.notifier or current_state == previous_state:
+        if current_state == previous_state:
             return
         if current_state in self.SAFETY_REPORTED_STATES:
-            # Der Safety-Monitor meldet denselben Vorgang bereits, und zwar mit
-            # der tatsaechlichen Ursache statt nur "Plan gestoppt".
+            # Der Safety-Monitor meldet und sagt denselben Vorgang bereits an,
+            # und zwar mit der tatsaechlichen Ursache statt nur "Plan gestoppt".
+            return
+        self._announce_plan_state(previous_state, current_state)
+        if not self.notifier:
             return
         try:
             if current_state not in self.QUIET_PLAN_STATES:
@@ -1959,6 +2012,42 @@ class WebServer:
                 )
         except Exception as exc:  # noqa: BLE001 - Melden ist Nebensache
             self.logger.error('Push-Meldung zum Planstatus fehlgeschlagen: %s', exc)
+
+    def _say(self, key, urgent=False, force=False):
+        """Sagt an, ohne den Aufrufer zu stoeren. Darf nie hochschlagen."""
+        voice = getattr(self, 'voice', None)
+        if not voice:
+            return
+        try:
+            voice.say(key, urgent=urgent, force=force)
+        except Exception as exc:  # noqa: BLE001 - Ansagen sind Nebensache
+            self.logger.error('Ansage "%s" fehlgeschlagen: %s', key, exc)
+
+    def _announce_plan_state(self, previous_state, current_state):
+        """Sagt den neuen Planzustand an, wenn er eine Ansage hat.
+
+        Laeuft vor der Push-Meldung und unabhaengig von ihr: die Ansage gilt
+        dem, der neben dem Fahrzeug steht, die Meldung dem, der es nicht tut.
+        """
+        if not current_state or current_state == previous_state:
+            return
+        if current_state in self.PLAN_VOICE_SILENT:
+            return
+        if current_state in self.SAFETY_REPORTED_STATES:
+            # Den sagt der Safety-Monitor an, mit der tatsaechlichen Ursache.
+            return
+        if current_state == 'running':
+            # Beides endet auf 'running'. Aus dem Ruhezustand heraus faengt
+            # der Plan an, aus einer Stoerung heraus geht er weiter - und wer
+            # danebensteht, will genau diesen Unterschied hoeren.
+            key = ('plan_gestartet'
+                   if previous_state in (None, 'idle', 'cleared', 'stopped')
+                   else 'plan_fortgesetzt')
+        else:
+            key = self.PLAN_VOICE_STATES.get(
+                current_state, self.PLAN_VOICE_DEFAULT
+            )
+        self._say(key, urgent=current_state in self.PLAN_VOICE_URGENT)
 
     def _rtk_available(self):
         if not self.mapping:

@@ -258,6 +258,16 @@ class LocalPoseSource:
     # ------------------------------------------------------------------
     # Status
     # ------------------------------------------------------------------
+    def set_voice(self, voice):
+        """Reicht den Ansager an die NTRIP-Bruecke durch.
+
+        Die Bruecke sieht den RTK-Statuswechsel als Erste; sie steckt aber
+        zwei Ebenen tief und wird nicht von aussen gebaut.
+        """
+        bridge = getattr(self, 'bridge', None)
+        if bridge is not None:
+            bridge.set_voice(voice)
+
     def get_status(self) -> Dict[str, Any]:
         """Detailstatus fuer Oberflaeche und Diagnose.
 

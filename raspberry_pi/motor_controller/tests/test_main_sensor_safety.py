@@ -229,9 +229,16 @@ class SystemStopWiringTests(unittest.TestCase):
             set_motion_hold_check=lambda cb: None,
             set_motion_hold_callback=lambda cb: None,
             set_motion_resume_callback=lambda cb: None,
+            set_voice=lambda voice: None,
             trigger_system_stop=lambda reason: None,
         )
         app.pose_cache = SimpleNamespace(set_pose_callback=lambda cb: None)
+        # Die Verdrahtung reicht den Ansager an alle Quellen durch, die ihre
+        # Flanken selbst erkennen. Hier steht keine davon zur Verfuegung.
+        app.voice = None
+        app.local_pose = None
+        app.network = None
+        app.battery = None
         return app
 
     def test_usb_mower_reaches_the_central_system_stop(self):

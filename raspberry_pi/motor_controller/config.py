@@ -149,6 +149,34 @@ class LightConfig:
 
 
 @dataclass
+class VoiceConfig:
+    """Sprachansagen ueber den USB-Audiostick.
+
+    Dieselbe Lage wie beim Licht, nur deutlicher: Das Blinken sagt, *dass*
+    etwas ist, die Ansage sagt, *was*. Die Dateien liegen fertig im Paket
+    (``audio/``) und werden mit ``tools/voice/generate_voice.py`` erzeugt.
+    """
+    enabled: bool = False
+    # plughw statt hw: Der Stick nimmt nur Stereo an, und die Kartennummer
+    # wandert beim Umstecken - der Name bleibt.
+    device: str = 'plughw:CARD=Device,DEV=0'
+    player: str = 'aplay'
+    # Leer heisst: das Verzeichnis ``audio`` neben dem Paket.
+    audio_dir: str = ''
+    # Kurz halten. Eine Ansage, die erst in einer halben Minute an der Reihe
+    # waere, beschreibt einen Zustand, den es dann womoeglich nicht mehr gibt.
+    queue_size: int = 8
+    # Dieselbe Ansage nicht im Sekundentakt - ein Anlass kann dauerhaft
+    # anliegen, etwa eine schwache Batterie.
+    min_interval_s: float = 30.0
+    # Ein haengendes aplay blockiert sonst jede weitere Ansage.
+    timeout_s: float = 15.0
+    # Die beiden Startsignale des Lichts als Ansage. Sie haengen an denselben
+    # Stellen und sagen zusaetzlich, was das Blinken bedeutet.
+    boot_announcements: bool = True
+
+
+@dataclass
 class BatteryConfig:
     """Junctek KG110F Coulomb-Zähler über BLE.
 
@@ -573,6 +601,7 @@ class Config:
     ramping: RampingConfig = field(default_factory=RampingConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     light: LightConfig = field(default_factory=LightConfig)
+    voice: VoiceConfig = field(default_factory=VoiceConfig)
     odrive_mower: ODriveMowerConfig = field(default_factory=ODriveMowerConfig)
     battery: BatteryConfig = field(default_factory=BatteryConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
@@ -610,6 +639,8 @@ class Config:
             config.safety = SafetyConfig(**_migrate_safety_section(data['safety']))
         if 'light' in data:
             config.light = LightConfig(**data['light'])
+        if 'voice' in data:
+            config.voice = VoiceConfig(**data['voice'])
         if 'odrive_mower' in data:
             odrive_data = _drop_obsolete(
                 'odrive_mower', data['odrive_mower'], ('transport',)
@@ -731,6 +762,12 @@ class Config:
             'light': {
                 'enabled': self.light.enabled,
                 'pin': self.light.pin
+            },
+            'voice': {
+                'enabled': self.voice.enabled,
+                'device': self.voice.device,
+                'min_interval_s': self.voice.min_interval_s,
+                'boot_announcements': self.voice.boot_announcements
             },
             'odrive_mower': {
                 'enabled': self.odrive_mower.enabled,
