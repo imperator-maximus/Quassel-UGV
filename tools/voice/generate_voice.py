@@ -24,10 +24,12 @@ HERE = pathlib.Path(__file__).resolve().parent
 CATALOG = HERE / 'announcements.json'
 OUT_DIR = HERE.parents[1] / 'raspberry_pi' / 'motor_controller' / 'audio'
 
-# Der USB-Stick am Fahrzeug nimmt nur Stereo an; Mono scheitert an
-# "Channels count non available", sobald jemand hw: statt plughw: benutzt.
-SAMPLE_RATE = 48000
-CHANNELS = 2
+# Sprache aus einem kleinen Lautsprecher braucht keine 48 kHz Stereo: das
+# vervierfacht nur die Datenmenge, die einmal ueber die SIM-Karte aufs
+# Fahrzeug muss. Der Stick selbst nimmt weder Mono noch 22 kHz an - deshalb
+# laeuft die Wiedergabe zwingend ueber plughw, das beides umrechnet.
+SAMPLE_RATE = 22050
+CHANNELS = 1
 
 
 def synthesize(text: str, cfg: dict, key: str) -> bytes:
