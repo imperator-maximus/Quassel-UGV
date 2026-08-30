@@ -5,6 +5,12 @@
 #   Board 140.5 x 50.0 x 1.7 mm
 #   4 mittlere M3-Montageloecher (O3.4) bei x=55/93.5, y=5.5/29.1 (Board-Koord.)
 #   Bauteile: 10.5 mm auf der dicken Seite (Elkos/Klemmen), 4.2 mm andere Seite
+#   USB (J1, Amphenol 10103594-0001LF, Micro-B Buchse gewinkelt) sitzt auf der
+#   dicken Seite - also im Gehaeuse unten - an der Stirnseite x=0, Mitte
+#   y=37.5 mm. Quelle: v3.5docs/mech_dimensions.PNG (Schirmpads y=34.7/40.3,
+#   Signalpads y=36.0..39.0, Steckgesicht buendig mit der Platinenkante) und
+#   v3.4docs/BOM (J1). Der Steckerkoerper steckt also bei Boardkante x=0,
+#   d.h. an der -X-Stirnwand der Wanne.
 #
 # Design:
 #  - Wanne: Bodenplatte 3 mm, Waende 3 mm, innen 10 mm Luft um die Platine
@@ -12,6 +18,7 @@
 #    (12 mm statt "ca. 1 cm", weil die Unterseiten-Bauteile 10.5 mm hoch sind)
 #  - 4 Ecksaeulen O10 mit Loechern O5.6 x 9 fuer M4-Einschmelzgewinde
 #  - Je Stirnseite 2 Loecher O16.5 (M16-Kabelverschraubung, innen verschraubt)
+#  - Durchbruch fuer den USB-Stecker in der -X-Stirnwand (siehe unten)
 #  - Deckel: Platte 3 mm mit 17 Lueftungsschlitzen, darueber 45-Grad-Lamellen
 #    (gleiche Bauart wie die Outrunner-Haube, vertikal blickdicht,
 #    Tropfkante landet auf massivem Steg) - kopfueber ohne Stuetzen druckbar
@@ -56,6 +63,17 @@ POST_OFF_Y = OUTER_W / 2 - WALL - POST_D / 2   # 30.0
 GLAND_D = 16.5          # M16-Kabelverschraubung
 GLAND_Y = 19.0          # Lochmitten +/-19 von der Mitte
 GLAND_Z = 36.5          # Lochmitte: Oberkante Loch ~5 mm unter dem Wannenrand
+
+# --- USB-Durchbruch (-X-Stirnwand) ---
+# Board-Koordinaten -> Gehaeuse: box_y = board_y - BOARD_W/2 = 37.5 - 25
+USB_Y = 12.5            # Mitte der Buchse in Gehaeuse-Y
+# Platinenunterseite liegt auf den Standoffs (z = BASE_T + STANDOFF_H = 15),
+# die gewinkelte Buchse haengt darunter, Steckachse ~1.5 mm unter der Platine.
+USB_Z = 13.5            # Mitte des Steckgesichts ueber dem Wannenboden
+# Nicht die Buchse, sondern die Kabeltuelle muss durch: grosszuegig gewaehlt.
+USB_W = 16.0            # Breite (Y)
+USB_H = 12.0            # Hoehe (Z)
+USB_CHAMFER = 3.5       # 45-Grad-Dachschraege oben, damit stuetzenfrei
 
 # --- Deckel ---
 LID_T = 3.0
@@ -214,6 +232,28 @@ def run(_context):
         ext = extrudes.createInput(all_profiles(sk), CUT)
         ext.setSymmetricExtent(adsk.core.ValueInput.createByReal(mm(14.0)), True)
         extrudes.add(ext)
+
+    # USB-Durchbruch in der -X-Stirnwand (Steckachse laeuft in -X)
+    usb_x = -(OUTER_L / 2 - 4.0)
+    pl = offset_plane(x=usb_x)
+    sk = sketches.add(pl)
+    sk.name = "usb_cutout"
+    z0, z1 = USB_Z - USB_H / 2, USB_Z + USB_H / 2
+    y0, y1 = USB_Y - USB_W / 2, USB_Y + USB_W / 2
+    pts = [(y0, z0), (y1, z0), (y1, z1 - USB_CHAMFER),
+           (y1 - USB_CHAMFER, z1), (y0 + USB_CHAMFER, z1), (y0, z1 - USB_CHAMFER)]
+    lines = sk.sketchCurves.sketchLines
+    for i in range(len(pts)):
+        ay, az = pts[i]
+        by, bz = pts[(i + 1) % len(pts)]
+        lines.addByTwoPoints(
+            sk.modelToSketchSpace(
+                adsk.core.Point3D.create(mm(usb_x), mm(ay), mm(az))),
+            sk.modelToSketchSpace(
+                adsk.core.Point3D.create(mm(usb_x), mm(by), mm(bz))))
+    ext = extrudes.createInput(all_profiles(sk), CUT)
+    ext.setSymmetricExtent(adsk.core.ValueInput.createByReal(mm(14.0)), True)
+    extrudes.add(ext)
 
     # Montageflansche: Bodenplatte an den Stirnseiten verlaengert
     # (beginnt 6 mm innerhalb der Wand, damit an den gerundeten Ecken
