@@ -83,7 +83,12 @@ Invoke-Step "Prepare remote staging directory" {
 # Viertelstunde: Das Paket wiegt roh 6,1 MB, wovon 3 MB kompilierter
 # Bytecode sind, den der Pi ohnehin neu erzeugt, und rund 1 MB eine
 # eingefrorene Planaufzeichnung fuer die Tests. Gepackt und ohne
-# __pycache__ bleiben davon knapp 500 KB.
+# __pycache__ bleiben davon gut 3,4 MB.
+#
+# Den Loewenanteil daran tragen die Sprachansagen in audio/: WAV laesst sich
+# kaum packen, ohne sie waeren es 500 KB. Sie aendern sich fast nie, ein
+# Ausrollvorgang schiebt sie aber jedes Mal mit - wenn das ueber Mobilfunk
+# einmal stoert, ist ihr Ausschluss der erste Griff.
 #
 # Die Tests bleiben bewusst drin - sonst laeuft `-RemoteTests` ins Leere,
 # wenn es doch einmal gebraucht wird.
