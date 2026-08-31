@@ -193,6 +193,12 @@ class BatteryConfig:
     # wurden - beschreiben lässt er sich von hier aus nicht. Deshalb wird der
     # Stand, der "voll" bedeutet, auf dieser Seite festgehalten. Die Datei
     # überlebt den Neustart, den ein Batteriewechsel ohnehin auslöst.
+    #
+    # Der Pfad gehört *neben* das Anwendungsverzeichnis, nicht hinein: Das
+    # Deploy-Skript löscht dort alles außer config.yaml und audio/. Am
+    # 31.08.2026 lag der Nullpunkt drin und war nach dem nächsten Ausrollen
+    # weg - die Anzeige stand danach wieder auf dem alten Zählerstand, ohne
+    # dass irgendwo ein Fehler aufgetaucht wäre.
     zero_point_path: str = ''
     warn_percent: float = 30.0
     mow_stop_percent: float = 25.0

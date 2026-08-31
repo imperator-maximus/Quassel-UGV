@@ -121,6 +121,12 @@ battery:
   # getauschten oder geladenen Akkus nichts - er zaehlt vom alten Stand weiter.
   # Beschreiben laesst er sich nicht, deshalb liegt der Stand, der "voll"
   # bedeutet, in dieser Datei. Ohne Pfad bleibt der Knopf im Web-UI wirkungslos.
+  #
+  # WICHTIG: nicht in das Verzeichnis der Anwendung legen. Das Deploy-Skript
+  # raeumt dort alles ausser config.yaml und audio/ weg (siehe
+  # tools/deploy_motor_controller.ps1) - der Nullpunkt waere nach dem naechsten
+  # Ausrollen still verschwunden und die Anzeige wieder auf dem alten Stand.
+  # Daneben, wo auch maps/ und plans/ liegen, ueberlebt er.
   zero_point_path: /home/imperator/ugvtestpi/battery_zero_point.json
   warn_percent: 30.0         # Nur Warnung im Web-UI
   mow_stop_percent: 25.0     # Maehdeck aus - der groesste Verbraucher zuerst
