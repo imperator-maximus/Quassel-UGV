@@ -91,8 +91,12 @@ class NetworkMonitor:
         self._thread: Optional[threading.Thread] = None
         self._switch_thread: Optional[threading.Thread] = None
         self._switching = False
-        # Sprachansagen am Fahrzeug, optional.
+        # Sprachansagen am Fahrzeug, optional. Der erste Befund nach dem
+        # Start ist kein Wechsel: ohne gelesene Adresse steht hier None, und
+        # die erste Messung meldete sonst jedes Mal eine Rueckkehr - direkt
+        # neben der Startansage, die dasselbe schon gesagt hat.
         self.voice = None
+        self._link_state_seen = False
         self._last_switch: Optional[Dict[str, Any]] = None
         self._reading: Dict[str, Any] = {
             'profile': None,
@@ -222,6 +226,9 @@ class NetworkMonitor:
         ohne Adresse ist die Oberflaeche nicht erreichbar. Das ist dieselbe
         Schwelle, an der beim Start zweimal geblinkt wird.
         """
+        if not self._link_state_seen:
+            self._link_state_seen = True
+            return
         if had_address == has_address or not self.voice:
             return
         try:

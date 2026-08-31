@@ -31,8 +31,11 @@ class GPSNTRIPBridge:
         self.running = False
         self.monitor_thread: Optional[threading.Thread] = None
 
-        # Sprachansagen am Fahrzeug, optional.
+        # Sprachansagen am Fahrzeug, optional. Der erste Statuswechsel nach
+        # dem Start ist keiner: 'NO GPS' ist der Anfangswert, nicht ein
+        # verlorener Fix. Sonst meldete jeder Neustart eine Rueckkehr.
         self.voice = None
+        self._rtk_status_seen = False
 
         self.rtk_fix_count = 0
         self.rtk_float_count = 0
@@ -174,8 +177,12 @@ class GPSNTRIPBridge:
         elif new_status == 'RTK FLOAT':
             self.rtk_float_count += 1
 
-        # Angesagt wird nur der grobe Uebergang. FLOAT ist ein Zwischenschritt
-        # auf dem Weg in beide Richtungen - wer den mitspricht, redet dauernd.
+        # Der erste Befund nach dem Start wird nur gemerkt. Angesagt wird
+        # danach nur der grobe Uebergang: FLOAT ist ein Zwischenschritt auf dem
+        # Weg in beide Richtungen - wer den mitspricht, redet dauernd.
+        if not self._rtk_status_seen:
+            self._rtk_status_seen = True
+            return
         if new_status == 'NO GPS':
             self._say('gps_verloren')
         elif old_status == 'RTK FIXED' and new_status != 'RTK FIXED':

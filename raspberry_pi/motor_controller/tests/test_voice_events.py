@@ -7,11 +7,19 @@ entweder bleibt es still, oder es redet im Sekundentakt.
 
 import json
 import sys
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+# pyserial gibt es nur auf dem Fahrzeug. Fuer den Import der NTRIP-Bruecke
+# reicht der Platzhalter; angefasst wird die Schnittstelle hier nicht.
+if 'serial' not in sys.modules:
+    serial_stub = types.ModuleType('serial')
+    serial_stub.Serial = object
+    sys.modules['serial'] = serial_stub
 
 from motor_controller.hardware.safety_monitor import SafetyMonitor
 from motor_controller.web.web_server import WebServer
@@ -175,6 +183,63 @@ class KatalogTest(unittest.TestCase):
         vorhanden = {p.stem for p in audio.glob('*.wav')}
         self.assertEqual(set(), set(katalog) - vorhanden)
 
+
+class StartgeplapperTest(unittest.TestCase):
+    """Der erste Befund nach dem Start ist kein Zustandswechsel.
+
+    Ohne diese Unterscheidung meldet jeder Neustart eine Rueckkehr, die es nie
+    gab: 'NO GPS' ist der Anfangswert der Bruecke, und der Netzwaechter kennt
+    vor seiner ersten Messung ueberhaupt keine Adresse. Beides fiele in
+    dieselben Sekunden wie die Startansage, die dasselbe schon sagt.
+    """
+
+    def _bridge(self):
+        from motor_controller.sensors.gps_ntrip_bridge import GPSNTRIPBridge
+        bridge = GPSNTRIPBridge.__new__(GPSNTRIPBridge)
+        bridge.voice = FakeVoice()
+        bridge._rtk_status_seen = False
+        bridge.rtk_fix_count = 0
+        bridge.rtk_float_count = 0
+        return bridge
+
+    def test_erster_fix_nach_dem_start_schweigt(self):
+        bridge = self._bridge()
+        bridge._on_rtk_status_changed('NO GPS', 'RTK FIXED')
+        self.assertEqual([], bridge.voice.keys)
+
+    def test_danach_wird_jeder_verlust_gemeldet(self):
+        bridge = self._bridge()
+        bridge._on_rtk_status_changed('NO GPS', 'RTK FIXED')
+        bridge._on_rtk_status_changed('RTK FIXED', 'RTK FLOAT')
+        bridge._on_rtk_status_changed('RTK FLOAT', 'RTK FIXED')
+        self.assertEqual(['rtk_verloren', 'rtk_zurueck'], bridge.voice.keys)
+
+    def _watcher(self):
+        from motor_controller.communication.network_monitor import NetworkMonitor
+        watcher = NetworkMonitor.__new__(NetworkMonitor)
+        watcher.logger = __import__('logging').getLogger('test-voice-net')
+        watcher.voice = FakeVoice()
+        watcher._link_state_seen = False
+        return watcher
+
+    def test_erste_adresse_nach_dem_start_schweigt(self):
+        watcher = self._watcher()
+        watcher._announce_link_change(False, True)
+        self.assertEqual([], watcher.voice.keys)
+
+    def test_danach_wird_der_abriss_gemeldet(self):
+        watcher = self._watcher()
+        watcher._announce_link_change(False, True)
+        watcher._announce_link_change(True, False)
+        watcher._announce_link_change(False, True)
+        self.assertEqual(['funk_verloren', 'funk_zurueck'], watcher.voice.keys)
+
+    def test_gleicher_stand_sagt_nichts(self):
+        """``refresh`` laeuft im Sekundentakt durch."""
+        watcher = self._watcher()
+        watcher._announce_link_change(True, True)   # erster Befund
+        watcher._announce_link_change(True, True)
+        self.assertEqual([], watcher.voice.keys)
 
 if __name__ == '__main__':
     unittest.main()
