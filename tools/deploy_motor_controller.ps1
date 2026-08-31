@@ -26,7 +26,12 @@ param(
     #   -Jump ugvtunnel@schloss.fdog.de:2224 -HostName 127.0.0.1 -Port 12222
     #
     # Steht das Fahrzeug im LAN, bleibt der Schalter weg.
-    [string]$Jump = ""
+    [string]$Jump = "",
+    # Die Sprachansagen wiegen das Siebenfache des uebrigen Pakets und aendern
+    # sich fast nie. Sie gehen deshalb nur mit, wenn sie angefordert werden -
+    # oder wenn auf dem Fahrzeug ueberhaupt keine liegen. Ein Abgleich am Ende
+    # sagt, wenn sie auseinandergelaufen sind.
+    [switch]$Audio
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,17 +88,17 @@ Invoke-Step "Prepare remote staging directory" {
 # Viertelstunde: Das Paket wiegt roh 6,1 MB, wovon 3 MB kompilierter
 # Bytecode sind, den der Pi ohnehin neu erzeugt, und rund 1 MB eine
 # eingefrorene Planaufzeichnung fuer die Tests. Gepackt und ohne
-# __pycache__ bleiben davon gut 3,4 MB.
+# __pycache__ bleiben davon knapp 500 KB.
 #
-# Den Loewenanteil daran tragen die Sprachansagen in audio/: WAV laesst sich
-# kaum packen, ohne sie waeren es 500 KB. Sie aendern sich fast nie, ein
-# Ausrollvorgang schiebt sie aber jedes Mal mit - wenn das ueber Mobilfunk
-# einmal stoert, ist ihr Ausschluss der erste Griff.
+# Die Sprachansagen in audio/ sind hier ausgenommen: WAV laesst sich kaum
+# packen, mit ihnen waere das Paket 3,4 MB schwer - bei jedem einzelnen
+# Ausrollvorgang, obwohl sie sich fast nie aendern. Sie gehen ueber -Audio
+# ihren eigenen Weg.
 #
 # Die Tests bleiben bewusst drin - sonst laeuft `-RemoteTests` ins Leere,
 # wenn es doch einmal gebraucht wird.
 Invoke-Step "Upload motor-controller package, template, and static assets" {
-    tar -czf $localPackageTar --exclude=__pycache__ -C "raspberry_pi/motor_controller" .
+    tar -czf $localPackageTar --exclude=__pycache__ --exclude=./audio -C "raspberry_pi/motor_controller" .
     if ($LASTEXITCODE -ne 0) { throw "Packing the motor-controller package failed" }
     tar -czf $localStaticTar -C "raspberry_pi/static" .
     if ($LASTEXITCODE -ne 0) { throw "Packing the static assets failed" }
@@ -148,7 +153,9 @@ mkdir -p /home/$User/backup
 sudo cp -a $remoteApp "`$backup"
 sudo cp -a /etc/systemd/system/motor-controller-v2.service "/home/$User/backup/motor-controller-v2_`$ts.service" 2>/dev/null || true
 sudo systemctl stop motor-controller-v2.service || true
-sudo find $remoteApp -mindepth 1 -maxdepth 1 ! -name config.yaml -exec rm -rf {} +
+# audio/ steht nicht im Paket und ueberlebt deshalb wie die Konfiguration:
+# ohne diese Ausnahme loeschte ausgerechnet der Ausrollvorgang die Ansagen.
+sudo find $remoteApp -mindepth 1 -maxdepth 1 ! -name config.yaml ! -name audio -exec rm -rf {} +
 sudo cp -a $remoteTmp/. $remoteApp/
 sudo rm -f $remoteApp/index.html
 mkdir -p $remoteTemplates $remoteApp/web/templates
@@ -225,6 +232,83 @@ Invoke-Step "Install, verify, and restart on remote" {
 
 Invoke-Step "Check recent service errors" {
     ssh -4 @jumpArgs @sshPort $remote "journalctl -u motor-controller-v2.service --since '2 minutes ago' --no-pager -p err..alert || true"
+}
+
+# ---------------------------------------------------------------------------
+# Sprachansagen
+#
+# Sie liegen im selben Verzeichnis wie der Code, gehoeren aber nicht in
+# denselben Rhythmus: unveraenderte 3,4 MB bei jedem Ausrollvorgang ueber eine
+# SIM-Karte sind reine Verschwendung. Deshalb gehen sie nur mit, wenn sie
+# angefordert werden - oder wenn auf dem Fahrzeug gar keine liegen, denn ein
+# stummes Fahrzeug ohne Hinweis waere die schlechteste Ueberraschung.
+# ---------------------------------------------------------------------------
+
+$localAudioDir = Join-Path $repoRoot "raspberry_pi/motor_controller/audio"
+$remoteAudioDir = "$remoteApp/audio"
+$remoteAudioTar = "/tmp/ugv_deploy_audio.tar.gz"
+$localAudioTar = Join-Path ([System.IO.Path]::GetTempPath()) "ugv_deploy_audio.tar.gz"
+
+function Get-LocalAudioIndex {
+    if (-not (Test-Path $localAudioDir)) { return @{} }
+    $index = @{}
+    Get-ChildItem "$localAudioDir/*.wav" | ForEach-Object {
+        $index[$_.Name] = (Get-FileHash $_.FullName -Algorithm MD5).Hash.ToLower()
+    }
+    return $index
+}
+
+function Get-RemoteAudioIndex {
+    # Fehlt das Verzeichnis, kommt eine leere Liste zurueck - kein Fehler:
+    # genau das ist der Fall der Erstinstallation.
+    $out = ssh -4 @jumpArgs @sshPort $remote "cd $remoteAudioDir 2>/dev/null && md5sum *.wav 2>/dev/null || true"
+    $index = @{}
+    foreach ($line in ($out -split "`n")) {
+        $line = $line.Trim()
+        if ($line -match '^([0-9a-f]{32})\s+(.+)$') {
+            $index[$Matches[2]] = $Matches[1]
+        }
+    }
+    return $index
+}
+
+$localAudio = Get-LocalAudioIndex
+$remoteAudio = Get-RemoteAudioIndex
+$fehlend = @($localAudio.Keys | Where-Object { -not $remoteAudio.ContainsKey($_) })
+$abweichend = @($localAudio.Keys | Where-Object {
+    $remoteAudio.ContainsKey($_) -and $remoteAudio[$_] -ne $localAudio[$_]
+})
+$ueberzaehlig = @($remoteAudio.Keys | Where-Object { -not $localAudio.ContainsKey($_) })
+
+# Ein Fahrzeug ganz ohne Ansagen bekommt sie ungefragt: sonst schwiege es,
+# und der Grund stuende nur in dieser Zeile hier.
+$erstinstallation = ($remoteAudio.Count -eq 0) -and ($localAudio.Count -gt 0)
+
+if ($Audio -or $erstinstallation) {
+    if ($erstinstallation -and -not $Audio) {
+        Write-Host ""
+        Write-Host "Auf dem Fahrzeug liegen keine Ansagen - sie gehen einmalig mit." -ForegroundColor Yellow
+    }
+    Invoke-Step "Upload voice announcements" {
+        tar -czf $localAudioTar -C "raspberry_pi/motor_controller/audio" .
+        if ($LASTEXITCODE -ne 0) { throw "Packing the announcements failed" }
+        scp -4 @jumpArgs @scpPort "$localAudioTar" "${remote}:$remoteAudioTar"
+        if ($LASTEXITCODE -ne 0) { throw "Announcement upload failed" }
+        # Erst raeumen, dann auspacken: eine umbenannte Ansage bliebe sonst als
+        # Leiche liegen und der Abgleich meldete sie bei jedem Lauf.
+        ssh -4 @jumpArgs @sshPort $remote "rm -rf $remoteAudioDir && mkdir -p $remoteAudioDir && tar -xzf $remoteAudioTar -C $remoteAudioDir && rm -f $remoteAudioTar && ls $remoteAudioDir/*.wav | wc -l | xargs -I{} echo '{} Ansagen auf dem Fahrzeug'"
+    }
+    Remove-Item -Force -ErrorAction SilentlyContinue $localAudioTar
+} elseif ($fehlend.Count -or $abweichend.Count -or $ueberzaehlig.Count) {
+    Write-Host ""
+    Write-Host "Die Sprachansagen sind auseinandergelaufen:" -ForegroundColor Yellow
+    if ($fehlend.Count)     { Write-Host ("  fehlen auf dem Fahrzeug: " + ($fehlend -join ", ")) }
+    if ($abweichend.Count)  { Write-Host ("  weichen ab: " + ($abweichend -join ", ")) }
+    if ($ueberzaehlig.Count){ Write-Host ("  nur auf dem Fahrzeug: " + ($ueberzaehlig -join ", ")) }
+    Write-Host "  Mit -Audio ausrollen, um sie anzugleichen." -ForegroundColor Yellow
+} else {
+    Write-Host ""
+    Write-Host "Sprachansagen unveraendert ($($localAudio.Count) Dateien) - nicht uebertragen." -ForegroundColor DarkGray
 }
 
 Remove-Item -Force -ErrorAction SilentlyContinue $localPackageTar, $localStaticTar
