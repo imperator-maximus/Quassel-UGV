@@ -272,6 +272,70 @@ class PayloadTests(unittest.TestCase):
         )
 
 
+class HeadingJumpTests(unittest.TestCase):
+    """Der Vorfall vom 31.08., 15:03: der Empfaenger erfindet einen Kurs.
+
+    Das Fahrzeug fuhr seine Bahn mit 0,3 Grad Fehler und 1 cm Querabstand,
+    dann lieferte der UM982 drei Posen lang ein rohes Heading von 0,0 mit
+    gueltiger Kennung - mit dem Baseline-Offset exakt Kurs 90,0. Der Regler
+    stoppte mit heading_block (+67,2 Grad), die Planausfuehrung rangierte
+    nach dem erfundenen Kurs, und als der echte eine Sekunde spaeter zurueck
+    war, stand das Manoever 80,5 Grad quer. parse_heading kann das nicht
+    abfangen, der Satz ist formal gueltig - nur die Physik kann es: kein
+    Fahrzeug dreht 90 Grad in 0,2 Sekunden.
+    """
+
+    def test_der_erfundene_kurs_haelt_die_ganze_pose_zurueck(self):
+        source, _ = build_source()
+        self.assertIsNotNone(source._build_payload())
+
+        # Der Empfaenger springt auf roh 0,0 ("gueltig"): resolved 90,0.
+        source.gps.status['heading'] = 0.0
+        self.assertIsNone(source._build_payload())
+        self.assertEqual(source.get_status()['suppressed_heading_jump'], 1)
+
+    def test_nach_dem_aussetzer_geht_es_ohne_verzoegerung_weiter(self):
+        source, _ = build_source()
+        source._build_payload()
+        source.gps.status['heading'] = 0.0
+        source._build_payload()
+        source._build_payload()
+
+        # Der echte Kurs ist zurueck: sofort wieder eine volle Pose.
+        source.gps.status['heading'] = 268.47
+        payload = source._build_payload()
+        self.assertIsNotNone(payload)
+        self.assertAlmostEqual(payload['heading'], 358.47, places=2)
+
+    def test_normales_drehen_bleibt_unangetastet(self):
+        """Der Ausrichtbogen dreht mit 2,6 Grad/s - weit unter der Schranke."""
+        source, _ = build_source()
+        heading = 268.47
+        for _ in range(10):
+            source.gps.status['heading'] = heading
+            self.assertIsNotNone(source._build_payload())
+            heading = (heading + 4.0) % 360.0
+
+    def test_eine_echte_drehung_wird_mit_der_zeit_angenommen(self):
+        """Umgesetzt oder getragen: der neue Kurs ist irgendwann die Wahrheit."""
+        import time as time_module
+        source, _ = build_source()
+        source._build_payload()
+
+        source.gps.status['heading'] = 88.47  # 180 Grad gedreht
+        self.assertIsNone(source._build_payload())
+
+        # Nach genuegend Zeit waechst die Schranke ueber den Sprung hinaus.
+        source._accepted_heading_monotonic = time_module.monotonic() - 10.0
+        self.assertIsNotNone(source._build_payload())
+
+    def test_der_erste_kurs_wird_immer_angenommen(self):
+        source, _ = build_source(heading=0.0)
+        payload = source._build_payload()
+        self.assertIsNotNone(payload)
+        self.assertAlmostEqual(payload['heading'], 90.0, places=2)
+
+
 class StatusTests(unittest.TestCase):
     def test_status_meldet_die_lokale_quelle(self):
         source, _ = build_source()

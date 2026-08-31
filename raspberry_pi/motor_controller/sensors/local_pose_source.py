@@ -83,10 +83,27 @@ class LocalPoseSource:
             )
             self.bridge = GPSNTRIPBridge(self.gps, self.ntrip)
 
+        # Plausibilitaetsschranke fuer den Kurs: wie schnell er sich pro
+        # Sekunde hoechstens aendern darf, plus ein Sockel fuer Messrauschen.
+        # Das Fahrzeug dreht gemessen mit 2,9 Grad/s bei vollem Lenkbefehl
+        # (02.08.) und im Ausrichtbogen mit 2,6 Grad/s (29,7 auf 1,3 Grad in
+        # 11 s, 25.07.) - 20 Grad/s sind das Siebenfache. Alles darueber hat
+        # das Fahrzeug nicht gefahren, das hat der Empfaenger erfunden.
+        self._heading_jump_base_deg = max(
+            5.0, float(getattr(config, 'gps_heading_jump_base_deg', 10.0))
+        )
+        self._heading_jump_rate_dps = max(
+            5.0, float(getattr(config, 'gps_heading_jump_rate_dps', 20.0))
+        )
+        self._accepted_heading_deg: Optional[float] = None
+        self._accepted_heading_monotonic = 0.0
+        self._heading_jump_started_monotonic: Optional[float] = None
+
         # Zaehler fuer Oberflaeche und Fehlersuche
         self._packets_published = 0
         self._suppressed_stale_fix = 0
         self._suppressed_no_heading = 0
+        self._suppressed_heading_jump = 0
         self._last_published_monotonic = 0.0
         self._last_error: Optional[str] = None
         self._last_heading_source = 'unknown'
@@ -208,6 +225,17 @@ class LocalPoseSource:
         )
         heading_deg = heading_info.get('heading_deg')
 
+        if heading_deg is not None and not self._heading_plausible(heading_deg):
+            # Die ganze Pose zurueckhalten, nicht nur den Kurs. Eine Pose
+            # ohne Kurs gilt dem PoseCache weiter als "online" - dann laeuft
+            # der Plan gegen den Navigations-Watchdog statt in die Fahrpause.
+            # Bleibt die Pose ganz aus, pausiert die zentrale Safety-Logik
+            # nach pose.pause_timeout_s (1 s) und setzt von selbst fort.
+            # Ausserdem steckt der Kurs in der Hebelarm-Korrektur: mit einem
+            # um 67 Grad falschen Kurs stuende auch die Position gut einen
+            # halben Meter daneben.
+            return None
+
         if heading_deg is None:
             with self._lock:
                 self._suppressed_no_heading += 1
@@ -268,6 +296,65 @@ class LocalPoseSource:
         if bridge is not None:
             bridge.set_voice(voice)
 
+    def _heading_plausible(self, heading_deg: float) -> bool:
+        """Verwirft Kursspruenge, die das Fahrzeug nicht gefahren haben kann.
+
+        Der UM982 liefert beim Neuaufbau seiner Heading-Loesung kurzzeitig
+        0,0 mit gueltiger Kennung; der Baseline-Offset von 90 Grad macht
+        daraus einen Kurs von exakt 90,0. Real am 31.08. um 15:03: das
+        Fahrzeug fuhr seine Bahn mit 0,3 Grad Fehler und 1 cm Querabstand,
+        dann stand der Kurs drei Posen lang auf 90,0 - der Regler stoppte mit
+        heading_block (+67,2 Grad), die Planausfuehrung baute aus dem
+        erfundenen Kurs ein Rangiermanoever, und als der echte Kurs eine
+        Sekunde spaeter zurueck war, stand das Manoever 80,5 Grad quer und
+        der Plan war tot. parse_heading kann das nicht abfangen: der Satz
+        selbst ist formal gueltig.
+
+        Massstab ist deshalb die Physik. Erlaubt ist Sockel plus Rate mal
+        Zeit seit dem letzten angenommenen Kurs. Dreht sich das Fahrzeug
+        wirklich (umgesetzt, getragen), waechst die Schranke von selbst, bis
+        der neue Kurs angenommen wird - bei 180 Grad nach gut 8 s. Solange
+        die Pose fehlt, haelt die zentrale Safety-Logik den Plan an und setzt
+        automatisch fort; ein Empfaenger-Aussetzer von 1-2 s wird damit zur
+        kurzen Fahrpause statt zum Planabbruch.
+        """
+        now = time.monotonic()
+        with self._lock:
+            reference = self._accepted_heading_deg
+            reference_time = self._accepted_heading_monotonic
+        if reference is not None:
+            dt = max(0.0, now - reference_time)
+            allowed = self._heading_jump_base_deg + self._heading_jump_rate_dps * dt
+            difference = abs(
+                (float(heading_deg) - reference + 180.0) % 360.0 - 180.0
+            )
+            if difference > allowed:
+                with self._lock:
+                    self._suppressed_heading_jump += 1
+                    episode_start = self._heading_jump_started_monotonic
+                    if episode_start is None:
+                        self._heading_jump_started_monotonic = now
+                if episode_start is None:
+                    self.logger.warning(
+                        "GNSS-Kurs springt von %.1f auf %.1f Grad "
+                        "(%.1f Grad in %.2f s, erlaubt %.1f) - "
+                        "Pose wird zurueckgehalten",
+                        reference, float(heading_deg), difference, dt, allowed,
+                    )
+                return False
+        with self._lock:
+            episode_start = self._heading_jump_started_monotonic
+            self._heading_jump_started_monotonic = None
+            self._accepted_heading_deg = float(heading_deg)
+            self._accepted_heading_monotonic = now
+        if episode_start is not None:
+            self.logger.info(
+                "GNSS-Kurs wieder plausibel bei %.1f Grad "
+                "(%.2f s zurueckgehalten)",
+                float(heading_deg), now - episode_start,
+            )
+        return True
+
     def get_status(self) -> Dict[str, Any]:
         """Detailstatus fuer Oberflaeche und Diagnose.
 
@@ -281,6 +368,7 @@ class LocalPoseSource:
             packets = self._packets_published
             suppressed_fix = self._suppressed_stale_fix
             suppressed_heading = self._suppressed_no_heading
+            suppressed_jump = self._suppressed_heading_jump
             last_error = self._last_error
             heading_source = self._last_heading_source
 
@@ -297,6 +385,7 @@ class LocalPoseSource:
             'packets_received': packets,
             'suppressed_stale_fix': suppressed_fix,
             'suppressed_no_heading': suppressed_heading,
+            'suppressed_heading_jump': suppressed_jump,
             'heading_source': heading_source,
             'heading_offset_deg': self._heading_offset_deg,
             'geometry_loaded': self._geometry is not None,
