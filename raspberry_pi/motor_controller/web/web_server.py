@@ -544,6 +544,25 @@ class WebServer:
             }
             return jsonify(payload), (200 if success else 409)
         
+        @self.app.route('/api/battery/reset', methods=['POST'])
+        def api_battery_reset():
+            """Setzt den Ladezustand auf voll, nachdem getauscht oder geladen wurde.
+
+            Der Junctek zaehlt Amperestunden in seinen eigenen Speicher und
+            merkt von einem Batteriewechsel nichts - er zeigt danach denselben
+            Stand wie vorher. Zurueckstellen laesst er sich von hier aus nicht,
+            das Schreibprotokoll ist unbekannt. Also wird der Nullpunkt auf
+            dieser Seite gesetzt, und zwar von hier aus statt am Fahrzeug.
+            """
+            if not self.battery or not getattr(self.battery.config, 'enabled', False):
+                return jsonify({
+                    'success': False,
+                    'error': 'Batterieueberwachung ist nicht aktiv',
+                }), 503
+            result = self.battery.reset_charge_level()
+            result['battery_status'] = self.battery.get_status()
+            return jsonify(result), (200 if result.get('success') else 409)
+
         @self.app.route('/api/odrive/clear-errors', methods=['POST'])
         def api_odrive_clear_errors():
             """Loescht ODrive-Fehler auf ausdrueckliche Anweisung.

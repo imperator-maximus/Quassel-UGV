@@ -117,6 +117,11 @@ battery:
   enabled: false
   address: ''                # BLE-MAC, z.B. E4:66:E5:60:FB:1C
   capacity_ah: 50.0          # Muss dem AH.Preset am Geraet entsprechen
+  # Der Zaehler zaehlt Amperestunden in seinen eigenen Speicher und merkt von
+  # getauschten oder geladenen Akkus nichts - er zaehlt vom alten Stand weiter.
+  # Beschreiben laesst er sich nicht, deshalb liegt der Stand, der "voll"
+  # bedeutet, in dieser Datei. Ohne Pfad bleibt der Knopf im Web-UI wirkungslos.
+  zero_point_path: /home/imperator/ugvtestpi/battery_zero_point.json
   warn_percent: 30.0         # Nur Warnung im Web-UI
   mow_stop_percent: 25.0     # Maehdeck aus - der groesste Verbraucher zuerst
   drive_stop_percent: 20.0   # Fahrt beenden

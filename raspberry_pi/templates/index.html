@@ -1123,7 +1123,7 @@
                 <div class="status-dot" id="safetyStatus"></div>
                 <span id="safetyStatusText">Safety</span>
             </div>
-            <div class="status-indicator" id="batteryIndicator">
+            <div class="status-indicator" id="batteryIndicator" onclick="resetBatteryLevel()" style="cursor: pointer;">
                 <div class="status-dot" id="batteryStatus"></div>
                 <span id="batteryStatusText">Batterie …</span>
             </div>
@@ -1613,7 +1613,10 @@
         // Funkstrecke aus, bleibt der letzte Wert stehen und wird als veraltet
         // markiert - er springt nicht auf null, weil sich ein Ladezustand ueber
         // Minuten bewegt und nicht ueber Sekunden.
+        let lastBatteryStatus = {};
+
         function updateBatteryStatus(battery) {
+            lastBatteryStatus = battery || {};
             const dot = document.getElementById('batteryStatus');
             const text = document.getElementById('batteryStatusText');
             const indicator = document.getElementById('batteryIndicator');
@@ -1649,6 +1652,13 @@
 
             const lines = [];
             lines.push(battery.connected ? 'Verbunden' : 'Nicht verbunden');
+            if (battery.soc_source === 'meter') {
+                lines.push('Roher Zählerstand — nach einem Batteriewechsel zu niedrig. '
+                           + 'Klicken, um voll zu melden.');
+            } else if (battery.soc_source === 'zero_point' && battery.zero_point) {
+                const gesetzt = new Date(battery.zero_point.timestamp * 1000);
+                lines.push(`Voll gemeldet am ${gesetzt.toLocaleString('de-DE')}`);
+            }
             if (battery.remaining_ah != null) {
                 lines.push(`Rest ${battery.remaining_ah.toFixed(3)} Ah von ${battery.capacity_ah} Ah`);
             }
@@ -1891,6 +1901,36 @@
                     updateNetworkStatus(data.network_status || {});
                 })
                 .catch(error => alert('Netzwechsel fehlgeschlagen: ' + error.message));
+        }
+
+        // Der Zähler weiß nichts von einem Batteriewechsel und zählt vom alten
+        // Stand weiter. Hier wird ihm gesagt, dass jetzt voll ist.
+        function resetBatteryLevel() {
+            const battery = lastBatteryStatus || {};
+            if (!battery.enabled) {
+                return;
+            }
+            const stand = battery.soc_percent == null
+                ? 'Der Zähler steht derzeit auf einem unbekannten Wert.'
+                : `Der Zähler steht auf ${battery.soc_percent.toFixed(0)} %.`;
+            if (!confirm('Batterie als voll melden?\n\n' + stand + '\n\n' +
+                         'Der Junctek zählt nur Amperestunden über den Shunt und ' +
+                         'merkt von getauschten oder geladenen Akkus nichts — er ' +
+                         'zählt vom alten Stand weiter. Nur bestätigen, wenn die ' +
+                         'Batterien wirklich voll sind: ab jetzt gilt der aktuelle ' +
+                         'Zählerstand als 100 %.')) {
+                return;
+            }
+            fetch('/api/battery/reset', { method: 'POST' })
+                .then(async response => {
+                    const data = await response.json();
+                    if (!response.ok || !data.success) {
+                        throw new Error(data.error || 'Nullpunkt nicht gesetzt');
+                    }
+                    updateBatteryStatus(data.battery_status || {});
+                    fetchStatus();
+                })
+                .catch(error => alert('Batterie zurücksetzen fehlgeschlagen: ' + error.message));
         }
 
         function resetSafetyStop() {

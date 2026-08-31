@@ -8,6 +8,7 @@ pure logic, so the whole wire format is covered without any hardware.
 import asyncio
 import logging
 import sys
+import tempfile
 import time
 import types
 import unittest
@@ -318,6 +319,134 @@ class BatteryMonitorCallbackTest(unittest.TestCase):
         self.drive_soc(50.0)
         self.drive_soc(28.0)
         self.assertEqual([event[0] for event in self.events], ['warn', 'warn'])
+
+
+class BatteryZeroPointTest(unittest.TestCase):
+    """Der Nullpunkt, mit dem ein Batteriewechsel in der Anzeige ankommt."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / 'zero.json'
+
+    def build(self, discharged_ah=None, remaining_ah=None, age_s=0.0, **overrides):
+        monitor = BatteryMonitor(
+            make_config(zero_point_path=str(self.path), **overrides)
+        )
+        werte = {}
+        if discharged_ah is not None:
+            werte['discharged_ah'] = discharged_ah
+        if remaining_ah is not None:
+            werte['remaining_ah'] = remaining_ah
+        monitor._values = werte
+        if werte:
+            monitor._last_frame_monotonic = time.monotonic() - age_s
+        return monitor
+
+    def test_without_zero_point_the_meter_value_stands(self):
+        monitor = self.build(discharged_ah=30.0, remaining_ah=20.0)
+        status = monitor.get_status()
+        self.assertEqual(status['soc_percent'], 40.0)
+        self.assertEqual(status['soc_source'], 'meter')
+        self.assertIsNone(status['zero_point'])
+
+    def test_reset_declares_the_current_reading_full(self):
+        monitor = self.build(discharged_ah=30.0, remaining_ah=20.0)
+        result = monitor.reset_charge_level()
+        self.assertTrue(result['success'], result.get('error'))
+        status = monitor.get_status()
+        self.assertEqual(status['soc_percent'], 100.0)
+        self.assertEqual(status['soc_source'], 'zero_point')
+
+    def test_charge_falls_with_consumption_after_the_reset(self):
+        monitor = self.build(discharged_ah=30.0, remaining_ah=20.0)
+        monitor.reset_charge_level()
+        # 5 Ah aus 50 Ah verbraucht.
+        monitor._values['discharged_ah'] = 35.0
+        self.assertEqual(monitor.get_status()['soc_percent'], 90.0)
+
+    def test_charge_keeps_falling_past_the_meter_floor(self):
+        """Der eigentliche Grund fuer den Verbrauchszaehler als Grundlage.
+
+        Der Zaehler klemmt seine Restkapazitaet bei null fest. Haenge man den
+        Nullpunkt daran, bliebe die Anzeige genau dann stehen, wenn die
+        Batterie leer wird - und die Abschaltungen kaemen nie.
+        """
+        monitor = self.build(discharged_ah=40.0, remaining_ah=10.0)
+        monitor.reset_charge_level()
+        monitor._values['discharged_ah'] = 85.0   # 45 Ah verbraucht
+        monitor._values['remaining_ah'] = 0.0     # Zaehler steht am Anschlag
+        status = monitor.get_status()
+        self.assertEqual(status['soc_percent'], 10.0)
+        self.assertEqual(status['level'], 'critical')
+        self.assertFalse(monitor.drive_allowed())
+
+    def test_charging_beyond_the_zero_point_stays_at_full(self):
+        monitor = self.build(discharged_ah=30.0, remaining_ah=20.0)
+        monitor.reset_charge_level()
+        monitor._values['discharged_ah'] = 28.0
+        self.assertEqual(monitor.get_status()['soc_percent'], 100.0)
+
+    def test_zero_point_survives_a_restart(self):
+        monitor = self.build(discharged_ah=30.0, remaining_ah=20.0)
+        monitor.reset_charge_level()
+        # Der Batteriewechsel nimmt dem Fahrzeug die Versorgung; danach laeuft
+        # ein neuer Prozess gegen denselben weiterzaehlenden Zaehler.
+        neu = self.build(discharged_ah=32.0, remaining_ah=18.0)
+        status = neu.get_status()
+        self.assertEqual(status['soc_source'], 'zero_point')
+        self.assertEqual(status['soc_percent'], 96.0)
+
+    def test_reset_refuses_on_a_stale_reading(self):
+        monitor = self.build(discharged_ah=30.0, remaining_ah=20.0, age_s=600.0)
+        result = monitor.reset_charge_level()
+        self.assertFalse(result['success'])
+        self.assertIn('aktuelle', result['error'].lower())
+        self.assertFalse(self.path.exists())
+
+    def test_reset_refuses_without_a_consumption_value(self):
+        monitor = self.build(remaining_ah=20.0)
+        result = monitor.reset_charge_level()
+        self.assertFalse(result['success'])
+        self.assertFalse(self.path.exists())
+
+    def test_reset_needs_a_configured_path(self):
+        monitor = BatteryMonitor(make_config())
+        monitor._values = {'discharged_ah': 30.0, 'remaining_ah': 20.0}
+        monitor._last_frame_monotonic = time.monotonic()
+        result = monitor.reset_charge_level()
+        self.assertFalse(result['success'])
+        self.assertFalse(monitor.get_status()['can_reset'])
+
+    def test_reset_rearms_the_warnings(self):
+        monitor = self.build(discharged_ah=45.0, remaining_ah=5.0)
+        events = []
+        monitor.set_low_battery_callback(lambda level, soc: events.append(level))
+        monitor._check_thresholds(monitor._state_of_charge(monitor._values))
+        self.assertIn('critical', events)
+        monitor.reset_charge_level()
+        events.clear()
+        monitor._values['discharged_ah'] = 90.0  # wieder 45 Ah verbraucht
+        monitor._check_thresholds(monitor._state_of_charge(monitor._values))
+        self.assertIn('critical', events)
+
+    def test_replaced_meter_falls_back_instead_of_lying(self):
+        monitor = self.build(discharged_ah=80.0, remaining_ah=20.0)
+        monitor.reset_charge_level()
+        # Ein zurueckgesetzter oder getauschter Zaehler faengt von vorn an.
+        # Sein Stand und der Nullpunkt haben nichts mehr miteinander zu tun.
+        monitor._values['discharged_ah'] = 1.0
+        monitor._values['remaining_ah'] = 49.0
+        status = monitor.get_status()
+        self.assertEqual(status['soc_source'], 'meter')
+        self.assertEqual(status['soc_percent'], 98.0)
+
+    def test_broken_file_does_not_kill_the_monitor(self):
+        self.path.write_text('{kaputt', encoding='utf-8')
+        monitor = self.build(discharged_ah=30.0, remaining_ah=20.0)
+        status = monitor.get_status()
+        self.assertEqual(status['soc_source'], 'meter')
+        self.assertEqual(status['soc_percent'], 40.0)
 
 
 if __name__ == '__main__':

@@ -188,6 +188,12 @@ class BatteryConfig:
     address: str = ''
     notify_uuid: str = '0000ffe1-0000-1000-8000-00805f9b34fb'
     capacity_ah: float = 50.0
+    # Nullpunkt des Ladezustands. Der Zähler zählt in seinem eigenen Speicher
+    # weiter und merkt nichts davon, wenn die Batterien getauscht oder geladen
+    # wurden - beschreiben lässt er sich von hier aus nicht. Deshalb wird der
+    # Stand, der "voll" bedeutet, auf dieser Seite festgehalten. Die Datei
+    # überlebt den Neustart, den ein Batteriewechsel ohnehin auslöst.
+    zero_point_path: str = ''
     warn_percent: float = 30.0
     mow_stop_percent: float = 25.0
     drive_stop_percent: float = 20.0

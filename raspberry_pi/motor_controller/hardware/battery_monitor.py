@@ -19,14 +19,24 @@ derived from the observed traffic, and a wrong guess would silently discard
 good frames. Frames are validated structurally instead - correct framing,
 valid BCD, known tags, plausible ranges - and the power field cross-checks
 voltage times current.
+
+The same unknown checksum is why the charge level is zeroed on this side
+rather than in the meter. The meter counts coulombs into its own memory and
+has no idea that the batteries were swapped or charged; it simply carries on
+from where it left off, which is why a fresh pack shows the old percentage.
+Telling it otherwise would mean writing frames we cannot form. So the reading
+that means "full" is recorded here instead - see ``reset_charge_level`` - and
+the state of charge is measured against it.
 """
 
 import asyncio
+import json
 import logging
 import subprocess
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional, Tuple
 
 FRAME_START = 0xBB
 FRAME_END = 0xEE
@@ -156,6 +166,11 @@ class BatteryMonitor:
         # Sprachansagen am Fahrzeug, optional.
         self.voice = None
 
+        # Der Zaehlerstand, der "voll" bedeutet. None heisst: noch keiner
+        # gesetzt, dann gilt der Wert des Zaehlers unveraendert.
+        self._zero_point: Optional[Dict[str, Any]] = self._load_zero_point()
+        self._zero_point_mismatch_logged = False
+
     # ------------------------------------------------------------------ API
 
     def set_voice(self, voice) -> None:
@@ -205,11 +220,12 @@ class BatteryMonitor:
             connected = self._connected
             error = self._last_error
             frames = self._frame_count
+            zero_point = None if self._zero_point is None else dict(self._zero_point)
 
         age_s = None if last is None else round(time.monotonic() - last, 2)
         fresh = age_s is not None and age_s <= float(self.config.stale_timeout_s)
 
-        soc = self._state_of_charge(values)
+        soc, soc_source = self._state_of_charge_with_source(values)
         status: Dict[str, Any] = {
             "enabled": bool(getattr(self.config, "enabled", False)),
             "connected": connected,
@@ -220,6 +236,12 @@ class BatteryMonitor:
             "capacity_ah": round(float(self.config.capacity_ah), 3),
             "soc_percent": soc,
             "level": self._level(soc, fresh),
+            # Woher die Prozentzahl kommt: "zero_point" heisst, sie zaehlt vom
+            # gesetzten Nullpunkt ab; "meter" heisst, sie ist der ungefilterte
+            # Stand des Zaehlers und damit nach einem Wechsel schlicht falsch.
+            "soc_source": soc_source,
+            "zero_point": zero_point,
+            "can_reset": bool(self._zero_point_file() is not None),
         }
         for key in (
             "voltage_v",
@@ -232,6 +254,59 @@ class BatteryMonitor:
         ):
             status[key] = values.get(key)
         return status
+
+    def reset_charge_level(self) -> Dict[str, Any]:
+        """Erklaert den aktuellen Zaehlerstand zu "voll".
+
+        Nach einem Batteriewechsel oder einer Ladung steht der Zaehler noch
+        auf dem alten Verbrauch - er misst keinen Ladezustand, er zaehlt nur
+        Amperestunden ueber den Shunt und weiss von dem Wechsel nichts. Hier
+        wird festgehalten, welcher Stand ab jetzt 100 % bedeutet; der
+        Ladezustand ist von da an der Verbrauch seit diesem Punkt.
+
+        Verweigert wird das bei altem Messwert: Einen Nullpunkt auf einen
+        Stand zu setzen, der von vor dem Wechsel stammt, waere schlechter als
+        gar keiner - die Anzeige saehe danach richtig aus und waere es nicht.
+        """
+        with self._lock:
+            values = dict(self._values)
+            last = self._last_frame_monotonic
+
+        age_s = None if last is None else time.monotonic() - last
+        if age_s is None or age_s > float(self.config.stale_timeout_s):
+            return {
+                'success': False,
+                'error': 'Kein aktueller Messwert vom Zaehler - bitte warten, '
+                         'bis die Batterieanzeige wieder lebt',
+            }
+        discharged = values.get('discharged_ah')
+        if discharged is None:
+            return {
+                'success': False,
+                'error': 'Der Zaehler hat noch keinen Verbrauchswert gesendet',
+            }
+
+        zero_point = {
+            'discharged_ah': float(discharged),
+            'remaining_ah': values.get('remaining_ah'),
+            'capacity_ah': float(self.config.capacity_ah),
+            'timestamp': time.time(),
+        }
+        gespeichert, fehler = self._save_zero_point(zero_point)
+        if not gespeichert:
+            return {'success': False, 'error': fehler}
+
+        with self._lock:
+            self._zero_point = zero_point
+            # Ein voller Akku darf nicht die Warnungen des leeren erben.
+            self._notified_levels = set()
+        self._zero_point_mismatch_logged = False
+        self.logger.info(
+            "Batterie-Nullpunkt gesetzt: %.3f Ah Verbrauch entspricht ab jetzt "
+            "100 %% von %.1f Ah",
+            zero_point['discharged_ah'], zero_point['capacity_ah'],
+        )
+        return {'success': True, 'error': None, 'zero_point': dict(zero_point)}
 
     def mowing_allowed(self) -> bool:
         """False once the pack can no longer afford the mower deck.
@@ -259,12 +334,110 @@ class BatteryMonitor:
 
     # -------------------------------------------------------------- internals
 
-    def _state_of_charge(self, values: Dict[str, Any]) -> Optional[float]:
-        remaining = values.get("remaining_ah")
-        capacity = float(self.config.capacity_ah)
-        if remaining is None or capacity <= 0:
+    def _zero_point_file(self) -> Optional[Path]:
+        configured = str(getattr(self.config, "zero_point_path", "") or "").strip()
+        if not configured:
             return None
-        return round(max(0.0, min(100.0, remaining / capacity * 100.0)), 1)
+        return Path(configured)
+
+    def _load_zero_point(self) -> Optional[Dict[str, Any]]:
+        path = self._zero_point_file()
+        if path is None:
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except Exception as exc:  # noqa: BLE001 - defekte Datei darf nicht toeten
+            self.logger.warning("Batterie-Nullpunkt nicht lesbar: %s", exc)
+            return None
+        try:
+            zero_point = {
+                "discharged_ah": float(data["discharged_ah"]),
+                "remaining_ah": (
+                    None if data.get("remaining_ah") is None
+                    else float(data["remaining_ah"])
+                ),
+                "capacity_ah": float(
+                    data.get("capacity_ah", self.config.capacity_ah)
+                ),
+                "timestamp": float(data.get("timestamp", 0.0)),
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            self.logger.warning("Batterie-Nullpunkt unbrauchbar: %s", exc)
+            return None
+        self.logger.info(
+            "Batterie-Nullpunkt geladen: %.3f Ah Verbrauch entspricht 100 %%",
+            zero_point["discharged_ah"],
+        )
+        return zero_point
+
+    def _save_zero_point(self, zero_point: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """Schreibt den Nullpunkt so, dass ein Stromausfall ihn nicht zerreisst.
+
+        Ein Batteriewechsel nimmt dem Fahrzeug die Versorgung. Genau in diesem
+        Moment darf keine halb geschriebene Datei zurueckbleiben, sonst ist der
+        Nullpunkt nach dem Neustart weg oder falsch.
+        """
+        path = self._zero_point_file()
+        if path is None:
+            return False, ('Kein Speicherort fuer den Nullpunkt konfiguriert '
+                           '(battery.zero_point_path)')
+        temp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp.write_text(json.dumps(zero_point, indent=2), encoding="utf-8")
+            temp.replace(path)
+        except Exception as exc:  # noqa: BLE001 - Grund gehoert in die Antwort
+            self.logger.error("Batterie-Nullpunkt nicht speicherbar: %s", exc)
+            return False, f'Nullpunkt nicht speicherbar: {exc}'
+        return True, None
+
+    def _state_of_charge(self, values: Dict[str, Any]) -> Optional[float]:
+        soc, _ = self._state_of_charge_with_source(values)
+        return soc
+
+    def _state_of_charge_with_source(
+        self, values: Dict[str, Any]
+    ) -> Tuple[Optional[float], str]:
+        """Ladezustand und woher er stammt.
+
+        Gerechnet wird ueber den Verbrauch seit dem Nullpunkt, nicht ueber die
+        Restkapazitaet des Zaehlers mit einem Versatz darauf. Der Zaehler
+        klemmt seine Restkapazitaet bei null fest, sobald sein eigenes
+        AH-Preset aufgebraucht ist; mit einem Versatz darauf bliebe die Anzeige
+        genau dann stehen, wenn die Batterie leer wird - und Maehdeck und Fahrt
+        wuerden nie abgeschaltet. Der Verbrauchszaehler laeuft darueber hinaus
+        weiter und faellt deshalb auch weiter.
+        """
+        capacity = float(self.config.capacity_ah)
+        if capacity <= 0:
+            return None, "none"
+
+        zero_point = self._zero_point
+        discharged = values.get("discharged_ah")
+        if zero_point is not None and discharged is not None:
+            verbraucht = float(discharged) - float(zero_point["discharged_ah"])
+            if verbraucht < -capacity:
+                # Der Zaehler selbst wurde zurueckgesetzt oder ausgetauscht.
+                # Sein Stand und unser Nullpunkt haben nichts mehr miteinander
+                # zu tun, also lieber den nackten Zaehlerwert zeigen als eine
+                # Zahl, die niemand mehr belegen kann.
+                if not self._zero_point_mismatch_logged:
+                    self._zero_point_mismatch_logged = True
+                    self.logger.warning(
+                        "Batterie-Nullpunkt passt nicht mehr zum Zaehler "
+                        "(%.3f Ah gegen %.3f Ah) - bitte neu setzen",
+                        float(discharged), float(zero_point["discharged_ah"]),
+                    )
+            else:
+                anteil = (capacity - verbraucht) / capacity * 100.0
+                return round(max(0.0, min(100.0, anteil)), 1), "zero_point"
+
+        remaining = values.get("remaining_ah")
+        if remaining is None:
+            return None, "none"
+        return round(max(0.0, min(100.0, remaining / capacity * 100.0)), 1), "meter"
 
     def _level(self, soc: Optional[float], fresh: bool) -> str:
         if not fresh or soc is None:
