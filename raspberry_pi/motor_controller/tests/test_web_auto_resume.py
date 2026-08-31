@@ -227,5 +227,86 @@ class AnlaufNachUsbHaengerTests(unittest.TestCase):
         self.assertEqual([m[0] for m in notifier.meldungen], ['fault'])
 
 
+class FortsetzpunktMerktDieDrehzahlTests(unittest.TestCase):
+    """Die gespeicherte Drehzahl muss von *vor* dem Fehler stammen.
+
+    Das Maehdeck raeumt sein ``commanded_rpm`` in ``emergency_stop`` und
+    ``_request_system_stop`` sofort auf 0, und erst danach schreibt der
+    Sicherheitsstopp den Fortsetzungspunkt. Wird an dieser Stelle die 0
+    festgehalten, ueberspringt der automatische Anlauf das Deck stillschweigend
+    (seine Bedingung lautet ``rpm > 0``) - das Fahrzeug faehrt weiter und maeht
+    nicht. Genau so beobachtet am 31.08.2026.
+    """
+
+    def setUp(self):
+        self.verzeichnis = tempfile.TemporaryDirectory()
+        self.addCleanup(self.verzeichnis.cleanup)
+
+    def bauen(self):
+        mower = FakeMower()
+        server = build_server(mower=mower)
+        pfad = Path(self.verzeichnis.name) / 'Brunnen.resume.json'
+        server._resume_path = lambda _name: pfad
+        server._active_plan_map_name = 'Brunnen'
+        server._active_executable_segments = [{'type': 'mow', 'source_index': 3}]
+        server.get_plan_execution_status = lambda: {
+            'active_index': 0,
+            'current_segment': {'type': 'mow', 'source_index': 3},
+        }
+        return server, mower, pfad
+
+    def maehen_dann_stoerung(self, server, mower, rpm=2850):
+        server.mower_state = True
+        mower.commanded_rpm = rpm
+        server._save_resume_state(reason='running')
+        # Der Fehler raeumt die Drehzahl, der Sicherheitsstopp kommt danach.
+        mower.commanded_rpm = 0
+
+    def test_drehzahl_ueberlebt_den_maehdeck_fehler(self):
+        server, mower, pfad = self.bauen()
+        self.maehen_dann_stoerung(server, mower)
+        server._save_resume_state(reason='safety_stop', detail=USB_HAENGER)
+
+        inhalt = json.loads(pfad.read_text(encoding='utf-8'))
+        self.assertTrue(inhalt['mower_running'])
+        self.assertEqual(inhalt['mower_rpm'], 2850)
+
+    def test_das_deck_laeuft_danach_mit_alter_drehzahl_an(self):
+        server, mower, pfad = self.bauen()
+        self.maehen_dann_stoerung(server, mower)
+        server._save_resume_state(reason='safety_stop', detail=USB_HAENGER)
+
+        # Neustart: frisches Deck, der Fortsetzungspunkt ist alles, was bleibt.
+        neues_deck = FakeMower()
+        server.odrive_mower = neues_deck
+        with patch.object(server, 'resume_plan_execution',
+                          return_value={'success': True}):
+            server._auto_resume_worker(
+                'Brunnen', server._load_resume_state('Brunnen')
+            )
+        self.assertEqual(neues_deck.gestartet_mit, [2850])
+
+    def test_bewusst_abgeschaltetes_deck_bleibt_aus(self):
+        """Wer das Deck von Hand ausmacht, findet es nicht wieder laufend vor."""
+        server, mower, pfad = self.bauen()
+        self.maehen_dann_stoerung(server, mower)
+        server.mower_state = False
+        server._save_resume_state(reason='safety_stop', detail=USB_HAENGER)
+
+        inhalt = json.loads(pfad.read_text(encoding='utf-8'))
+        self.assertFalse(inhalt['mower_running'])
+        self.assertEqual(inhalt['mower_rpm'], 0)
+
+    def test_eine_neue_drehzahl_loest_die_alte_ab(self):
+        server, mower, pfad = self.bauen()
+        self.maehen_dann_stoerung(server, mower, rpm=2850)
+        server.mower_state = True
+        mower.commanded_rpm = 1900
+        server._save_resume_state(reason='safety_stop', detail=USB_HAENGER)
+
+        inhalt = json.loads(pfad.read_text(encoding='utf-8'))
+        self.assertEqual(inhalt['mower_rpm'], 1900)
+
+
 if __name__ == '__main__':
     unittest.main()

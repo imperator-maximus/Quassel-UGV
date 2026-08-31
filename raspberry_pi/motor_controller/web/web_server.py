@@ -159,6 +159,10 @@ class WebServer:
         # Status
         self._light_state = False
         self.mower_state = False
+        # Die zuletzt gefahrene Maehdrehzahl. Sie wird gebraucht, weil das
+        # Deck im Fehlerfall sein ``commanded_rpm`` raeumt, bevor der
+        # Fortsetzungspunkt geschrieben wird - siehe _save_resume_state.
+        self._last_mower_rpm = 0
         self._plan_lock = threading.Lock()
         self._resume_lock = threading.Lock()
         self._simulation_lock = threading.Lock()
@@ -2377,6 +2381,19 @@ class WebServer:
             ):
                 self._auto_resume_count = 0
                 self._auto_resume_anchor_index = None
+            # Die Drehzahl muss aus der Zeit *vor* dem Fehler stammen. Faellt
+            # das Maehdeck aus, raeumen ``emergency_stop`` und
+            # ``_request_system_stop`` ihr ``commanded_rpm`` sofort auf 0 - und
+            # erst danach landet der Sicherheitsstopp hier. Ohne diesen Merker
+            # stuende im Fortsetzungspunkt eine 0, der automatische Anlauf
+            # uebersprungen wegen ``rpm > 0`` still das Deck, und das Fahrzeug
+            # faehrt weiter, ohne zu maehen (beobachtet am 31.08.2026).
+            mower_lief = bool(self.mower_state)
+            rpm_jetzt = int(getattr(self.odrive_mower, 'commanded_rpm', 0) or 0)
+            if mower_lief and rpm_jetzt > 0:
+                self._last_mower_rpm = rpm_jetzt
+            mower_rpm = rpm_jetzt or (self._last_mower_rpm if mower_lief else 0)
+
             payload = {
                 'schema': 'raspberrycan.mowing_resume.v2',
                 'map_name': map_name,
@@ -2387,8 +2404,8 @@ class WebServer:
                 # Damit das Maehdeck mit derselben Drehzahl wieder anlaeuft.
                 # Beides sind einfache Attribute ohne USB-Zugriff - an dieser
                 # Stelle haengt der Transport moeglicherweise gerade.
-                'mower_rpm': int(getattr(self.odrive_mower, 'commanded_rpm', 0) or 0),
-                'mower_running': bool(self.mower_state),
+                'mower_rpm': mower_rpm,
+                'mower_running': mower_lief,
                 'auto_resume_count': int(self._auto_resume_count),
                 'timestamp': time.time(),
                 'active_index': active_index,
